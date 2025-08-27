@@ -4,7 +4,7 @@ set -e
 #set -x
 sudo apt-get install -y ethtool python-tk gdb-multiarch tcpdump python3-pip \
                         python3-venv cmake g++ build-essential libpixman-1-dev\
-                        clang-format-10
+                        clang-format
 
 sudo pip3 install virtualenv virtualenvwrapper
 
