@@ -6,7 +6,8 @@ scapy==2.4.4
 pycparser
 avatar2
 pyserial
-angr
+angr<9
+protobuf<=3.20
 deprecated
 pylint==2.13.5
 yamllint==1.26.3

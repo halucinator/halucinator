@@ -1,0 +1,110 @@
+name: Virtual Environment Regression Tests
+
+on:
+  push:
+    branches: [ $default-branch ]
+  pull_request:
+    branches: [ $default-branch ]
+
+jobs:
+
+# The instructions included with the README.md appear to be inaccurate. 
+# Needed to adjust installation location of virtualenvwrapper and virtualenv.
+# Also Ninja not noted as a dependency.
+
+# replated # ./install_deps.sh with apt-get listed below to avoid sudo issues
+
+#ISSUE EXISTS GRABBING AVATAR2 (almost certainly proxy related (shouldn't image have proxy correct?))
+
+  test-env: 
+    runs-on: ubuntu-latest
+    env: 
+      VIRTUALENVWRAPPER_PYTHON: "/usr/bin/python3"
+      WORKON_HOME: "$(pwd)/virtualenvs"
+      VIRTUALENVWRAPPER_VIRTUALENV: "/usr/local/bin/virtualenv"
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build environment
+      run: |
+        set -e
+        set -x
+        sudo apt update
+        sudo apt-get install -y ethtool python-tk gdb-multiarch tcpdump python3-pip \
+                        python3-venv cmake g++ build-essential libpixman-1-dev\
+                        clang-format \
+                        pkg-config ninja-build libglib2.0-dev python3
+        
+        pip3 install virtualenvwrapper
+    
+        source /usr/local/bin/virtualenvwrapper.sh
+    
+        # source ./bashrc
+    
+        # which mkvirtualenv
+        
+        pwd
+        mkdir -p $(pwd)/virtualenvs
+        /usr/local/bin/virtualenv -p $(which python3) $(pwd)/virtualenvs/halucinator
+        ls $(pwd)/virtualenvs
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        ./setup.sh
+
+    - name: run basic tests of executable
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        halucinator --help
+        
+    - name: test make_bin 
+      run: | 
+        set -e 
+        set -x 
+        source $(pwd)/virtualenvs/halucinator/bin/activate 
+        rm ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf.bin 
+        bash ./src/tools/make_bin.sh ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf 
+        test -f ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf.bin 
+
+    - name: test make_addrs
+      run: | 
+        set -e 
+        set -x 
+        source $(pwd)/virtualenvs/halucinator/bin/activate 
+        hal_make_addr -b ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf  -o $(pwd)/addrs_test.yaml
+        test -f $(pwd)/addrs_test.yaml
+
+    - name: run STM UART example
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        bash ./test/STM32/example/run_test.bash
+  
+    - name: run STM zephyr fs test
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        bash ./test/zephyr/zephyr_fs/run_tests.bash
+  
+    - name: run STM zephyr frdm uart test
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        bash ./test/zephyr/frdm_k64f_UART_Excellent_Test/run_tests.bash
+  
+    - name: run STM zephyr olimex uart test
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        bash ./test/zephyr/olimex_stm32_h103_UART_Excellent_test/run_tests.bash
+  
+    - name: run python tests
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        python3 ./test/python_tests/test_bp_struct.py
