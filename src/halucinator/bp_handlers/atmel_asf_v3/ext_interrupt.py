@@ -31,7 +31,7 @@ class EXT_Int(BPHandler, AvatarPeripheral):
     def get_mmio_info(self):
         return self.name, self.address, self.size, 'rw-'
 
-    def hw_read(self, offset, size, pc):
+    def hw_read(self, offset, size, pc, **kwargs):
         value = 0
         if offset == 0x10:  # Set interrupt
             for channel, isr_name in list(self.channel_map.items()):
@@ -42,7 +42,7 @@ class EXT_Int(BPHandler, AvatarPeripheral):
                  (self.address + offset, size, value, hex(pc)))
         return value
 
-    def hw_write(self, offset, size, value, pc):
+    def hw_write(self, offset, size, value, pc, **kwargs):
         log.info("Write to addr, 0x%08x size: %i value: 0x%0x pc:%s" %
                  (self.address + offset, size, value, hex(pc)))
         if offset == 8:  # Clear interrupt
