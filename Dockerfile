@@ -39,6 +39,8 @@ RUN pip install -e src
 RUN mkdir -p deps/build-qemu/arm-softmmu
 RUN mkdir -p deps/build-qemu/aarch64-softmmu
 RUN mkdir -p deps/build-qemu/ppc-softmmu
+RUN mkdir -p deps/build-qemu/ppc64-softmmu
+RUN mkdir -p deps/build-qemu/mips-softmmu
 # RUN pip install meson
 
 WORKDIR /root/halucinator/deps/build-qemu/arm-softmmu
@@ -53,6 +55,13 @@ WORKDIR /root/halucinator/deps/build-qemu/ppc-softmmu
 RUN /root/halucinator/deps/avatar-qemu/configure --target-list=ppc-softmmu
 RUN make all -j`nproc`
 
+WORKDIR /root/halucinator/deps/build-qemu/mips-softmmu
+RUN /root/halucinator/deps/avatar-qemu/configure --target-list=mips-softmmu
+RUN make all -j`nproc`
+
+WORKDIR /root/halucinator/deps/build-qemu/ppc64-softmmu
+RUN /root/halucinator/deps/avatar-qemu/configure --target-list=ppc64-softmmu
+RUN make all -j`nproc`
 
 WORKDIR  /root/halucinator
 RUN ln -s -T /usr/bin/gdb-multiarch /usr/bin/arm-none-eabi-gdb
