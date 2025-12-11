@@ -39,7 +39,7 @@ jobs:
         
         pip3 install virtualenvwrapper
     
-        source /usr/local/bin/virtualenvwrapper.sh
+        #source /usr/local/bin/virtualenvwrapper.sh
     
         # source ./bashrc
     
