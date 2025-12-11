@@ -47,7 +47,7 @@ jobs:
         
         pwd
         mkdir -p $(pwd)/virtualenvs
-        /usr/local/bin/virtualenv -p $(which python3) $(pwd)/virtualenvs/halucinator
+        /usr/bin/env virtualenv -p $(which python3) $(pwd)/virtualenvs/halucinator
         ls $(pwd)/virtualenvs
         source $(pwd)/virtualenvs/halucinator/bin/activate
         ./setup.sh
