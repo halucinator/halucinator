@@ -19,7 +19,7 @@ jobs:
 #ISSUE EXISTS GRABBING AVATAR2 (almost certainly proxy related (shouldn't image have proxy correct?))
 
   test-env: 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env: 
       VIRTUALENVWRAPPER_PYTHON: "/usr/bin/python3"
       WORKON_HOME: "$(pwd)/virtualenvs"
