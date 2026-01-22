@@ -33,7 +33,7 @@ jobs:
       run: |
         set -e
         set -x
-        sudo echo "deb-src http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list
+        echo "deb-src http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
         sudo apt update
         sudo apt-get build-dep -y qemu 
         sudo apt-get install -y \
