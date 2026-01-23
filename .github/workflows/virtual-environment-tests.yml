@@ -55,8 +55,6 @@ jobs:
                         vim \
                         wget \
                         ninja-build \
-                        pkg-config \
-                        nlibglib2.0-dev \
                         python3
         
         pip3 install virtualenvwrapper
