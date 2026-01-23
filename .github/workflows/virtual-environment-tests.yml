@@ -54,7 +54,7 @@ jobs:
                         tcpdump \
                         vim \
                         wget \
-                        ninja-build \                       
+                        ninja-build \
                         pkg-config \
                         nlibglib2.0-dev \
                         python3
