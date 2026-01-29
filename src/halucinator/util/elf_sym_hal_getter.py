@@ -4,7 +4,7 @@
 
 import yaml
 from halucinator.util import hexyaml
-import angr
+import cle
 import os
 
 
@@ -13,7 +13,7 @@ def load_binary(filename):
         Loads binary using angr's cle loader
     '''
     print(("Loading", filename))
-    loader = angr.cle.loader.Loader(filename, auto_load_libs=False,
+    loader = cle.loader.Loader(filename, auto_load_libs=False,
                                     use_system_libs=False)
     return loader
 
