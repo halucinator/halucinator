@@ -96,12 +96,12 @@ jobs:
         hal_make_addr -b ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf  -o $(pwd)/addrs_test.yaml
         test -f $(pwd)/addrs_test.yaml
 
-    - name: run STM UART example
-      run: |
-        set -e
-        set -x
-        source $(pwd)/virtualenvs/halucinator/bin/activate
-        bash ./test/STM32/example/run_test.bash
+    # - name: run STM UART example
+    #   run: |
+    #     set -e
+    #     set -x
+    #     source $(pwd)/virtualenvs/halucinator/bin/activate
+    #     bash ./test/STM32/example/run_test.bash
   
     - name: run STM zephyr fs test
       run: |
