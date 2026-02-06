@@ -26,6 +26,6 @@ function check_output {
 export -f check_output
 #set a timeout for checking uart output
 timeout 5m bash -c check_output
-kill -9 hal_dev_uart
-kill -9 halucinator
-kill -9 arm-none-eabi-gdb
+pkill -9 hal_dev_uart
+pkill -9 halucinator
+pkill -9 arm-none-eabi-gdb
