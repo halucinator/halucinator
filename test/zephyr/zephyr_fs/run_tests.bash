@@ -7,7 +7,7 @@ cd $SCRIPT_DIR
 #start uart console
 hal_dev_uart --id=0 --newline </dev/null >./test_out.txt &
 #run halucinator
-bash ./run.sh </dev/null >./hal_out.txt &
+{ bash ./run.sh </dev/null >./hal_out.txt || true } &
 #check that halucinator gives expected output
 while ! grep "HAL_LOG|INFO|  SkipFunc: z_clock_driver_init" ./hal_out.txt; do
     sleep 2
@@ -26,6 +26,6 @@ function check_output {
 export -f check_output
 #set a timeout for checking uart output
 timeout 5m bash -c check_output
-pkill -9 hal_dev_uart
-pkill -9 halucinator
-pkill -9 arm-none-eabi-gdb
+pkill -9 hal_dev_uart || true
+pkill -9 halucinator || true
+pkill -9 arm-none-eabi-gdb || true
