@@ -1,6 +1,6 @@
 [submodule "deps/avatar2"]
 	path = deps/avatar2
-	url = https://github.com/halucinator/avatar2
+	url = ../avatar2
 [submodule "deps/avatar-qemu"]
 	path = deps/avatar-qemu
-	url = https://github.com/halucinator/avatar-qemu
+	url = ../avatar-qemu
