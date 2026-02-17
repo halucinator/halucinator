@@ -13,3 +13,4 @@ pylint==2.13.5
 yamllint==1.26.3
 black==22.3.0
 cle
+setuptools<81
