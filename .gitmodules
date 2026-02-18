@@ -1,6 +1,7 @@
 [submodule "deps/avatar2"]
 	path = deps/avatar2
 	url = ../avatar2
+
 [submodule "deps/libafl-qemu-bridge"]
 	path = deps/libafl-qemu-bridge
-	url = ../libafl-qemu-bridge.git
+	url = ../libafl-qemu-bridge
