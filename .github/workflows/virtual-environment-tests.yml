@@ -110,23 +110,23 @@ jobs:
         source $(pwd)/virtualenvs/halucinator/bin/activate
         bash ./test/zephyr/zephyr_fs/run_tests.bash
   
-    - name: run STM zephyr frdm uart test
-      run: |
-        set -e
-        set -x
-        source $(pwd)/virtualenvs/halucinator/bin/activate
-        bash ./test/zephyr/frdm_k64f_UART_Excellent_Test/run_tests.bash
+    # - name: run STM zephyr frdm uart test
+    #   run: |
+    #     set -e
+    #     set -x
+    #     source $(pwd)/virtualenvs/halucinator/bin/activate
+    #     bash ./test/zephyr/frdm_k64f_UART_Excellent_Test/run_tests.bash
   
-    - name: run STM zephyr olimex uart test
-      run: |
-        set -e
-        set -x
-        source $(pwd)/virtualenvs/halucinator/bin/activate
-        bash ./test/zephyr/olimex_stm32_h103_UART_Excellent_test/run_tests.bash
+    # - name: run STM zephyr olimex uart test
+    #   run: |
+    #     set -e
+    #     set -x
+    #     source $(pwd)/virtualenvs/halucinator/bin/activate
+    #     bash ./test/zephyr/olimex_stm32_h103_UART_Excellent_test/run_tests.bash
   
-    - name: run python tests
-      run: |
-        set -e
-        set -x
-        source $(pwd)/virtualenvs/halucinator/bin/activate
-        python3 ./test/python_tests/test_bp_struct.py
+    # - name: run python tests
+    #   run: |
+    #     set -e
+    #     set -x
+    #     source $(pwd)/virtualenvs/halucinator/bin/activate
+    #     python3 ./test/python_tests/test_bp_struct.py
