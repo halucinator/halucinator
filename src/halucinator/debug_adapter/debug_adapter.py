@@ -50,32 +50,38 @@ class LineTranslator(object):
                 numbers (overlapping/aliased addresses) are dropped — first
                 occurrence wins.
         """
-        # Sort by line number, then deduplicate by line (same line can't
-        # have two different addresses; some disassemblers emit duplicates
-        # for label/instruction pairs).
+        # Sort by line number, deduplicate by line (same line can't have
+        # two different addresses). Mask Thumb bit so lookups match.
         sorted_pairs = sorted(lineOffsetList, key=lambda p: (p[0], p[1]))
-        seen_lines = set()
+        seen_lines: set = set()
         deduped: List[Tuple[int, int]] = []
         for line, off in sorted_pairs:
             if line in seen_lines:
                 continue
             seen_lines.add(line)
-            deduped.append((line, off))
+            deduped.append((line, off & 0xFFFFFFFE))
 
-        # If addresses go backward (gview/Ghidra can emit out-of-order EAs
-        # for jumps, switch tables, etc.), drop the offending entries
-        # rather than failing the whole session. Source-level breakpoints
-        # may be approximate but the session works.
-        cleaned: List[Tuple[int, int]] = []
-        last_off = -1
+        # Two lookup structures:
+        #
+        # _line_to_addr: line → addr dict for find_next_instruction
+        #   (used when setting breakpoints: "user clicked line N, what
+        #   address?"). Sorted lineList enables bisect_left for "next
+        #   instruction at or after line N" without requiring monotonic
+        #   addresses.
+        #
+        # _addr_to_line: addr → line dict for find_line_number
+        #   (used when reporting stops: "PC is at addr X, what line?").
+        #   Covers ALL addresses including non-linear code (ISRs, data
+        #   refs, literal pools). The old monotonic-offset filter dropped
+        #   73% of entries from gview files that mix code (0x08000xxx)
+        #   and data (0x00800xxx) regions.
+        self.lineList = [r[0] for r in deduped]
+        self.offsetList = [r[1] for r in deduped]
+        self._line_to_addr: Dict[int, int] = {line: off for line, off in deduped}
+        self._addr_to_line: Dict[int, int] = {}
         for line, off in deduped:
-            if off < last_off:
-                continue  # skip out-of-order entry
-            cleaned.append((line, off))
-            last_off = off
-
-        self.lineList = [r[0] for r in cleaned]
-        self.offsetList = [r[1] for r in cleaned]
+            if off not in self._addr_to_line:
+                self._addr_to_line[off] = line
 
         global line_translator
         line_translator = self
@@ -90,15 +96,19 @@ class LineTranslator(object):
         Raises LookupError if the requested line number is after the last
         instruction.
         """
+        # lineList is sorted (line numbers are always monotonic in a file)
         i = bisect.bisect_left(self.lineList, line)
         if i != len(self.lineList):
-            return (self.lineList[i], self.offsetList[i])
+            found_line = self.lineList[i]
+            return (found_line, self._line_to_addr[found_line])
         raise LookupError
 
     def find_line_number(self, addr: int) -> Optional[int]:
-        """ Finds the line number associated with the specified address. """
-        i = bisect.bisect_right(self.offsetList, addr)
-        return self.lineList[i - 1] if i > 0 else None
+        """ Finds the line number associated with the specified address.
+        Masks the Thumb bit (bit 0) so 0x8000809 maps the same as 0x8000808.
+        """
+        addr = addr & 0xFFFFFFFE  # Clear Thumb bit
+        return self._addr_to_line.get(addr)
 
 
 line_translator = None
@@ -343,6 +353,12 @@ class HalRuntime(object):
         ] + [{"reason": "removed", "breakpoint": bp} for bp in bp_removed]
         return bp_kept + bp_added, bp_events
 
+    # Last line reported to the DAP client. When the PC is at an address
+    # not in the gview (e.g., HAL intercept return stub in halucinator's
+    # memory region at 0x30000000), we keep showing the last known line
+    # instead of jumping to line 1.
+    _last_reported_line: int = 1
+
     def stackTrace(self) -> List[Dict[str, Any]]:
         """ Returns a minimal "stack trace" that can be sent to the DAP client
 
@@ -351,9 +367,14 @@ class HalRuntime(object):
         This may change in the future.
         """
         addr = self.debugger.read_register(PC_REGISTER, False)
-        line = 1
+        if isinstance(addr, int):
+            addr = addr & 0xFFFFFFFE  # Clear Thumb bit
+        line = self._last_reported_line
         if self.line_translator is not None:
-            line = self.line_translator.find_line_number(addr) or 1
+            resolved = self.line_translator.find_line_number(addr)
+            if resolved is not None:
+                line = resolved
+                self._last_reported_line = line
         return [
             {
                 "id": 1,

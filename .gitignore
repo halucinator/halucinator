@@ -48,3 +48,4 @@ halucinator.json
 
 # Generated SBOM (produced by CI, not checked in)
 *.spdx.json
+deps/build-qemu/

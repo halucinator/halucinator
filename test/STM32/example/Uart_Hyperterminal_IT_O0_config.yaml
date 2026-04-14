@@ -44,8 +44,8 @@ intercepts:
   - class: halucinator.bp_handlers.generic.timer.Timer
     function: HAL_GetTick
     symbol: HAL_GetTick
-  - class: halucinator.bp_handlers.ReturnZero
-    function: HAL_Init
+  - class: halucinator.bp_handlers.generic.common.ReturnZero
+    function: return_zero
     symbol: HAL_Init
   - class: halucinator.bp_handlers.Counter
     function: HAL_IncTick
