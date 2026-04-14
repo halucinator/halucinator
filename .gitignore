@@ -13,5 +13,38 @@ test/**/tmp
 *.vscode
 *.elf
 *.elf.bin
+!demo/**/*.elf
+!test/firmware-rehosting/**/*.elf
 *.map
-deps/build-qemu/
+deps/build-qemu/*.vsix
+# Test output artifacts
+hal_out.txt
+test_out.txt
+Receiver.txt
+Sender.txt
+test/zephyr/zephyr_fs/storage/
+test/zephyr/zephyr_fs/vfs/
+
+# Python / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Local virtualenvs
+virtualenvs/
+venv/
+.venv/
+
+# VSCode extension session artifacts dropped into example/demo dirs
+# (project config, Ghidra project, disassembly listing, handler cache)
+halucinator.json
+*.halucinator.json
+.hal_bp_handlers.json
+.ghidra_project/
+*.gview
+*.sqlite
+*.sqlite-journal
+
+# Generated SBOM (produced by CI, not checked in)
+*.spdx.json
