@@ -1,0 +1,21 @@
+machine:
+  arch: mips
+  cpu_model: 4Kc
+  entry_addr: 0x00010220
+  init_sp: 0x00180000
+  gdb_exe: gdb-multiarch
+
+intercepts:
+
+# UART handlers
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_read
+  symbol: uart_read

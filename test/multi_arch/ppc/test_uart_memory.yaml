@@ -1,0 +1,6 @@
+memories:
+  vectors: {base_addr: 0x00000000, size: 0x10000}
+  firmware: {base_addr: 0x00100000, file: firmware/test_uart.bin,
+    permissions: rwx, size: 0x100000}
+  ram: {base_addr: 0x00200000, size: 0x100000}
+  halucinator: {base_addr: 0x30000000, size: 0x10000000}

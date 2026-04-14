@@ -1,0 +1,3 @@
+#  Temp      Pressure    ARM HOLD Throttle  Pitch   Roll  Yaw
+# 8,569,150  9,154,000    0   0    1000.0     0.0   0.0   0.0
+8569150      9154000      1   0    1000.0    15.0   0.0 210.0
