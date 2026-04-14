@@ -4,8 +4,11 @@
 """
 Peripheral model for tty device
 """
+from __future__ import annotations
+
 import logging
 from collections import deque
+from typing import Any, Dict, List, Optional, Union
 
 from . import peripheral_server
 from .interrupts import Interrupts
@@ -18,51 +21,51 @@ class UTTYInterface:
     Defines a single utty device. One instance created by UTTYModel per interface
     """
 
-    def __init__(self, interface_id, enabled=True, irq_num=None):
-        self.interface_id = interface_id
-        self.rx_queue = deque()
-        self.tx_queue = deque()
-        self.irq_num = irq_num
-        self.enabled = enabled
-        self.irq_enabled = True
+    def __init__(self, interface_id: Union[int, str], enabled: bool = True, irq_num: Optional[int] = None) -> None:
+        self.interface_id: Union[int, str] = interface_id
+        self.rx_queue: deque[Any] = deque()
+        self.tx_queue: deque[Any] = deque()
+        self.irq_num: Optional[int] = irq_num
+        self.enabled: bool = enabled
+        self.irq_enabled: bool = True
 
-    def enable(self):
+    def enable(self) -> None:
         """
         Enable this interface
         """
         self.enabled = True
 
-    def disable(self):
+    def disable(self) -> None:
         """
         Disable this interface
         """
         self.enabled = False
 
-    def flush(self):
+    def flush(self) -> None:
         """
         Flush the rx buffer
         """
         self.rx_queue.clear()
 
-    def clear_irq(self):
+    def clear_irq(self) -> None:
         """
         Clear active interrupt
         """
         Interrupts.clear_active_bp(self.irq_num)
 
-    def disable_irq(self):
+    def disable_irq(self) -> None:
         """
         Disable interrupts
         """
         self.irq_enabled = False
 
-    def enable_irq_bp(self):
+    def enable_irq_bp(self) -> None:
         """
         Enable a intterupts callable from bp_handler
         """
         Interrupts.clear_active_bp(self.irq_num)
 
-    def _fire_interrupt_bp(self):
+    def _fire_interrupt_bp(self) -> None:
         """
         Triggers and interrupt by writting to the IRQ controllers MMIO registers
         use if need to trigger interrupt inside bp_handler
@@ -70,7 +73,7 @@ class UTTYInterface:
         if self.rx_queue and self.irq_num:
             Interrupts.set_active_bp(self.irq_num)
 
-    def _fire_interrupt_qmp(self):
+    def _fire_interrupt_qmp(self) -> None:
         """
         Uses QMP interface to trigger and interrupt in the target
         """
@@ -78,7 +81,7 @@ class UTTYInterface:
             log.debug("Sending Interupt for %s: %#x", self.interface_id, self.irq_num)
             Interrupts.set_active_qmp(self.irq_num)
 
-    def buffer_rx_chars_qmp(self, chars):
+    def buffer_rx_chars_qmp(self, chars: Union[List[int], bytes]) -> None:
         """
         Buffers the received characters into a buffer then trigger interrupt over qmp
         Should not be called from bp_handler
@@ -94,7 +97,7 @@ class UTTYInterface:
             log.info("%s Not enabled: ", self.interface_id)
             return
 
-    def get_rx_char(self, get_time=False):  # pylint: disable=unused-argument
+    def get_rx_char(self, get_time: bool = False) -> Any:  # pylint: disable=unused-argument
         """
         Reads a byte from the rx buffer
         """
@@ -108,7 +111,7 @@ class UTTYInterface:
             return 0x00
         return char
 
-    def get_rx_buff_size(self):
+    def get_rx_buff_size(self) -> int:
         """
         Gets number of bytes in rx buffer
         """
@@ -116,7 +119,7 @@ class UTTYInterface:
             return len(self.rx_queue)
         return 0
 
-    def buffer_tx_char_qmp(self, char):
+    def buffer_tx_char_qmp(self, char: Any) -> None:
         """
         Transmits a character and trigger an interrupt using qmp interface
         Should not be called from inside a bp_handler
@@ -129,7 +132,7 @@ class UTTYInterface:
         else:
             return
 
-    def get_tx_char(self, get_time=False):  # pylint: disable=unused-argument
+    def get_tx_char(self, get_time: bool = False) -> Optional[Any]:  # pylint: disable=unused-argument
         """
         Reads a character from the tx buffer
         """
@@ -139,7 +142,7 @@ class UTTYInterface:
             char = self.tx_queue.popleft()
         return char
 
-    def get_tx_buff_size(self):
+    def get_tx_buff_size(self) -> int:
         """
         Gets the tx buffer size
         """
@@ -168,7 +171,7 @@ class UTTYModel:
     unattached_interfaces = {}
 
     @classmethod
-    def add_interface(cls, interface_id, enabled=True, irq_num=None):
+    def add_interface(cls, interface_id: Union[int, str], enabled: bool = True, irq_num: Optional[int] = None) -> None:
         """
         Adds an interface to the model.  Enables support more than one tty device
         """
@@ -177,7 +180,7 @@ class UTTYModel:
         # cls.interfaces[interface_id] = interface
 
     @classmethod
-    def attach_interface(cls, interface_id):
+    def attach_interface(cls, interface_id: Union[int, str]) -> bool:
         """
         Attaches previouly created interface so that it is active. Prevents race condition
         where interrupts could be triggered prior to the interface being made active.
@@ -197,21 +200,21 @@ class UTTYModel:
     #     cls.interfaces[interface_id].disable_irq()
 
     @classmethod
-    def enable(cls, interface_id):
+    def enable(cls, interface_id: Union[int, str]) -> None:
         """
         Enables the interface
         """
         cls.interfaces[interface_id].enable()
 
     @classmethod
-    def flush(cls, interface_id):
+    def flush(cls, interface_id: Union[int, str]) -> None:
         """
         Flushes data from the buffer
         """
         cls.interfaces[interface_id].flush()
 
     @classmethod
-    def disable(cls, interface_id):
+    def disable(cls, interface_id: Union[int, str]) -> None:
         """
         Disables this interface
         """
@@ -219,7 +222,7 @@ class UTTYModel:
 
     @classmethod
     @peripheral_server.tx_msg
-    def tx_buf(cls, interface_id, buf):
+    def tx_buf(cls, interface_id: Union[int, str], buf: Any) -> Dict[str, Any]:
         """
         Creates the message that Peripheral.tx_msga will send on this
         event
@@ -229,7 +232,7 @@ class UTTYModel:
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def rx_char_or_buf(cls, msg):
+    def rx_char_or_buf(cls, msg: Dict[str, Any]) -> None:
         """
         Processes reception of this type of message from
         PeripheralServer.rx_msg
@@ -249,7 +252,7 @@ class UTTYModel:
             log.info("No interface attached for %s", interface_id)
 
     @classmethod
-    def get_rx_char(cls, interface_id, get_time=False):
+    def get_rx_char(cls, interface_id: Union[int, str], get_time: bool = False) -> int:
         """
         Reads a character from the rx buffer.
         """
@@ -263,7 +266,7 @@ class UTTYModel:
         return char
 
     @classmethod
-    def get_rx_buff_size(cls, interface_id):
+    def get_rx_buff_size(cls, interface_id: Union[int, str]) -> int:
         """
         Gets the number of bytes in the received buffer.
         Called from bp_handlers

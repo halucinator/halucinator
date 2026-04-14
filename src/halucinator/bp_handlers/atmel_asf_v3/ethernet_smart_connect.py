@@ -1,13 +1,19 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
+
+from typing import TYPE_CHECKING, Type
 
 import IPython
 from ...peripheral_models.ethernet import EthernetModel
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -19,7 +25,7 @@ log = logging.getLogger(__name__)
 
 class EthernetSmartConnect(BPHandler):
 
-    def __init__(self, model=EthernetModel):
+    def __init__(self, model: Type[EthernetModel] = EthernetModel):
         BPHandler.__init__(self)
         log.debug("Ethernet Smart Connect Init")
         self.model = model
@@ -28,12 +34,12 @@ class EthernetSmartConnect(BPHandler):
         self.dev_ptr = None
         self.netif_ptr = None
 
-    def get_id(self, qemu):
+    def get_id(self, qemu: HALQemuTarget) -> str:
         return 'ksz8851'
 
     # This is custom written from binary as ksz8851snl_read got inlined
     @bp_handler(['addr_15882'])
-    def eth_process(self, qemu, bp_addr):
+    def eth_process(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         now = time.time()
         log.info("In addr_15882: %f" % (now - self.last_exec_time))
         self.last_exec_time = time.time()
@@ -44,10 +50,10 @@ class EthernetSmartConnect(BPHandler):
             # If frame, get global buffer, write frame to it can call function to process
             # the frame
             log.info("Reading in frame")
-            buf_ptr = qemu.read_memory(0x200000e8, 1, 4)  # ip_packet_bufer
-            frame = self.model.get_rx_frame(self.get_id(qemu))
+            buf_ptr = qemu.read_memory(0x200000e8, 4, 1)  # ip_packet_bufer
+            frame = self.model.get_rx_frame_only(self.get_id(qemu))
             frame_len = len(frame)
-            qemu.write_memory(buf_ptr, 1, frame, frame_len)
+            qemu.write_memory(buf_ptr, 1, frame, frame_len, raw=True)
             qemu.regs.r0 = buf_ptr
             qemu.regs.r1 = frame_len
             qemu.regs.lr = qemu.regs.pc | 1  # set thumb bit, lr already save to stack
@@ -57,7 +63,7 @@ class EthernetSmartConnect(BPHandler):
         return False, None
 
     @bp_handler(['ksz8851snl_read', 'input'])
-    def read(self, qemu, bp_addr):
+    def read(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         # 1. See if there are frames
         now = time.time()
         log.info("In ETHERNET_INPUT: %f" % (now - self.last_exec_time))
@@ -68,17 +74,17 @@ class EthernetSmartConnect(BPHandler):
         if num_frames > 0:
             data_ptr = qemu.regs.r0
             max_len = qemu.regs.r1
-            frame, rx_time = self.model.get_rx_frame(self.get_id(qemu), True)
+            frame, rx_time = self.model.get_rx_frame_and_time(self.get_id(qemu))
             frame_length = len(frame)
             if max_len >= frame_length:
                 log.info("Frame Read w len %i", frame_length)
-                qemu.write_memory(data_ptr, 1, frame, len(frame))
+                qemu.write_memory(data_ptr, 1, frame, len(frame), raw=True)
                 return True, frame_length
 
         return True, 0
 
     @bp_handler(['ksz8851snl_send', 'output'])
-    def send(self, qemu, bp_addr):
+    def send(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         data_ptr = qemu.regs.r0
         length = qemu.regs.r1
         frame = qemu.read_memory(data_ptr, 1, length, raw=True)
@@ -87,6 +93,6 @@ class EthernetSmartConnect(BPHandler):
         return True, length
 
     @bp_handler(['ksz8851snl_init'])
-    def return_ok(self, qemu, bp_addr):
+    def return_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         log.info("Init Called")
         return True, 0

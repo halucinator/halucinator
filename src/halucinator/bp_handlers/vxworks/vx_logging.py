@@ -3,10 +3,16 @@
 # the U.S. Government retains certain rights in this software.
 
 '''vxlogging'''
+from __future__ import annotations
+
 import logging
 import re
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -25,16 +31,16 @@ PRINTF_FORMAT_STR='''\
 
 class VxLogging(BPHandler):
     '''vxlogging'''
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.log_msg_ptr = None
+        self.log_msg_ptr: Optional[int] = None
 
-    def parse_printf_string(self, pf_str):
+    def parse_printf_string(self, pf_str: str) -> Tuple[Tuple[int, str], ...]:
         '''parse_printf_string'''
         return tuple((m.start(1), m.group(1)) \
             for m in re.finditer(PRINTF_FORMAT_STR, pf_str, flags=re.X))
 
-    def read_arg(self, idx, arg_type):
+    def read_arg(self, idx: int, arg_type: str) -> None:
         '''read_arg'''
         if arg_type == '%%s':
             pass
@@ -60,7 +66,7 @@ class VxLogging(BPHandler):
             raise TypeError('Unsupported format string type: %s' % arg_type)
 
     @bp_handler(['_applog'])
-    def app_log(self, qemu, addr):
+    def app_log(self, qemu: HALQemuTarget, addr: int) -> None:
         '''app_log'''
         #TODO:  Figure out var args passing
         # prototype is (uint, char*, uint, char*, ...)
@@ -75,7 +81,7 @@ class VxLogging(BPHandler):
         log.info("AppLog: %#x, %s, %x, %s"%(app_log_id,logger_str, flags, fmt_str))
 
     @bp_handler(['logMsg'])
-    def log_msg(self, qemu, addr):
+    def log_msg(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
         '''log_msg'''
         #TODO Implement this
         self.log_msg_ptr = qemu.get_arg(0)

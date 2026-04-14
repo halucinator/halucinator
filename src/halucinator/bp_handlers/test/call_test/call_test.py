@@ -4,15 +4,20 @@
 """
 BP_handler for testing halucinator's memory
 """
+from __future__ import annotations
 
 import sys
 import logging
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 # from ...bp_handler import BPHandler, bp_handler
-from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
 
 # from .... import hal_log
 from halucinator import hal_log
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 
 log = logging.getLogger(__name__)
@@ -32,13 +37,13 @@ class CallTest(BPHandler):
     they are the same.
     """
 
-    def __init__(self):
-        self.original_addr = None
-        self.halloced_memory1 = None
-        self.halloced_memory2 = None
-        self.test_str = None
+    def __init__(self) -> None:
+        self.original_addr: Any = None
+        self.halloced_memory1: Any = None
+        self.halloced_memory2: Any = None
+        self.test_str: Optional[bytes] = None
 
-    def register_handler(self, qemu, addr, func_name, test_str=None):
+    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, test_str: Optional[str] = None) -> HandlerFunction:
         self.test_str = (
             bytes(test_str, "utf-8")
             if test_str is not None
@@ -47,7 +52,7 @@ class CallTest(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(["run_test"])
-    def run_test(self, qemu, addr):  # pylint: disable=unused-argument
+    def run_test(self, qemu: HALQemuTarget, addr: int) -> Any:  # pylint: disable=unused-argument
         """
         This will call memory copy the first time
         """
@@ -67,7 +72,7 @@ class CallTest(BPHandler):
         )
 
     @bp_handler(["next_call"])
-    def next_call(self, qemu, addr):  # pylint: disable=unused-argument
+    def next_call(self, qemu: HALQemuTarget, addr: int) -> Any:  # pylint: disable=unused-argument
         """
         This will call memory copy the first time
         """
@@ -80,7 +85,7 @@ class CallTest(BPHandler):
         return qemu.call("memcpy", [dst.base_addr, src, size], self, "end_test")
 
     @bp_handler(["end_test"])
-    def end_test(self, qemu, addr):  # pylint: disable=unused-argument
+    def end_test(self, qemu: HALQemuTarget, addr: int) -> None:  # pylint: disable=unused-argument
         """
         Check to see if copies happened
         """

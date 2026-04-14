@@ -4,21 +4,24 @@
 """
 This is the halucinator entry point
 """
+from __future__ import annotations
 
 from argparse import ArgumentParser
 import logging
-from multiprocessing import Lock
 import threading
 import os
 import sys
 import argparse
 import signal
+from typing import Any, List, Optional, Tuple, Union
 
 from avatar2 import Avatar
 from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
 from .peripheral_models import generic as peripheral_emulators
 
 from .bp_handlers import intercepts
+from .bp_handlers.debugger import Debugger
+from .debug_adapter.debug_adapter import DAPServer
 from .peripheral_models import peripheral_server as periph_server
 from .util.profile_hals import State_Recorder
 from .util import cortex_m_helpers as CM_helpers
@@ -32,32 +35,30 @@ hal_log.setLogConfig()
 
 PATCH_MEMORY_SIZE = 4096
 INTERCEPT_RETURN_INSTR_ADDR = 0x20000000 - PATCH_MEMORY_SIZE
-__HAL_EXIT_CODE = 0
 
 
 def get_qemu_target(
-    name,
-    config,
-    firmware=None,
-    log_basic_blocks=False,
-    gdb_port=1234,
-    singlestep=False,
-    qemu_args=None,
-):  # pylint: disable=too-many-arguments
+    name: str,
+    config: Any,
+    firmware: None = None,
+    log_basic_blocks: Optional[str] = None,
+    gdb_port: int = 1234,
+    qemu_args: str = None,
+) -> Tuple[Avatar, Any]:
     """
-    Instantiates QEMU instance that is used to run firmware using Avatar
+    Returns QEMU and Avatar objects needed to run the firmware.
     """
-    outdir = os.path.join("tmp", name)
-    hal_stats.set_filename(outdir + "/stats.yaml")
 
     # Get info from config
     avatar_arch = config.machine.get_avatar_arch()
 
+    qemu_path = config.machine.get_qemu_path()
+    outdir = os.path.join("tmp", name)
+    hal_stats.set_filename(outdir + "/stats.yaml")
+
     avatar = Avatar(arch=avatar_arch, output_directory=outdir)
     avatar.config = config
     avatar.cpu_model = config.machine.cpu_model
-
-    qemu_path = config.machine.get_qemu_path()
     log.info("GDB_PORT: %s", gdb_port)
     log.info("QEMU Path: %s", qemu_path)
 
@@ -76,65 +77,58 @@ def get_qemu_target(
         qmp_unix_socket=f"/tmp/{name}-qmp",
     )
 
+    qemu_log_dir = os.path.join(outdir, "logs")
+    os.makedirs(qemu_log_dir, exist_ok=True)
+
     if log_basic_blocks == "irq":
         qemu.additional_args = [
-            "-d",
-            "in_asm,exec,int,cpu,guest_errors,avatar,trace:nvic*",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm,exec,int,cpu,guest_errors,avatar,trace:nvic*",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
     elif log_basic_blocks == "regs":
         qemu.additional_args = [
-            "-d",
-            "in_asm,exec,cpu",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm,exec,cpu",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
     elif log_basic_blocks == "regs-nochain":
         qemu.additional_args = [
-            "-d",
-            "in_asm,exec,cpu,nochain",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm,exec,cpu,nochain",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
     elif log_basic_blocks == "exec":
         qemu.additional_args = [
-            "-d",
-            "exec",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "exec",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
     elif log_basic_blocks == "trace-nochain":
         qemu.additional_args = [
-            "-d",
-            "in_asm,exec,nochain",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm,exec,nochain",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
     elif log_basic_blocks == "trace":
         qemu.additional_args = [
-            "-d",
-            "in_asm,exec",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm,exec",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
-    elif log_basic_blocks:
+    elif log_basic_blocks == "coverage":
         qemu.additional_args = [
-            "-d",
-            "in_asm",
-            "-D",
-            os.path.join(outdir, "qemu_asm.log"),
+            "-d", "in_asm",
+            "-D", os.path.join(qemu_log_dir, "qemu_asm.log"),
         ]
 
-    if singlestep:
-        qemu.additional_args.append("-singlestep")
     if qemu_args is not None:
+        if not hasattr(qemu, 'additional_args') or qemu.additional_args is None:
+            qemu.additional_args = []
         qemu.additional_args.extend(qemu_args.split())
 
     return avatar, qemu
 
 
-def setup_memory(avatar, memory, record_memories=None):
+def setup_memory(
+    avatar: Avatar,
+    memory: Any,
+    record_memories: Optional[List[Tuple[int, int]]] = None,
+) -> None:
     """
     Sets up memory regions for the emualted devices
     Args:
@@ -169,7 +163,18 @@ def setup_memory(avatar, memory, record_memories=None):
             record_memories.append((memory.base_addr, memory.size))
 
 
-def fix_cortex_m_thumb_bit(config):
+def run_server(avatar: Avatar) -> None:
+    try:
+        periph_server.run_server()
+    except KeyboardInterrupt:
+        periph_server.stop()
+        avatar.stop()
+        avatar.shutdown()
+        quit(-1)
+
+
+
+def fix_cortex_m_thumb_bit(config: Any) -> None:
     """
     Fixes and bug in QEMU that makes so thumb bit doesn't get set on CPSR. Manually set it up
     """
@@ -182,13 +187,14 @@ def fix_cortex_m_thumb_bit(config):
             else config.memories["flash"]
         )
         if mem is not None and mem.file is not None:
-            config.machine.init_sp, entry_addr = CM_helpers.get_sp_and_entry(mem.file)
-        # Only use the discoved entry point if one not explicitly set
-        if config.machine.entry_addr is None:
-            config.machine.entry_addr = entry_addr
+            file_sp, file_entry = CM_helpers.get_sp_and_entry(mem.file)
+            if config.machine.init_sp is None:
+                config.machine.init_sp = file_sp
+            if config.machine.entry_addr is None:
+                config.machine.entry_addr = file_entry
 
 
-def register_intercepts(config, avatar, qemu):
+def register_intercepts(config: Any, avatar: Avatar, qemu: Any) -> None:
     """
     Create and registers the intercepts, must be called after avatar.init_targets()
     """
@@ -232,35 +238,47 @@ def register_intercepts(config, avatar, qemu):
 
 
 def emulate_binary(
-    config,
-    target_name=None,
-    log_basic_blocks=None,
-    rx_port=5555,
-    tx_port=5556,
-    gdb_port=1234,
-    elf_file=None,
-    db_name=None,
-    singlestep=False,
-    qemu_args=None,
-    gdb_server_port=9999,
-    print_qemu_command=None,
-):  # pylint: disable=too-many-arguments,too-many-locals
+    config: Any,
+    target_name: Optional[str] = None,
+    log_basic_blocks: Optional[str] = None,
+    rx_port: int = 5555,
+    tx_port: int = 5556,
+    gdb_port: int = 1234,
+    elf_file: None = None,
+    db_name: None = None,
+    qemu_args: str = None,
+    dap_port: Optional[int] = None,
+    dap_bind: str = "127.0.0.1",
+    gdb_server_port: Optional[int] = None,
+) -> None:
     """
-    Start emulation of the firmware
-    """
+    Run binary on the emulated hardware.
 
+    config.prepare_and_validate() MUST have been already called!
+    """
+    # Bug in QEMU about init stack pointer/entry point this works around
+    if config.machine.arch == "cortex-m3":
+        mem = (
+            config.memories["init_mem"]
+            if "init_mem" in config.memories
+            else config.memories["flash"]
+        )
+        if mem is not None and mem.file is not None:
+            file_sp, file_entry = CM_helpers.get_sp_and_entry(mem.file)
+            # Only use discovered values if not explicitly set in config
+            if config.machine.init_sp is None:
+                config.machine.init_sp = file_sp
+            if config.machine.entry_addr is None:
+                config.machine.entry_addr = file_entry
+
+    qemu_target_name = target_name if target_name else "halucinator"
     avatar, qemu = get_qemu_target(
-        target_name,
+        qemu_target_name,
         config,
         log_basic_blocks=log_basic_blocks,
         gdb_port=gdb_port,
-        singlestep=singlestep,
         qemu_args=qemu_args,
     )
-    if print_qemu_command:
-        print("QEMU Command")
-        print(" ".join(qemu.assemble_cmd_line()))
-        sys.exit(0)
 
     if "remove_bitband" in config.options and config.options["remove_bitband"]:
         log.info("Removing Bitband")
@@ -279,7 +297,9 @@ def emulate_binary(
                 (os.path.splitext(elf_file)[0], str(target_name), "sqlite")
             )
 
-        avatar.recorder = State_Recorder(db_name, qemu, record_memories, elf_file)
+        avatar.recorder = State_Recorder(
+            db_name, qemu, record_memories, elf_file
+        )
     else:
         avatar.recorder = None
 
@@ -288,77 +308,81 @@ def emulate_binary(
     log.info("Initializing Avatar Targets")
     avatar.init_targets()
 
-    if gdb_server_port is not None and gdb_server_port >= 0:
-        avatar.load_plugin("gdbserver")
-        # pylint: disable=no-member
-        avatar.spawn_gdb_server(qemu, gdb_server_port, do_forwarding=False)
-
     register_intercepts(config, avatar, qemu)
-
-    # Do post qemu creation initialization
     config.initialize_target(qemu)
 
-    # Work around Avatar-QEMU's improper init of Cortex-M3
+    # Set initial stack pointer if configured
+    if config.machine.init_sp is not None:
+        qemu.regs.sp = config.machine.init_sp
+
+    # Cortex-M3 specific init
     if config.machine.arch == "cortex-m3":
         qemu.regs.cpsr |= 0x20  # Make sure the thumb bit is set
-        qemu.regs.sp = config.machine.init_sp  # Set SP as Qemu doesn't init correctly
         qemu.set_vector_table_base(config.machine.vector_base)
 
-    _start_execution(avatar, qemu, rx_port, tx_port, gdb_server_port)
-
-
-def _start_execution(avatar, qemu, rx_addr, tx_addr, gdb_server_port):
-    """
-    Starts the actual execution of qemu,
-    peripheral server with handlers to enable clean
-    exiting
-    """
     # Emulate the Binary
-    periph_server.start(rx_addr, tx_addr, qemu)
+    periph_server.start(rx_port, tx_port, qemu)
 
-    # Removed because of issues in python 3.10 which is default in ubuntu 22.04
-    # exit_code_lock = Lock()
+    def signal_handler(sig: int, frame: Any) -> None:
+        print("You pressed Ctrl+C!")
+        avatar.stop()
+        avatar.shutdown()
+        periph_server.stop()
+        sys.exit(0)
 
-    def halucinator_shutdown(exit_code):
-        """
-        Perform a clean shutdown of halucinator
-        """
-        global __HAL_EXIT_CODE  # pylint: disable=global-statement
-        # with exit_code_lock:
+    signal.signal(signal.SIGINT, signal_handler)
 
-        if threading.current_thread() != threading.main_thread():
-            # Main thread must kill everything
-            signal.raise_signal(signal.SIGINT)
-        else:
-            __HAL_EXIT_CODE = exit_code
-            avatar.stop()
-            avatar.shutdown()
-            periph_server.stop()
-            sys.exit(__HAL_EXIT_CODE)
-
-    def int_signal_handler(sig, frame):  # pylint: disable=unused-argument
-        print(f"Halucinator Exiting with status {__HAL_EXIT_CODE}!")
-        halucinator_shutdown(__HAL_EXIT_CODE)
-
-    signal.signal(signal.SIGINT, int_signal_handler)
-    qemu.halucinator_shutdown = halucinator_shutdown
-    log.info("Letting QEMU Run")
-
+    # Start GDB RSP server if requested
     if gdb_server_port is not None:
-        print(f"GDB Server Running on localhost:{gdb_server_port}")
-        print("Connect GDB and continue to run")
+        avatar.load_plugin('gdbserver')
+        server = avatar.spawn_gdb_server(
+            qemu, gdb_server_port,
+            stop_filter=lambda target, pc: intercepts.check_hal_bp(pc),
+        )
+        log.info("GDB RSP server listening on port %d", gdb_server_port)
+
+    # Start DAP server if requested
+    if dap_port is not None:
+        debugger = Debugger(qemu, avatar, None)
+        # Tell the intercept machinery we're in a debug session. This makes
+        # HAL intercept handlers wait for the monitor thread's
+        # emulation_detected ack before calling target.cont(), eliminating
+        # the race where monitor_running sees STOPPED, enters the post-loop
+        # branch, and then finds the target already RUNNING again by the
+        # time _read_register("pc") is called.
+        intercepts.debug_session = True
+        # Start the debugger's monitor thread NOW so request_queue is always
+        # being processed. Without this, send_request from DAP handlers blocks
+        # forever until the queue gets serviced.
+        debugger.start_monitoring(add_shell_callback=False)
+        dap_thread = threading.Thread(
+            target=DAPServer(debugger, dap_port, bind_addr=dap_bind),
+            daemon=True,
+        )
+        dap_thread.start()
+        log.info(
+            "DAP server listening on %s:%d%s",
+            dap_bind,
+            dap_port,
+            "" if dap_bind == "127.0.0.1" else " (EXPOSED: no auth)",
+        )
+
+    if dap_port is not None or gdb_server_port is not None:
+        # When a debug server (DAP or GDB RSP) is enabled, leave QEMU
+        # paused at entry so the debug client can attach, set breakpoints,
+        # and resume explicitly. Without this, QEMU runs past entry before
+        # the client has a chance to connect.
+        log.info("QEMU paused at entry — connect a debug client to start execution")
     else:
+        log.info("Letting QEMU Run")
         qemu.cont()
-    try:
-        periph_server.run_server()  # Blocks Forever
-    except KeyboardInterrupt:
-        pass
-    halucinator_shutdown(0)
+
+    run_server(avatar)
 
 
-def main():
+def main(cli_args: List[str] = None) -> None:
     """
-    Halucinator Main
+    The entry point of HALucinator
     """
     parser = ArgumentParser()
     parser.add_argument(
@@ -385,13 +409,6 @@ def main():
         "options [irq, regs, exec, trace, trace-nochain]",
     )
     parser.add_argument(
-        "--singlestep",
-        default=False,
-        const=True,
-        nargs="?",
-        help="Enables QEMU single stepping instructions",
-    )
-    parser.add_argument(
         "-n",
         "--name",
         default="HALucinator",
@@ -413,30 +430,49 @@ def main():
     )
     parser.add_argument("-p", "--gdb_port", default=1234, type=int, help="GDB_Port")
     parser.add_argument(
-        "-d",
-        "--gdb_server_port",
-        default=None,
-        type=int,
-        help="Port to run GDB Server port",
-    )
-    parser.add_argument(
         "-e", "--elf", default=None, help="Elf file, required to use recorder"
     )
     parser.add_argument(
-        "--print_qemu_command",
-        action="store_true",
+        "--dap",
+        type=int,
+        nargs="?",
+        const=34157,
         default=None,
-        help="Just print the QEMU Command",
+        metavar="PORT",
+        help="Start Debug Adapter Protocol server (default port: 34157)",
+    )
+    parser.add_argument(
+        "--dap-bind",
+        type=str,
+        default="127.0.0.1",
+        metavar="ADDR",
+        dest="dap_bind",
+        help=(
+            "Interface for the DAP server to bind. Defaults to 127.0.0.1 "
+            "(loopback-only) because no authentication is implemented. "
+            "Use 0.0.0.0 to accept remote connections — only on trusted "
+            "networks."
+        ),
+    )
+    parser.add_argument(
+        "--gdb-server",
+        type=int,
+        nargs="?",
+        const=3333,
+        default=None,
+        metavar="PORT",
+        dest="gdb_server",
+        help="Start GDB RSP server for external debuggers (default port: 3333)",
     )
     parser.add_argument(
         "-q",
         "--qemu_args",
         nargs=argparse.REMAINDER,
-        default=[],
+        default=None,
         help="Additional arguments for QEMU",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(sys.argv[1:] if cli_args is None else cli_args)
 
     # Build configuration
     config = hal_config.HalucinatorConfig()
@@ -450,10 +486,7 @@ def main():
 
     if not config.prepare_and_validate():
         log.error("Config invalid")
-        sys.exit(-1)
-
-    if config.elf_program is not None:
-        args.qemu_args.append(f"-device loader,file={config.elf_program.elf_filename}")
+        exit(-1)
 
     qemu_args = None
     if args.qemu_args:
@@ -467,10 +500,10 @@ def main():
         args.tx_port,
         elf_file=args.elf,
         gdb_port=args.gdb_port,
-        singlestep=args.singlestep,
         qemu_args=qemu_args,
-        gdb_server_port=args.gdb_server_port,
-        print_qemu_command=args.print_qemu_command,
+        dap_port=args.dap,
+        dap_bind=args.dap_bind,
+        gdb_server_port=args.gdb_server,
     )
 
 

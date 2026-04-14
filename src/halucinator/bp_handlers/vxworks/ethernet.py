@@ -3,11 +3,17 @@
 # the U.S. Government retains certain rights in this software.
 
 """Module to support ethernet"""
+from __future__ import annotations
+
 import logging
 import types
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
-from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
 from halucinator.peripheral_models.ethernet import EthernetModel
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -20,18 +26,18 @@ class Ethernet(BPHandler):
     """
 
     # pylint: disable=too-many-arguments,too-many-instance-attributes,too-many-public-methods
-    def __init__(self, model=EthernetModel, interfaces=None):
+    def __init__(self, model: Type[EthernetModel] = EthernetModel, interfaces: Optional[Dict[str, Any]] = None) -> None:
         super().__init__()
-        self.mac = b""
-        self.p_dev = None
-        self.p_net_pool = None
-        self.cl_pool_id = None
+        self.mac: bytes = b""
+        self.p_dev: Optional[int] = None
+        self.p_net_pool: Optional[int] = None
+        self.cl_pool_id: Optional[int] = None
 
-        self.eth_model = model
+        self.eth_model: Type[EthernetModel] = model
 
-        self.net_pool_offset = 0x2AC
-        self.cl_pool_id_offset = 0x33C
-        self.handle_end_int_rcv_addr = None
+        self.net_pool_offset: int = 0x2AC
+        self.cl_pool_id_offset: int = 0x33C
+        self.handle_end_int_rcv_addr: Optional[int] = None
 
         if interfaces is not None:
             for name, items in interfaces.items():
@@ -40,13 +46,13 @@ class Ethernet(BPHandler):
     # pylint: disable=duplicate-code
     def register_handler(
         self,
-        qemu,
-        addr,
-        func_name,
-        end_handle_rcv=None,
-        net_pool_offset=None,
-        cl_pool_id_offset=None,
-    ):  # pylint: disable=too-many-arguments
+        qemu: HALQemuTarget,
+        addr: int,
+        func_name: str,
+        end_handle_rcv: Optional[str] = None,
+        net_pool_offset: Optional[int] = None,
+        cl_pool_id_offset: Optional[int] = None,
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments
         """
         isr_num:  The ISR number to trigger on reception of an ethernet frame
         interfaces: a dictionary if {eth0: {irq_name: xx, irq_num: 0x19}, eth1: {irq_num: 0x19}}
@@ -73,7 +79,7 @@ class Ethernet(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(["netPoolInit"])
-    def net_pool_init(self, qemu, addr):  # pylint: disable=unused-argument,no-self-use
+    def net_pool_init(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """
         net_pool_init
         """
@@ -82,7 +88,7 @@ class Ethernet(BPHandler):
             outfile.write(f"Netpool: {hex(qemu.regs.r0)}, called from {callee}\n")
         return False, None
 
-    def get_eth_id(self, qemu):  # pylint: disable=unused-argument,no-self-use
+    def get_eth_id(self, qemu: HALQemuTarget) -> str:  # pylint: disable=unused-argument,no-self-use
         """
         get_eth_id
         """
@@ -90,8 +96,8 @@ class Ethernet(BPHandler):
         return "eth0"  # self.eth_model.interfaces.keys()[0]
 
     def e_io_cs_addr(
-        self, qemu, p_obj, ptr_mac_addr
-    ):  # pylint: disable=unused-argument
+        self, qemu: HALQemuTarget, p_obj: int, ptr_mac_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         EIOCGADDR
         """
@@ -100,8 +106,8 @@ class Ethernet(BPHandler):
         return True, 0
 
     def e_io_cg_addr(
-        self, qemu, p_obj, ptr_mac_addr
-    ):  # pylint: disable=unused-argument
+        self, qemu: HALQemuTarget, p_obj: int, ptr_mac_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         EIOCSADDR
         """
@@ -110,8 +116,8 @@ class Ethernet(BPHandler):
         return True, 0
 
     def e_io_cs_flags(
-        self, qemu, p_obj, ptr_mac_addr
-    ):  # pylint: disable=unused-argument
+        self, qemu: HALQemuTarget, p_obj: int, ptr_mac_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         EIOCSFLAGS
         """
@@ -131,7 +137,7 @@ class Ethernet(BPHandler):
         0x8004690F: "EIOCGHDRLEN",
     }
 
-    def get_packetdata(self, qemu, mblk):  # pylint: disable=no-self-use,no-self-use
+    def get_packetdata(self, qemu: HALQemuTarget, mblk: int) -> Dict[str, Any]:  # pylint: disable=no-self-use,no-self-use
         """
         Reads the packet data from the mblk
         """
@@ -161,7 +167,7 @@ class Ethernet(BPHandler):
         return mblk_out
 
     @bp_handler(["xSend"])
-    def x_send(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def x_send(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         xSend break point handler
         """
@@ -174,7 +180,7 @@ class Ethernet(BPHandler):
         return False, 0  # Is there a reason this is false?
 
     @bp_handler(["xUnload"])
-    def x_unload(self, qemu, bp_addr):  # pylint: disable=unused-argument,no-self-use
+    def x_unload(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument,no-self-use
         """
         xUnload bp_handler
         """
@@ -183,7 +189,7 @@ class Ethernet(BPHandler):
         return False, 0
 
     @bp_handler(["xIoctl"])
-    def x_ioctl(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def x_ioctl(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         EIOCGADDR: get device address
         EIOCSADDR: set device address
@@ -228,8 +234,8 @@ class Ethernet(BPHandler):
 
     @bp_handler(["xPollSend"])
     def x_poll_send(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument, no-self-use
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument, no-self-use
         """
         xPollSend bp_handler
         """
@@ -238,7 +244,7 @@ class Ethernet(BPHandler):
         return False, 0
 
     @bp_handler(["xStart"])
-    def x_start(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def x_start(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         Xstart  bp_handler
         """
@@ -251,7 +257,7 @@ class Ethernet(BPHandler):
         return False, 0
 
     @bp_handler(["xLoad"])
-    def x_load(self, qemu, bp_addr):  # pylint: disable=unused-argument,no-self-use
+    def x_load(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument,no-self-use
         """
         xLoad bp_handler
         """
@@ -261,8 +267,8 @@ class Ethernet(BPHandler):
 
     @bp_handler(["xMCastAddrDel"])
     def x_m_cast_addr_del(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,no-self-use
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument,no-self-use
         """
         xMCastAddrDel bp_handler
         """
@@ -272,8 +278,8 @@ class Ethernet(BPHandler):
 
     @bp_handler(["xMCastAddrGet"])
     def x_m_cast_addr_get(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,no-self-use
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument,no-self-use
         """
         xMCastAddrGet bp_handler
         """
@@ -283,8 +289,8 @@ class Ethernet(BPHandler):
 
     @bp_handler(["xMCastAddrAdd"])
     def x_m_cast_addr_add(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,no-self-use
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument,no-self-use
         """
         xMCastAddrAdd bp_handler
         """
@@ -294,8 +300,8 @@ class Ethernet(BPHandler):
 
     @bp_handler(["ethernet_isr"])
     def ethernet_isr(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,no-self-use
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Any:  # pylint: disable=unused-argument,no-self-use
         """
         ethernet_isr bp_handler
         """
@@ -307,7 +313,7 @@ class Ethernet(BPHandler):
         )
 
     @bp_handler(["handleEndIntRcv"])
-    def handle_end_int_rcv(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def handle_end_int_rcv(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """handle_end_int_rcv"""
         self.p_dev = qemu.get_arg(0)
         self.p_net_pool = qemu.read_memory(self.p_dev + self.net_pool_offset, 4, 1)
@@ -317,7 +323,7 @@ class Ethernet(BPHandler):
             "netTupleGet", [self.p_net_pool, 0x5F0, 1, 1], self, "netTupleGet_return"
         )
 
-    def set_mblk(self, qemu, mblk_addr, data, flags=3):
+    def set_mblk(self, qemu: HALQemuTarget, mblk_addr: int, data: bytes, flags: int = 3) -> None:
         """set_mblk"""
         # p_cl_blk = qemu.read_memory(
         #     (mblk_addr + 0x30),
@@ -335,7 +341,7 @@ class Ethernet(BPHandler):
         log.debug("Incoming Mblk: %s", self.get_packetdata(qemu, mblk_addr))
 
     @bp_handler(["netTupleGet_return"])
-    def get_mblk(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def get_mblk(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """get_mblk"""
         m_blk = qemu.regs.r0
         if m_blk == 0:
@@ -359,7 +365,7 @@ class Ethernet(BPHandler):
     #     return qemu.call("muxReceive", [self.p_dev, self.p_m_blk], self, "receive_done")
 
     @bp_handler(["receive_done"])
-    def receive_done(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def receive_done(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """receive_done"""
         log.debug(
             "DONE With MuxReceive ...................................................."

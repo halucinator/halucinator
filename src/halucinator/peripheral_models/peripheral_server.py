@@ -5,9 +5,12 @@
 Peripheral Server that enables external devices to send and receive events
 from HALucinator over ZMQ
 """
+from __future__ import annotations
 
 import logging
 from functools import wraps
+from typing import Any, Callable, Optional, Tuple, Type, TypeVar, cast
+
 import yaml
 import zmq
 
@@ -19,8 +22,12 @@ __RX_HANDLERS__ = {}
 __RX_CONTEXT__ = zmq.Context()
 __TX_CONTEXT__ = zmq.Context()
 __STOP_SERVER = False
-__RX_SOCKET__ = None
-__TX_SOCKET__ = None
+__RX_SOCKET__: Optional[zmq.Socket] = None
+__TX_SOCKET__: Optional[zmq.Socket] = None
+
+# Lowercase aliases for backwards compatibility (GT version used lowercase)
+__rx_socket__: Optional[zmq.Socket] = None
+__tx_socket__: Optional[zmq.Socket] = None
 
 __PROCESS = None
 __QEMU = None
@@ -28,7 +35,10 @@ __QEMU = None
 OUTPUT_DIRECTORY = None
 
 
-def peripheral_model(cls):
+Publisher = TypeVar("Publisher")
+
+
+def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
     """
     Decorator which registers classes as peripheral models
     """
@@ -41,19 +51,22 @@ def peripheral_model(cls):
         __RX_HANDLERS__[key] = (cls, method)
         if __RX_SOCKET__ is not None:
             log.info("Subscribing to: %s", key)
-            __RX_SOCKET__.setsockopt(zmq.SUBSCRIBE, bytes(key))
+            __RX_SOCKET__.setsockopt(zmq.SUBSCRIBE, key.encode("utf-8"))
 
     return cls
 
 
-def tx_msg(funct):
+CallableVar = TypeVar("CallableVar", bound=Callable[..., Any])
+
+
+def tx_msg(funct: CallableVar) -> CallableVar:
     """
     This is a decorator that sends output of the wrapped function as
     a tagged msg.  The tag is the class_name.func_name
     """
 
     @wraps(funct)
-    def tx_msg_decorator(model_cls, *args):
+    def tx_msg_decorator(model_cls: Any, *args: Any) -> None:
         """
         Sends a message using the class.funct as topic
         data is a yaml encoded of the calling model_cls.funct
@@ -62,21 +75,22 @@ def tx_msg(funct):
         topic = f"Peripheral.{model_cls.__name__}.{funct.__name__}"
         msg = encode_zmq_msg(topic, data)
         log.info("Sending: %s", msg)
+        assert __TX_SOCKET__ is not None
         __TX_SOCKET__.send_string(msg)
 
-    return tx_msg_decorator
+    return cast(CallableVar, tx_msg_decorator)
 
 
-def reg_rx_handler(funct):
+def reg_rx_handler(funct: CallableVar) -> CallableVar:
     """
     This is a decorator that registers a function to handle a specific
     type of message
     """
-    funct.is_rx_handler = True
+    funct.is_rx_handler = True  # type: ignore
     return funct
 
 
-def encode_zmq_msg(topic, msg):
+def encode_zmq_msg(topic: str, msg: Any) -> str:
     """
     Encodes a message sent over a zmq
 
@@ -87,7 +101,7 @@ def encode_zmq_msg(topic, msg):
     return f"{topic} {data_yaml}"
 
 
-def decode_zmq_msg(msg):
+def decode_zmq_msg(msg: str) -> Tuple[str, Any]:
     """
     Decodes a message sent over a zmq socket
     returns (topic, message)
@@ -97,12 +111,14 @@ def decode_zmq_msg(msg):
     return (topic, decoded_msg)
 
 
-def start(rx_port=5555, tx_port=5556, qemu=None):
+def start(rx_port: int = 5555, tx_port: int = 5556, qemu: Any = None) -> None:
     """
     Initializes zmq sockets
     """
     global __RX_SOCKET__
     global __TX_SOCKET__
+    global __rx_socket__
+    global __tx_socket__
     global __QEMU
     global OUTPUT_DIRECTORY
 
@@ -125,101 +141,101 @@ def start(rx_port=5555, tx_port=5556, qemu=None):
     __TX_SOCKET__.bind(hal2io_pipe)
     log.debug("Bound to %s", str(hal2io_pipe))
 
+    # Update lowercase aliases
+    __rx_socket__ = __RX_SOCKET__
+    __tx_socket__ = __TX_SOCKET__
+
     # __process = Process(target=run_server).start()
 
 
-# def trigger_interrupt(num):
-#     global __qemu
-#     log.info("Sending Interrupt: %s" % num)
-#     __qemu.trigger_interrupt(num)
+def trigger_interrupt(num: int) -> None:
+    """
+    Convenience function to trigger an interrupt via QMP
+    """
+    irq_set_qmp(num)
 
 
-def irq_set_qmp(irq_num=1):
+def irq_set_qmp(irq_num: int = 1) -> None:
     """
     set `irq_num` interrupt using qmp interface to QEMU
     Should not be used in BP handlers as creates race
     condition that may cause spurious interrupts
     """
-    __QEMU.irq_set_qmp(irq_num)
+    if __QEMU:
+        __QEMU.irq_set_qmp(irq_num)
 
 
-def irq_clear_qmp(irq_num=1):
+def irq_clear_qmp(irq_num: int = 1) -> None:
     """
     clear `irq_num` interrupt using qmp interface to QEMU
     Should not be used in BP handlers as creates race
     condition that may cause spurious interrupts
     """
-    __QEMU.irq_clear_qmp(irq_num)
+    if __QEMU:
+        __QEMU.irq_clear_qmp(irq_num)
 
 
-def irq_enable_qmp(irq_num=1):
+def irq_enable_qmp(irq_num: int = 1) -> None:
     """
     Enables `irq_num` using qmp interface to QEMU.
     This enables the interrupt to fire, but does not trigger the interrupt
     Should not be used in BP handlers as creates race
     condition that may cause spurious interrupts
     """
-    __QEMU.irq_disable_qmp(irq_num)
+    if __QEMU:
+        __QEMU.irq_enable_qmp(irq_num)
 
 
-def irq_disable_qmp(irq_num=1):
+def irq_disable_qmp(irq_num: int = 1) -> None:
     """
     Disables `irq_num` using qmp interface to QEMU.
     This keeps the interrupt from firing, even if activated(set)
     Should not be used in BP handlers as creates race
     condition that may cause spurious interrupts
     """
-    __QEMU.irq_disable_qmp(irq_num)
+    if __QEMU:
+        __QEMU.irq_disable_qmp(irq_num)
 
 
-def irq_set_bp(irq_num=1):
+def irq_set_bp(irq_num: int = 1) -> None:
     """
     Set `irq_num` interrupt using gdb interface using memory accesses
     can be used in bp_handlers,
     """
-    __QEMU.irq_set_bp(irq_num)
+    if __QEMU:
+        __QEMU.irq_set_bp(irq_num)
 
 
-def irq_clear_bp(irq_num):
+def irq_clear_bp(irq_num: int) -> None:
     """
     Clear `irq_num` interrupt using gdb interface using memory accesses
     can be used in bp_handlers,
     """
-    __QEMU.irq_clear_bp(irq_num)
+    if __QEMU:
+        __QEMU.irq_clear_bp(irq_num)
 
 
-def irq_enable_bp(irq_num):
+def irq_enable_bp(irq_num: int) -> None:
     """
     Enables `irq_num` using gdb interface (memory accesses) to QEMU.
-    This keeps the interrupt from firing, even if activated(set)
-    Can be used in BP Hanlders
+    This enables the interrupt to fire, but does not trigger the interrupt
+    Can be used in BP Handlers
     """
-    __QEMU.irq_enable_bp(irq_num)
+    if __QEMU:
+        __QEMU.irq_enable_bp(irq_num)
 
 
-def irq_disable_bp(irq_num):
+def irq_disable_bp(irq_num: int) -> None:
     """
     Disables `irq_num` using gdb interface (memory accesses) to QEMU.
     This keeps the interrupt from firing, even if activated(set)
-    Can be used in BP Hanlders
+    Can be used in BP Handlers
     """
-    __QEMU.irq_disable_bp(irq_num)
+    if __QEMU:
+        __QEMU.irq_disable_bp(irq_num)
 
 
-# def irq_set(irq_num=1, cpu=0):
-#     global __QEMU
-#     __QEMU.irq_set(irq_num, cpu)
-
-# def irq_clear(self, irq_num=1, cpu=0):
-#     global __QEMU
-#     __QEMU.irq_clear(irq_num, cpu)
-
-# def irq_pulse(self, irq_num=1, cpu=0):
-#     global __QEMU
-#     __QEMU.irq_pulse(irq_num, cpu)
-
-
-def run_server():
+def run_server() -> None:
     """
     This the main loop for the peripheral server.
     """
@@ -248,14 +264,14 @@ def run_server():
                 log.info("Triggering Interrupt %s", msg["num"])
                 irq_set_qmp(msg["num"])
             elif topic.startswith("Interrupt.Base"):
-                log.info("Setting Vector Base Addr %s", msg["num"])
+                log.info("Setting Vector Base Addr %s" % msg["num"])
                 __QEMU.set_vector_table_base(msg["base"])
             else:
                 log.error("Unhandled topic received: %s", topic)
     log.info("Peripheral Server Shutdown Normally")
 
 
-def stop():
+def stop() -> None:
     """
     Stop the Peripheral Server
     """

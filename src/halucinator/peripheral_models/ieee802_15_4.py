@@ -1,18 +1,28 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
+import binascii
+import logging
+import time
+from collections import deque, defaultdict
+from typing import Any, Deque, Dict, Optional, Tuple, Union
+
+from typing import TypedDict
 
 from . import peripheral_server
 # from peripheral_server import PeripheralServer, peripheral_model
-from collections import deque, defaultdict
 from .interrupts import Interrupts
-import binascii
-import struct
-import logging
-import time
+
+# See a comment in ethernet.py for an analogous construct there
+InterfaceId = Union[int, str]
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
+
+
+class IEEE802_15_4Message(TypedDict):
+    frame: bytes
 
 
 # Register the pub/sub calls and methods that need mapped
@@ -20,27 +30,27 @@ log.setLevel(logging.DEBUG)
 class IEEE802_15_4(object):
 
     IRQ_NAME = '802_15_4_RX_Frame'
-    frame_queue = deque()
+    frame_queue: Deque[bytes] = deque()
     calc_crc = True
-    rx_frame_isr = None
+    rx_frame_isr: Optional[int] = None
     rx_isr_enabled = False
-    frame_time = deque()  # Used to record reception time
+    frame_time: Deque[float] = deque()  # Used to record reception time
 
     @classmethod
-    def enable_rx_isr(cls, interface_id):
+    def enable_rx_isr(cls, interface_id: InterfaceId) -> None:
         cls.rx_isr_enabled = True
         if cls.frame_queue and cls.rx_frame_isr is not None:
             Interrupts.trigger_interrupt(cls.rx_frame_isr, cls.IRQ_NAME)
 
     @classmethod
-    def disable_rx_isr(self, interface_id):
+    def disable_rx_isr(self, interface_id: InterfaceId) -> None:
         IEEE802_15_4.rx_isr_enabled = False
 
     @classmethod
     @peripheral_server.tx_msg
-    def tx_frame(cls, interface_id, frame):
+    def tx_frame(cls, interface_id: InterfaceId, frame: bytes) -> Dict[str, Any]:
         '''
-            Creates the message that Peripheral.tx_msga will send on this 
+            Creates the message that Peripheral.tx_msga will send on this
             event
         '''
         print("Sending Frame (%i): " % len(frame), binascii.hexlify(frame))
@@ -49,9 +59,9 @@ class IEEE802_15_4(object):
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def rx_frame(cls, msg):
+    def rx_frame(cls, msg: Dict[str, Any]) -> None:
         '''
-            Processes reception of this type of message from 
+            Processes reception of this type of message from
             PeripheralServer.rx_frame
         '''
         frame = msg['frame']
@@ -63,7 +73,9 @@ class IEEE802_15_4(object):
             Interrupts.trigger_interrupt(cls.rx_frame_isr,  cls.IRQ_NAME)
 
     @classmethod
-    def get_first_frame(cls, get_time=False):
+    def get_first_frame_and_time(
+        cls,
+    ) -> Tuple[Optional[bytes], Optional[float]]:
         frame = None
         rx_time = None
         log.info("Checking for frame")
@@ -72,17 +84,19 @@ class IEEE802_15_4(object):
             frame = cls.frame_queue.popleft()
             rx_time = cls.frame_time.popleft()
 
-        if get_time:
-            return frame, rx_time
-        else:
-            return frame
+        return frame, rx_time
 
     @classmethod
-    def has_frame(cls):
+    def get_first_frame(cls) -> Optional[bytes]:
+        frame, rx_time = cls.get_first_frame_and_time()
+        return frame
+
+    @classmethod
+    def has_frame(cls) -> bool:
         return len(cls.frame_queue) > 0
 
     @classmethod
-    def get_frame_info(cls):
+    def get_frame_info(cls) -> Tuple[int, int]:
         '''
             return number of frames and length of first frame
         '''

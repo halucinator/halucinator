@@ -1,13 +1,19 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
+
+from typing import TYPE_CHECKING, Optional, Type
 
 import IPython
 from ...peripheral_models.ethernet import EthernetModel
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -55,7 +61,7 @@ SUPPORTED_TYPES = (ETHTYPE_ARP, ETHTYPE_IP)
 
 class Ksz8851HLE(BPHandler):
 
-    def __init__(self, model=EthernetModel):
+    def __init__(self, model: Type[EthernetModel] = EthernetModel):
         BPHandler.__init__(self)
         self.model = model
         self.last_rx_time = time.time()
@@ -63,20 +69,20 @@ class Ksz8851HLE(BPHandler):
         self.dev_ptr = None
         self.netif_ptr = None
 
-    def is_supported_frame_type(self, frame):
+    def is_supported_frame_type(self, frame: bytes) -> bool:
         ty = struct.unpack('!H', frame[12:14])[0]
         log.info("Frame ty: %s" % hex(ty))
         log.info("Frame : %s" % binascii.hexlify(frame[:20]))
         return ty in (SUPPORTED_TYPES)
 
-    def get_id(self, qemu):
+    def get_id(self, qemu: HALQemuTarget) -> str:
         return 'ksz8851'
 
     @bp_handler(['sys_get_ms'])
-    def sys_get_ms(self, qemu, bp_addr):
+    def sys_get_ms(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         return True, 0
 
-    def call_populate_queues(self, qemu):
+    def call_populate_queues(self, qemu: HALQemuTarget) -> None:
         '''
         This will call the ksz8851snl_rx_populate_queue
         returning to ethernetif_input
@@ -88,7 +94,7 @@ class Ksz8851HLE(BPHandler):
         qemu.regs.pc = qemu.avatar.callables['ksz8851snl_rx_populate_queue'] | 1
 
     @bp_handler(['ethernetif_input'])
-    def ethernetif_input(self, qemu, bp_addr):
+    def ethernetif_input(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         # 1. See if there are frames
         now = time.time()
         log.info("In ETHERNET_INPUT: %f" % (now - self.last_exec_time))
@@ -153,7 +159,7 @@ class Ksz8851HLE(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851snl_low_level_output'])
-    def low_level_output(self, qemu, bp_addr):
+    def low_level_output(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         log.info('In low level output')
         pbuf_free = qemu.avatar.callables['pbuf_free']
         pbuf_ptr = qemu.regs.r1
@@ -177,6 +183,6 @@ class Ksz8851HLE(BPHandler):
         return True, 0
 
     @bp_handler(['ksz8851snl_init'])
-    def return_ok(self, qemu, bp_addr):
+    def return_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
         log.info("Init Called")
         return True, 0

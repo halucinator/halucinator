@@ -1,27 +1,32 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
-import sqlite3
-from tkinter import Tk, ttk, Label
-import tkinter as tk
-from .util.parse_symbol_tables import DWARFReader, sym_format
-#from StringIO import StringIO
-from io import BytesIO
-import pickle
 import functools
+import sqlite3
 import struct
+from io import BytesIO
+
+try:
+    import tkinter as tk
+    from tkinter import Tk, ttk, Label
+except ImportError:
+    tk = None  # type: ignore[assignment]
+from typing import Any, Dict, Optional, Set
+
+from .util.parse_symbol_tables import DWARFReader, sym_format
 
 
 class App(object):
-    def __init__(self, elf_filename):
-        self.root = Tk()
+    def __init__(self, elf_filename: str) -> None:
+        self.root: Tk = Tk()
         with open(elf_filename, 'rb') as elf_file:
-            self.dwarf_reader = DWARFReader(elf_file)
+            self.dwarf_reader: DWARFReader = DWARFReader(elf_file)
         self.create_gui_elements()
         self.root.mainloop()
 
-    def create_recording_listing(self):
+    def create_recording_listing(self) -> None:
         '''
             Populates the functions tree
         '''
@@ -31,25 +36,25 @@ class App(object):
             # TODO change diplayed name for recording to include name of app
             # self.tree.insert(funct_lut[f_name], tk.END, iid=r_id, text="Exit_ID %i" % r_id)
 
-    def create_gui_elements(self):
+    def create_gui_elements(self) -> None:
         '''
             Creates the elements in the GUI
         '''
         # Label for functions that are recorded
-        self.table_funcs = Label(master=self.root, text="Functions")
+        self.table_funcs: Label = Label(master=self.root, text="Functions")
         # self.table_funcs.config(width=400)
 
         # Tree of recording listings
-        self.tree = ttk.Treeview(master=self.root)
+        self.tree: ttk.Treeview = ttk.Treeview(master=self.root)
         # self.tree.column('#0', minwidth=400)
         self.tree.bind('<Button-1>', self.on_func_click)
         self.create_recording_listing()
 
         # Label for diplaying recording details
-        self.record_label = Label(master=self.root, text="Recorded")
+        self.record_label: Label = Label(master=self.root, text="Recorded")
 
         # Tree for displaying record details
-        self.record_tree = ttk.Treeview(master=self.root,
+        self.record_tree: ttk.Treeview = ttk.Treeview(master=self.root,
                                         columns=("Type", "Name", "Size", "Before", "After"))
         self.record_tree.heading('#1', text='Type')
         self.record_tree.heading('#2', text='Name')
@@ -59,7 +64,7 @@ class App(object):
         self.record_tree.tag_configure('DIFF', background='light coral')
         self.set_layout()
 
-    def set_layout(self):
+    def set_layout(self) -> None:
         '''
             Sets the layout for the gui
         '''
@@ -78,7 +83,7 @@ class App(object):
         self.root.grid_columnconfigure(1, weight=1, minsize=500)
         self.root.grid_rowconfigure(1, weight=1)
 
-    def display_recording(self, funct_name):
+    def display_recording(self, funct_name: str) -> None:
         '''
             Displays the selected function
         '''
@@ -124,8 +129,8 @@ class App(object):
             self.add_children(funct_name, sym_reader, p_die,
                               parent_values, row, deref)
 
-    def add_children(self, funct_name, sym_reader, sym_die, parent_values, parent,
-                     deref_addrs):
+    def add_children(self, funct_name: str, sym_reader: DWARFReader, sym_die: Any, parent_values: Dict[str, Any], parent: Any,
+                     deref_addrs: Dict[str, Set[Any]]) -> None:
         '''
             Adds symbol to the record tree
         '''
@@ -229,14 +234,14 @@ class App(object):
                 # These are likely primitives don't need to add children
                 pass
 
-    def tag_if_diff(self, row, a_val, b_val):
+    def tag_if_diff(self, row: Any, a_val: Any, b_val: Any) -> None:
         if b_val != a_val:
             r_id = row
             while r_id != '':
                 self.record_tree.item(r_id, tag='DIFF')
                 r_id = self.record_tree.parent(r_id)
 
-    def add_record_row(self, parent, sym_reader, sym_die, name, b_val, a_val):
+    def add_record_row(self, parent: Any, sym_reader: DWARFReader, sym_die: Any, name: Optional[str], b_val: Any, a_val: Any) -> Any:
         if sym_die.tag == 'DW_TAG_enumeration_type':
             ty = sym_reader.get_enum_str(sym_die)
         else:
@@ -248,7 +253,7 @@ class App(object):
         self.tag_if_diff(row, a_val, b_val)
         return row
 
-    def on_func_click(self, event):
+    def on_func_click(self, event: Any) -> None:
         clicked_id = self.tree.identify('item', event.x, event.y)
         try:
             #iid = int(clicked_id)

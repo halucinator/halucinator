@@ -1,12 +1,14 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
+from __future__ import annotations
 
 from struct import unpack
+from typing import Tuple
 
 
-def get_sp_and_entry(binary_filename):
+def get_sp_and_entry(binary_filename: str) -> Tuple[int, int]:
     '''
     Gets the initial stack pointer and entry point from the filename
     It assumes the passed file is loaded/aliased to address 0x00000000
