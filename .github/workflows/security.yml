@@ -1,0 +1,180 @@
+name: Security
+
+on:
+  push:
+    branches: [master, main, 'explore/**', 'feature/**']
+  pull_request:
+    branches: [master, main]
+  schedule:
+    - cron: '0 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install bandit
+        run: pip install --quiet bandit
+
+      - name: Scan src/ (report only — tighten once pre-existing findings are triaged)
+        run: |
+          bandit -r src/ \
+            --severity-level low \
+            --exclude 'src/halucinator/test,test' \
+            -f txt || true
+
+      - name: Generate JSON report
+        if: always()
+        run: |
+          bandit -r src/ \
+            --severity-level low \
+            --exclude 'src/halucinator/test,test' \
+            -f json -o bandit-report.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          retention-days: 30
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install --quiet pip-audit
+
+      - name: Audit requirements.txt
+        run: pip-audit -r requirements.txt || true
+        continue-on-error: true
+
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install semgrep
+        run: pip install --quiet semgrep
+
+      - name: Semgrep scan (src/ only, skip vendored deps)
+        run: |
+          semgrep scan --config=auto \
+            --json --output=semgrep-report.json \
+            --exclude=deps --exclude=node_modules \
+            src/ || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          retention-days: 30
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=8.21.2
+          wget -qO- "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
+
+      - name: Run gitleaks
+        run: gitleaks detect --source=. --verbose --report-format=json --report-path=gitleaks-report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 30
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy fs scan (includes deps/avatar2)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,misconfig'
+          severity: 'HIGH,CRITICAL'
+          skip-dirs: 'deps/build-qemu,deps/avatar-qemu'
+          format: 'json'
+          output: 'trivy-report.json'
+          exit-code: '0'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-report.json
+          retention-days: 30
+
+  # SBOM — exhaustive Software Bill of Materials covering halucinator,
+  # avatar2, and all transitive Python dependencies. Only checks out
+  # first-level submodules (not recursive) because avatar2's nested
+  # avatar-qemu submodule references commits that don't exist on the
+  # fork's remote. avatar2's Python deps are captured via pip install.
+  sbom:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install all Python deps (halucinator + avatar2 + transitive)
+        run: |
+          # Install avatar2 first (it has its own install_requires)
+          pip install -e deps/avatar2/ || true
+          # Then halucinator's requirements + editable install
+          pip install -r requirements.txt || true
+          pip install -e src/ || true
+          # Dump full pip tree for reference
+          pip list --format=json > pip-freeze.json
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+          artifact-name: halucinator-sbom
+          upload-release-assets: true
+
+      - name: Upload pip dependency list
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-dependency-list
+          path: pip-freeze.json
+          retention-days: 30
