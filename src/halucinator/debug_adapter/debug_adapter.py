@@ -61,27 +61,34 @@ class LineTranslator(object):
             seen_lines.add(line)
             deduped.append((line, off & 0xFFFFFFFE))
 
-        # Two lookup structures:
+        # Lookup structures for the two directions:
         #
-        # _line_to_addr: line → addr dict for find_next_instruction
-        #   (used when setting breakpoints: "user clicked line N, what
-        #   address?"). Sorted lineList enables bisect_left for "next
-        #   instruction at or after line N" without requiring monotonic
-        #   addresses.
+        # Line → addr: lineList + offsetList (parallel arrays sorted by
+        # line number). find_next_instruction uses bisect_left on lineList.
         #
-        # _addr_to_line: addr → line dict for find_line_number
-        #   (used when reporting stops: "PC is at addr X, what line?").
-        #   Covers ALL addresses including non-linear code (ISRs, data
-        #   refs, literal pools). The old monotonic-offset filter dropped
-        #   73% of entries from gview files that mix code (0x08000xxx)
-        #   and data (0x00800xxx) regions.
+        # Addr → line: _addr_to_line dict (O(1) exact match) +
+        # _sorted_addrs/_sorted_lines (sorted by address for bisect
+        # fallback when PC is between known instructions).
+        # lineList/offsetList: sorted by LINE number — used by
+        # find_next_instruction (bisect_left on lineList).
         self.lineList = [r[0] for r in deduped]
         self.offsetList = [r[1] for r in deduped]
-        self._line_to_addr: Dict[int, int] = {line: off for line, off in deduped}
+
+        # _addr_to_line: exact address → line lookup (O(1)).
         self._addr_to_line: Dict[int, int] = {}
         for line, off in deduped:
             if off not in self._addr_to_line:
                 self._addr_to_line[off] = line
+
+        # _sorted_addrs / _sorted_lines: sorted by ADDRESS for bisect
+        # fallback in find_line_number when the exact address isn't in
+        # the dict (PC between two known instructions).
+        by_addr = sorted(
+            [(off, line) for line, off in deduped],
+            key=lambda p: p[0],
+        )
+        self._sorted_addrs = [p[0] for p in by_addr]
+        self._sorted_lines = [p[1] for p in by_addr]
 
         global line_translator
         line_translator = self
@@ -99,16 +106,23 @@ class LineTranslator(object):
         # lineList is sorted (line numbers are always monotonic in a file)
         i = bisect.bisect_left(self.lineList, line)
         if i != len(self.lineList):
-            found_line = self.lineList[i]
-            return (found_line, self._line_to_addr[found_line])
+            return (self.lineList[i], self.offsetList[i])
         raise LookupError
 
     def find_line_number(self, addr: int) -> Optional[int]:
         """ Finds the line number associated with the specified address.
         Masks the Thumb bit (bit 0) so 0x8000809 maps the same as 0x8000808.
+        Tries exact dict lookup first; falls back to bisect on the
+        address-sorted list for "closest instruction at or before addr".
         """
         addr = addr & 0xFFFFFFFE  # Clear Thumb bit
-        return self._addr_to_line.get(addr)
+        # Exact match — fast path
+        exact = self._addr_to_line.get(addr)
+        if exact is not None:
+            return exact
+        # Fallback: closest instruction at or before this address
+        i = bisect.bisect_right(self._sorted_addrs, addr)
+        return self._sorted_lines[i - 1] if i > 0 else None
 
 
 line_translator = None
