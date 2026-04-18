@@ -29,7 +29,6 @@
 |---------|---------|-------|
 | scapy | GPL-2.0 | Ethernet frame handling |
 | angr / cle | BSD | ELF symbol extraction (hal_make_addrs) |
-| gtirb | MIT | Binary analysis |
 | ipdb | BSD | Interactive debugging |
 
 ## Test Dependencies

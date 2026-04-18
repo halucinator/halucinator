@@ -219,7 +219,6 @@ jobs:
         set -e
         set -x
         source $(pwd)/virtualenvs/halucinator/bin/activate
-        pip install gtirb gtirb-capstone gtirb-functions 2>/dev/null || true
         PYTHONPATH=src:test/pytest/helpers \
           python3 -m pytest test/pytest/ \
           -m "not slow_zmq and not needs_root" \

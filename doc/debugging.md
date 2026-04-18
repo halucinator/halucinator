@@ -6,7 +6,7 @@ simultaneously or on their own:
 - **GDB RSP server** (`--gdb-server`) — works with any GDB client: Ghidra,
   command-line GDB, IDA, Binary Ninja, VSCode's `cppdbg` extension, etc.
 - **Debug Adapter Protocol server** (`--dap`) — works with the HALucinator
-  VSCode extension for GTIRB-aware debugging.
+  VSCode extension for gview-based source-level debugging.
 
 Both interfaces are **HAL-aware**: they transparently handle HAL intercepts
 (where Python handlers replace firmware functions) so that the debug client
@@ -113,7 +113,8 @@ halucinator -c config.yaml --dap 12345
 ### Connecting with VSCode
 
 The DAP server is designed for use with the HALucinator VSCode extension,
-which integrates the GTIRB disassembly viewer with live debugging.
+which integrates the gview disassembly viewer (Ghidra-based) with live
+debugging.
 
 `.vscode/launch.json`:
 
@@ -157,7 +158,7 @@ each debug interface operates independently:
 halucinator -c config.yaml --dap --gdb-server
 ```
 
-This is useful for running VSCode on the DAP port for GTIRB-integrated
+This is useful for running VSCode on the DAP port for gview-integrated
 analysis while also connecting Ghidra on the GDB port. **Caveat:** using
 *both clients simultaneously* to drive execution (e.g. one continues while
 the other steps) is undefined — use one at a time.
