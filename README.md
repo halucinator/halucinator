@@ -188,20 +188,38 @@ hal_make_addr -b <path_to_elf> -o addrs.yaml
 
 ## VSCode Extension and Debug Adapter
 
-HALucinator includes a Debug Adapter Protocol (DAP) server for IDE-based
-debugging and VSCode extensions for breakpoint handler browsing.
+HALucinator includes a Debug Adapter Protocol (DAP) server and a GDB RSP
+server. Paired with the companion VSCode extensions at
+[GrammaTech/halucinator-vscode](https://github.com/GrammaTech/halucinator-vscode),
+you get:
+
+- **Source-level debugging in VSCode** against Ghidra-generated `.gview`
+  disassembly — breakpoints, step/continue/pause, register and memory
+  inspection, and a dedicated HAL intercepts panel.
+- **Selectable debug backend** — choose DAP (native, richer HAL awareness)
+  or GDB (works with Ghidra, `gdb-multiarch`, IDA, Binary Ninja) per
+  project.
+- **Project and config editing** — YAML schema validation, gutter icons
+  for intercepts, and breakpoint-handler autocomplete driven by
+  `bpdata.json`.
 
 ### Installing VSCode Extensions
 
-The extensions are distributed as `.vsix` files. If using Docker:
+The extensions are published as GitHub releases, not bundled with this
+repo. Install the latest release with:
 
 ```bash
-# Extract and install extensions from a running container
-./extra_tools/vscode-extension-installer.sh halucinator
+# Downloads and installs the latest release into your host VSCode
+./extra_tools/vscode-extension-installer.sh
+
+# Or pin to a specific release tag
+./extra_tools/vscode-extension-installer.sh v1.0.0
 ```
 
-This installs the HALucinator VSCode extension and the gview assembly
-viewer (for Ghidra-generated disassembly) into your host VSCode.
+This installs `gt-halucinator.halucinator-vscode` and
+`gt-halucinator.gview-extension`. To pick a release manually, browse the
+[halucinator-vscode releases page](https://github.com/GrammaTech/halucinator-vscode/releases)
+and `code --install-extension <file>.vsix`.
 
 ### Generating Handler Metadata
 

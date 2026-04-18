@@ -1,26 +1,15 @@
 #!/usr/bin/env bash
 #
-# Install HALucinator VSCode extensions from a Docker image.
-# Usage: ./vscode-extension-installer.sh <docker_image>
+# Download and install HALucinator VSCode extensions from GitHub releases.
+# Usage: ./vscode-extension-installer.sh [tag]
+#   tag: optional release tag (default: "latest")
+#
+# Releases: https://github.com/GrammaTech/halucinator-vscode/releases
 #
 set -e
 
-VSIX_DIR="/halucinator/vsix_files"
-
-# Extension id -> vsix filename (without .vsix suffix).
-# gtirb-vscode is gone (GTIRB support removed; gview/Ghidra is the
-# replacement). halucinator-project-creator was merged into the
-# halucinator-vscode extension, so it's no longer a separate package.
-declare -A EXTENSIONS=(
-    [gt-halucinator.gview-extension]="gview-extension-0.0.3"
-    [gt-halucinator.halucinator-vscode]="halucinator-vscode-1.0.0"
-)
-
-if [ "$#" -ne 1 ]; then
-    echo -e "\n\tUsage: $0 <docker_image>\n"
-    exit 1
-fi
-DOCKER_IMAGE=$1
+REPO="GrammaTech/halucinator-vscode"
+TAG="${1:-latest}"
 
 # Check VSCode
 if ! code -h 2>/dev/null | grep -q "Visual Studio Code"; then
@@ -28,25 +17,54 @@ if ! code -h 2>/dev/null | grep -q "Visual Studio Code"; then
     exit 1
 fi
 
-# Start a temporary container to extract vsix files
-echo "Extracting vsix files from ${DOCKER_IMAGE}"
-docker run -dt --rm --name halucinator-tmp --network=none "$DOCKER_IMAGE"
+# Check curl
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Error: 'curl' is required but not installed."
+    exit 1
+fi
 
-for ext_id in "${!EXTENSIONS[@]}"; do
-    vsix="${EXTENSIONS[$ext_id]}"
-    docker cp "halucinator-tmp:${VSIX_DIR}/${vsix}.vsix" .
+# Resolve the release API URL
+if [ "$TAG" = "latest" ]; then
+    api_url="https://api.github.com/repos/${REPO}/releases/latest"
+else
+    api_url="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
+fi
 
-    installed=$(code --list-extensions --show-versions 2>/dev/null | grep "$ext_id" || true)
-    if [ -z "$installed" ]; then
-        echo "Installing ${ext_id}"
-        code --install-extension "${vsix}.vsix"
-    elif [[ "$installed" == *"${vsix##*-}"* ]]; then
-        echo "${ext_id} is already up to date"
-    else
-        echo "${ext_id} version mismatch (installed: ${installed})"
-        echo "  Consider uninstalling and re-running this script."
+echo "Fetching release info from ${api_url}"
+release_json=$(curl -fsSL "$api_url")
+
+# Extract the list of .vsix asset download URLs
+vsix_urls=$(echo "$release_json" \
+    | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*\.vsix"' \
+    | sed -E 's/.*"([^"]+)"$/\1/')
+
+if [ -z "$vsix_urls" ]; then
+    echo "Error: no .vsix assets found in release '${TAG}' of ${REPO}"
+    exit 1
+fi
+
+# Download and install
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+
+installed_list=$(code --list-extensions --show-versions 2>/dev/null || true)
+
+for url in $vsix_urls; do
+    fname=$(basename "$url")
+    echo "Downloading ${fname}"
+    curl -fsSL -o "${tmp_dir}/${fname}" "$url"
+
+    # Best-effort idempotency: skip if the exact file name (which encodes
+    # the version) matches an already-installed extension.
+    version_suffix="${fname%.vsix}"
+    version_suffix="${version_suffix##*-}"
+    if echo "$installed_list" | grep -q "@${version_suffix}$"; then
+        echo "  ${fname} already installed, skipping"
+        continue
     fi
+
+    echo "Installing ${fname}"
+    code --install-extension "${tmp_dir}/${fname}"
 done
 
-docker stop halucinator-tmp
 echo -e "\nDone."

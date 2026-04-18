@@ -23,10 +23,13 @@ python3 remove_handler_paths.py
 ```
 
 ### vscode-extension-installer.sh
-Installs the HALucinator VSCode extensions from a running Docker container.
+Downloads the HALucinator VSCode extensions from the
+[halucinator-vscode releases page](https://github.com/GrammaTech/halucinator-vscode/releases)
+and installs them into the host VSCode.
 
 ```bash
-./vscode-extension-installer.sh <docker_image_name>
+./vscode-extension-installer.sh          # latest release
+./vscode-extension-installer.sh v1.0.0   # pinned release tag
 ```
 
 ## Cross-Compiler Installation
