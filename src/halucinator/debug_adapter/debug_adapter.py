@@ -109,20 +109,35 @@ class LineTranslator(object):
             return (self.lineList[i], self.offsetList[i])
         raise LookupError
 
+    # Max bytes between a query address and the closest mapped
+    # instruction for the bisect fallback to accept. ARM Thumb
+    # instructions are 2 or 4 bytes; 4 covers both. Anything farther
+    # means PC is outside the gview's covered code region (e.g.,
+    # a HAL intercept stub in halucinator's memory at 0x30000000+,
+    # or an ISR in a section Ghidra didn't annotate) and returning
+    # a "closest" line would mis-highlight.
+    _FALLBACK_MAX_DISTANCE = 4
+
     def find_line_number(self, addr: int) -> Optional[int]:
         """ Finds the line number associated with the specified address.
         Masks the Thumb bit (bit 0) so 0x8000809 maps the same as 0x8000808.
         Tries exact dict lookup first; falls back to bisect on the
-        address-sorted list for "closest instruction at or before addr".
+        address-sorted list for "closest instruction at or before addr"
+        — but only if that closest instruction is within 4 bytes, so
+        addresses outside the gview's mapped range don't mis-highlight.
         """
         addr = addr & 0xFFFFFFFE  # Clear Thumb bit
         # Exact match — fast path
         exact = self._addr_to_line.get(addr)
         if exact is not None:
             return exact
-        # Fallback: closest instruction at or before this address
+        # Fallback: closest instruction at or before, within 4 bytes
         i = bisect.bisect_right(self._sorted_addrs, addr)
-        return self._sorted_lines[i - 1] if i > 0 else None
+        if i > 0:
+            closest_addr = self._sorted_addrs[i - 1]
+            if addr - closest_addr <= self._FALLBACK_MAX_DISTANCE:
+                return self._sorted_lines[i - 1]
+        return None
 
 
 line_translator = None
