@@ -7,12 +7,13 @@ set -e
 
 VSIX_DIR="/halucinator/vsix_files"
 
-# Extension name -> vsix filename (without .vsix suffix)
+# Extension id -> vsix filename (without .vsix suffix).
+# gtirb-vscode is gone (GTIRB support removed; gview/Ghidra is the
+# replacement). halucinator-project-creator was merged into the
+# halucinator-vscode extension, so it's no longer a separate package.
 declare -A EXTENSIONS=(
-    [grammatech.gview-extension]="gview-extension-0.0.3"
-    [grammatech.gtirb-vscode]="gtirb-vscode-0.0.10"
-    [grammatech.halucinator-vscode]="halucinator-vscode-0.0.8"
-    [grammatech.halucinator-project-creator]="halucinator-project-creator-0.0.13"
+    [gt-halucinator.gview-extension]="gview-extension-0.0.3"
+    [gt-halucinator.halucinator-vscode]="halucinator-vscode-1.0.0"
 )
 
 if [ "$#" -ne 1 ]; then
