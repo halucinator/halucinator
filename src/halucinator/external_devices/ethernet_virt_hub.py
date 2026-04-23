@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from .ioserver import IOServer
 from .trigger_interrupt import SendInterrupt
@@ -8,6 +10,8 @@ from threading import Thread, Event
 import logging
 import time
 import socket
+from typing import List, Mapping, Optional, Sequence, Union
+
 import scapy.all as scapy
 import os
 from .host_ethernet_server import HostEthernetServer
@@ -15,35 +19,35 @@ log = logging.getLogger(__name__)
 
 
 class VirtualEthHub(object):
-    def __init__(self, ioservers=[]):
+    def __init__(self, ioservers: Sequence[IOServer] = []) -> None:
         '''
             args:
             ioserver:  list of ioservers to bridge together
         '''
-        self.ioservers = []
-        self.host_socket = None
-        self.host_interface = None
+        self.ioservers: List[Union[IOServer, HostEthernetServer]] = []
+        self.host_socket: Optional[socket.socket] = None
+        self.host_interface: Optional[str] = None
         for server in ioservers:
             self.add_server(server)
 
-    def add_server(self, ioserver):
+    def add_server(self, ioserver: Union[IOServer, HostEthernetServer]) -> None:
         self.ioservers.append(ioserver)
         ioserver.register_topic('Peripheral.EthernetModel.tx_frame',
                                 self.received_frame)
 
-    def received_frame(self, from_server, msg):
+    def received_frame(self, from_server: IOServer, msg: Mapping[str, bytes]) -> None:
         for server in self.ioservers:
             log.info('Forwarding, msg')
             if server != from_server:
                 server.send_msg('Peripheral.EthernetModel.rx_frame', msg)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         for server in self.ioservers:
             log.debug("Eth Hub:Shutting Down")
             server.shutdown()
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_ports', nargs='+', default=[5556, 5558],
@@ -95,6 +99,9 @@ def main():
     log.info("Shutting Down")
     hub.shutdown()
     # io_server.join()
+
+# Backwards-compatible alias (original GT spelling)
+ViruatalEthHub = VirtualEthHub
 
 if __name__ == '__main__':
     main()

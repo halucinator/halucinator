@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import logging
-from halucinator import hal_log as hal_log_conf
 import os
+from typing import Any, Dict, List, Optional
+
+from halucinator import hal_log as hal_log_conf
 log = logging.getLogger(__name__)
 hal_log = hal_log_conf.getHalLogger()
 
@@ -9,28 +13,38 @@ class HalMemConfig(object):
         Parses the memory portions of halucinator's config file
         and represents that data with some helper functions
     '''
-    def __init__(self, name, config_filename, base_addr, size, 
-                 permissions='rwx', file=None, emulate=None, 
-                 qemu_name=None, properties=None, irq=None):
+    def __init__(
+        self,
+        name: str,
+        config_filename: str,
+        base_addr: int,
+        size: int,
+        permissions: str = 'rwx',
+        file: Optional[str] = None,
+        emulate: Optional[str] = None,
+        qemu_name: Optional[str] = None,
+        properties: Optional[Dict[str, Any]] = None,
+        irq: Optional[Any] = None,
+    ) -> None:
         '''
             Reads in config
         '''
-        self.name = name
-        self.config_file = config_filename # For reporting where problems are
-        self.file = file
-        self.size = size
-        self.permissions = permissions
-        self.emulate = emulate
-        self.emulate_required = False
-        self.base_addr = base_addr
-        self.qemu_name = qemu_name
-        self.irq_config = irq
-        self.properties = properties
+        self.name: str = name
+        self.config_file: str = config_filename  # For reporting where problems are
+        self.file: Optional[str] = file
+        self.size: int = size
+        self.permissions: str = permissions
+        self.emulate: Optional[str] = emulate
+        self.emulate_required: bool = False
+        self.base_addr: int = base_addr
+        self.qemu_name: Optional[str] = qemu_name
+        self.irq_config: Optional[Any] = irq
+        self.properties: Optional[Dict[str, Any]] = properties
 
         if self.file != None:
             self.get_full_path()
         
-    def get_full_path(self):
+    def get_full_path(self) -> None:
         '''
             This make the file used by a memory relative to the config file
             containing it
@@ -39,7 +53,7 @@ class HalMemConfig(object):
         if base_dir != None and not os.path.isabs(self.file):
             self.file = os.path.join(base_dir, self.file)
 
-    def overlaps(self, other_mem):
+    def overlaps(self, other_mem: HalMemConfig) -> bool:
         '''
             Checks to see if this memory description overlaps with 
             another
@@ -55,8 +69,8 @@ class HalMemConfig(object):
             return True
         return False
 
-    def is_valid(self):
-        valid = True
+    def is_valid(self) -> bool:
+        valid: bool = True
         if self.size %(4096) != 0:
             hal_log.error("Memory/Peripheral: has invalid size, must be multiple of 4kB\n\t%s" % self)
             valid = False
@@ -66,6 +80,6 @@ class HalMemConfig(object):
             valid = False
         return valid
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "(%s){name:%s, base_addr:%#x, size:%#x, emulate:%s}" % \
           (self.config_file, self.name, self.base_addr, self.size, self.emulate)

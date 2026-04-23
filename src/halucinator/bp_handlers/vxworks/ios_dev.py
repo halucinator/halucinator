@@ -4,11 +4,17 @@
 
 
 """ios dev module"""
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.utty import UTTYModel
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -16,19 +22,19 @@ log = logging.getLogger(__name__)
 class IosDev(BPHandler):
     """ios dev class bp handler"""
 
-    drivers = {}
-    localDir = "tmp/HALucinator/FS"
-    models = [UTTYModel]
+    drivers: Dict[int, str] = {}
+    localDir: str = "tmp/HALucinator/FS"
+    models: List[Type[UTTYModel]] = [UTTYModel]
 
     @classmethod
-    def get_driver(cls, drv):
+    def get_driver(cls, drv: int) -> Optional[str]:
         """get_driver"""
         if drv in cls.drivers:
             return cls.drivers[drv]
         return None
 
     @bp_handler(["iosDevAdd"])
-    def ios_dev_add(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_dev_add(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_dev_add"""
         log.debug("ios_dev_add")
         name = qemu.read_string(qemu.get_arg(1))
@@ -48,7 +54,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosCreate"])
-    def ios_create(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_create(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_create"""
         log.debug("ios_create")
         name = qemu.read_string(qemu.get_arg(1))
@@ -60,7 +66,7 @@ class IosDev(BPHandler):
         # read_string, 0
 
     @bp_handler(["iosDelete"])
-    def ios_delete(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_delete(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_delete"""
         log.debug("ios_delete")
 
@@ -72,7 +78,7 @@ class IosDev(BPHandler):
         # return True, 0
 
     @bp_handler(["iosOpen"])
-    def ios_open(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_open(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_open"""
         log.debug("ios_open")
 
@@ -88,7 +94,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosClose"])
-    def ios_close(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_close(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_close"""
         log.debug("ios_close")
         fd = qemu.get_arg(0)
@@ -96,7 +102,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosRead"])
-    def ios_read(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_read(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_read"""
         log.debug("ios_read")
         fd = qemu.get_arg(0)
@@ -108,7 +114,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosWrite"])
-    def ios_write(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_write(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_write"""
         log.debug("ios_write")
         log.debug("\tFD:           0x%08x", qemu.get_arg(0))
@@ -119,7 +125,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosIoctl"])
-    def ios_ioctl(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_ioctl(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_ioctl"""
         log.debug("ios_ioctl")
         log.debug("\tFD:       0x%08x", qemu.get_arg(0))
@@ -128,7 +134,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosFdNew"])
-    def ios_fd_new(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_fd_new(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_fd_new"""
         log.debug("ios_fd_new")
         hdr = qemu.get_arg(0)
@@ -139,7 +145,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosFdFree"])
-    def ios_fd_free(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_fd_free(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_fd_free"""
         log.debug("ios_fd_free")
         fd = qemu.get_arg(0)
@@ -147,7 +153,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["iosFdSet"])
-    def ios_fd_set(self, qemu, bp_addr):  # pylint: disable=no-self-use,unused-argument
+    def ios_fd_set(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_fd_set"""
         log.debug("ios_fd_set")
         name = qemu.read_string(qemu.get_arg(2))
@@ -159,8 +165,8 @@ class IosDev(BPHandler):
 
     @bp_handler(["iosDevFind"])
     def ios_dev_find(
-        self, qemu, bp_addr
-    ):  # pylint: disable=no-self-use,unused-argument
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_dev_find"""
         log.debug("ios_dev_find")
         name = qemu.read_string(qemu.get_arg(0))
@@ -171,8 +177,8 @@ class IosDev(BPHandler):
 
     @bp_handler(["iosDrvInstall"])
     def ios_drv_install(
-        self, qemu, bp_addr
-    ):  # pylint: disable=no-self-use,unused-argument
+        self, qemu: HALQemuTarget, bp_addr: int
+    ) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_drv_install"""
 
         # initalize fd table
@@ -191,7 +197,7 @@ class IosDev(BPHandler):
         return False, None
 
     @bp_handler(["ios_error"])
-    def ios_error(self, qemu, handler):  # pylint: disable=no-self-use,unused-argument
+    def ios_error(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """ios_error"""
         log.info("IOS ERROR")
         log.debug('IOS ERROR\nEnter "exit" to continue')

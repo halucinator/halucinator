@@ -1,106 +1,300 @@
 # HALucinator - Firmware rehosting through abstraction layer modeling.
 
-## Setup in a Docker
+## Supported Architectures
 
+- ARM Cortex-M (cortex-m3, cortex-m4, etc.)
+- ARM (full, e.g. arm926)
+- AARCH64
+- MIPS
+- PowerPC (PPC)
+- PowerPC 64 (PPC64)
 
-Clone this repo and submodules for avatar2 and qemu
-```
+## Setup in Docker
+
+Clone this repo and submodules for avatar2 and qemu:
+```bash
 git clone <this repo>
 git submodule update --init
 ```
-A recursive clone can be done, but QEMU will then pull a lot of submodules that may not be needed.
-QEMU's build process will pull the needed modules
+A recursive clone can be done, but QEMU will then pull a lot of submodules that
+may not be needed. QEMU's build process will pull the needed modules.
 
-Then run
-```
+Build and run (defaults to Ubuntu 22.04):
+```bash
 docker build -t halucinator ./
-docker run --name halucinator --rm -i -t halucinator bash
-#Inside Docker container run
+docker run --name halucinator -it --network=host halucinator bash
+```
+
+To build on Ubuntu 24.04 instead:
+```bash
+docker build --build-arg UBUNTU_VERSION=24.04 -t halucinator:24.04 ./
+```
+
+Building the Docker image takes a while (~20 min for QEMU builds).
+
+The convenience script `run_hal_docker.sh` manages container lifecycle
+(start, attach to existing, mount project directories):
+```bash
+# Mount your project and run
+HAL_TARGET=/path/to/project ./run_hal_docker.sh
+```
+
+Inside the container, start the UART peripheral device:
+```bash
 hal_dev_uart -i=1073811456
 ```
-Building the docker may take a while time
 
-In separate terminal run
-```
+In a separate terminal, exec into the same container and run the firmware:
+```bash
 docker exec -it halucinator bash
-#Inside docker container run
 ./test/STM32/example/run.sh
 ```
 
-You will eventually see in both terminals messages containing
+You will eventually see in both terminals messages containing:
 ```
  ****UART-Hyperterminal communication based on IT ****
  Enter 10 characters using keyboard :
 ```
 
-Enter 10 Characters in the first terminal running `hal_dev_uart` press enter
-should then see text echoed followed by.
+Enter 10 characters in the first terminal running `hal_dev_uart` and press
+enter. You should see the text echoed followed by:
 
 ```txt
  Example Finished
 ```
 
+To clean up: `docker rm halucinator`
+
 
 ## Setup in Virtual Environment
 
-Note:  This has been lightly tested on 20.04 and 22.04
+Tested on Ubuntu 22.04 and 24.04.
 
-1.  Install dependencies using `./install_deps.sh`
+### 1. Clone the repo and submodules
 
-1.  Create and activate a python3 virtual environment (You can use virtualmachine
-    wrapper but it is not required).  You often have to restart you terminal
-    after installing virutalmachine wrapper for below to work
-    ```
-       mkvirtualenv -p `which python3` halucinator
-    ```
-    If (halucinator) is not in your prompt use `workon halucinator`
-
-    Note: You may have to manually configure virtualenvwrapper. Or build you virtual environment using you preferred method
-    ```bash
-        pip3 install virtualenvwrapper
-    ```
-    Then add to `~/.bashrc` using your favorite editor and then run
-    `source ~/.bashrc`.  Replace `your username` in below
-
-    ```bash
-    export VIRTUALENVWRAPPER_PYTHON=/usr/bin/python3
-    export WORKON_HOME=$HOME/.virtualenvs
-    export VIRTUALENVWRAPPER_VIRTUALENV=/home/<your username>/.local/bin/virtualenv
-    source ~/.local/bin/virtualenvwrapper.sh
-    ```
-
-Get the repo and its immediate submodules
-```
+```bash
 git clone <this repo>
 git submodule update --init
 ```
 
-Activate you virtual environment
-```
-workon halucinator
-./setup.sh
+### 2. Install system dependencies
+
+**Ubuntu 22.04 (Jammy):**
+```bash
+sudo apt-get update
+echo "deb-src http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+echo "deb-src http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+sudo apt-get update
+sudo apt-get build-dep -y qemu
+sudo apt-get install -y \
+    build-essential ca-certificates cmake ninja-build g++ git vim wget \
+    python3 python3-pip python3-venv python3-tk \
+    gdb-multiarch gcc-arm-none-eabi binutils-arm-none-eabi \
+    libaio-dev libglib2.0-dev libpixman-1-dev pkg-config \
+    clang-format ethtool tcpdump
 ```
 
-1.  Simlink gdb-multiarch to arm-none-eabi-gdb
-    If you don't have arm-none-eabi-gdb on your path symlink gdb-multiarch to it.
-    It which was installed in step 1.  Just symlink it to `arm-none-eabi-gdb`
+**Ubuntu 24.04 (Noble):**
+```bash
+sudo apt-get update
+echo "deb-src http://archive.ubuntu.com/ubuntu/ noble main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+echo "deb-src http://archive.ubuntu.com/ubuntu/ noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+sudo apt-get update
+sudo apt-get build-dep -y qemu
+sudo apt-get install -y \
+    build-essential ca-certificates cmake ninja-build g++ git vim wget \
+    python3 python3-pip python3-venv python3-tk \
+    gdb-multiarch gcc-arm-none-eabi binutils-arm-none-eabi \
+    libaio-dev libglib2.0-dev libpixman-1-dev pkg-config \
+    clang-format ethtool tcpdump
+```
 
-    ```bash
-    sudo ln /usr/bin/gdb-multiarch /usr/bin/arm-none-eabi-gdb
-    ```
+> **Note:** On Ubuntu 24.04, pip refuses to install packages outside a
+> virtual environment (PEP 668). Always use a venv as shown below.
+> The package `python-tk` was renamed to `python3-tk` starting in 22.04.
+
+**Optional cross-compilers** (for building multi-arch test firmware):
+```bash
+sudo apt-get install -y \
+    gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu \
+    gcc-mips-linux-gnu gcc-powerpc-linux-gnu gcc-powerpc64-linux-gnu
+```
+
+### 3. Create and activate a Python virtual environment
+
+```bash
+python3 -m venv ~/.virtualenvs/halucinator
+source ~/.virtualenvs/halucinator/bin/activate
+```
+
+### 4. Install Python packages
+
+```bash
+pip install -e deps/avatar2/
+pip install -r src/requirements.txt
+pip install -e src
+pip install pytest-cov pytest-timeout  # for running tests
+```
+
+### 5. Build QEMU
+
+```bash
+./build_qemu.sh
+```
+
+This builds QEMU for ARM, ARM64, MIPS, PPC, and PPC64 (~20 min first time).
+
+### 6. Set environment variables
+
+```bash
+source activate.sh
+```
+
+Or set them manually:
+```bash
+export HALUCINATOR_QEMU_ARM=$(pwd)/deps/build-qemu/arm-softmmu/qemu-system-arm
+export HALUCINATOR_QEMU_ARM64=$(pwd)/deps/build-qemu/aarch64-softmmu/qemu-system-aarch64
+export HALUCINATOR_QEMU_MIPS=$(pwd)/deps/build-qemu/mips-softmmu/qemu-system-mips
+export HALUCINATOR_QEMU_PPC=$(pwd)/deps/build-qemu/ppc-softmmu/qemu-system-ppc
+export HALUCINATOR_QEMU_PPC64=$(pwd)/deps/build-qemu/ppc64-softmmu/qemu-system-ppc64
+```
 
 ### Note on setting HALUCINATOR_QEMU_*
 
-You can override the QEMU that is used by HALucinator setting
+You can override the QEMU binary used by HALucinator by setting the
+appropriate environment variable for your target architecture:
 
 ```sh
 export HALUCINATOR_QEMU_ARM=<full path to your qemu-system-arm>
 export HALUCINATOR_QEMU_ARM64=<full path to your qemu-system-aarch64>
-export HALUCINATOR_QEMU_POWERPC=<>
+export HALUCINATOR_QEMU_MIPS=<full path to your qemu-system-mips>
+export HALUCINATOR_QEMU_PPC=<full path to your qemu-system-ppc>
+export HALUCINATOR_QEMU_PPC64=<full path to your qemu-system-ppc64>
 ```
 
-If using virtual environments thes can be set in the $VIRTUAL_ENV/bin/postactivate and
-removed in $VIRTUAL_ENV/bin/predeactivate
+If not set, HALucinator looks for QEMU in `deps/build-qemu/<arch>-softmmu/`.
+
+If using virtual environments these can be set in `$VIRTUAL_ENV/bin/postactivate`
+and removed in `$VIRTUAL_ENV/bin/predeactivate`.
+
+### Optional: Symbol Extraction with angr
+
+To auto-generate address files from ELF binaries:
+
+```bash
+pip install angr
+hal_make_addr -b <path_to_elf> -o addrs.yaml
+```
+
+## VSCode Extension and Debug Adapter
+
+HALucinator includes a Debug Adapter Protocol (DAP) server and a GDB RSP
+server. Paired with the companion VSCode extensions at
+[GrammaTech/halucinator-vscode](https://github.com/GrammaTech/halucinator-vscode),
+you get:
+
+- **Source-level debugging in VSCode** against Ghidra-generated `.gview`
+  disassembly — breakpoints, step/continue/pause, register and memory
+  inspection, and a dedicated HAL intercepts panel.
+- **Selectable debug backend** — choose DAP (native, richer HAL awareness)
+  or GDB (works with Ghidra, `gdb-multiarch`, IDA, Binary Ninja) per
+  project.
+- **Project and config editing** — YAML schema validation, gutter icons
+  for intercepts, and breakpoint-handler autocomplete driven by
+  `bpdata.json`.
+
+### Installing VSCode Extensions
+
+The extensions are published as GitHub releases, not bundled with this
+repo. Install the latest release with:
+
+```bash
+# Downloads and installs the latest release into your host VSCode
+./extra_tools/vscode-extension-installer.sh
+
+# Or pin to a specific release tag
+./extra_tools/vscode-extension-installer.sh v1.0.0
+```
+
+This installs `gt-halucinator.halucinator-vscode` and
+`gt-halucinator.gview-extension`. To pick a release manually, browse the
+[halucinator-vscode releases page](https://github.com/GrammaTech/halucinator-vscode/releases)
+and `code --install-extension <file>.vsix`.
+
+### Generating Handler Metadata
+
+The VSCode extensions use `bpdata.json` for breakpoint handler autocomplete.
+To regenerate it (e.g. after adding custom handlers):
+
+```bash
+python3 extra_tools/parse_bp_handlers.py -s src/halucinator -o bpdata.json
+```
+
+For projects with custom handler directories:
+```bash
+python3 extra_tools/add_handler_path.py -a /path/to/your/handlers
+python3 extra_tools/run_parse_handlers.py
+```
+
+### Debug Adapter Protocol (DAP)
+
+Launch HALucinator with the `--dap` flag to start a Debug Adapter Protocol
+server (default port 34157):
+
+```sh
+halucinator -c config.yaml --dap
+```
+
+Connect from VSCode by adding to `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "HALucinator Debug",
+      "type": "halucinator",
+      "request": "attach",
+      "host": "localhost",
+      "port": 34157
+    }
+  ]
+}
+```
+
+The DAP server provides execution control (continue, step, next),
+breakpoint management (including HAL-specific breakpoints), register and
+memory inspection, and stack trace viewing through the assembly
+disassembly view (e.g., a Ghidra-generated gview file).
+
+### GDB Remote Serial Protocol (GDB server)
+
+Launch HALucinator with the `--gdb-server` flag to expose a GDB RSP server
+(default port 3333) for external debuggers such as Ghidra, command-line
+GDB, IDA, or Binary Ninja:
+
+```sh
+halucinator -c config.yaml --gdb-server
+```
+
+Connect with command-line GDB:
+
+```sh
+$ gdb-multiarch
+(gdb) target remote localhost:3333
+(gdb) info registers
+(gdb) break *0x08001234
+(gdb) continue
+```
+
+Or from Ghidra's Debugger tool, use the **gdb** launcher with
+`gdb-multiarch` and connect to `localhost:3333`.
+
+The `--gdb-server` and `--dap` flags can be combined to run both servers
+simultaneously.
+
+See [doc/debugging.md](doc/debugging.md) for a full walkthrough,
+architecture-specific notes, and troubleshooting.
 
 ## Running
 
@@ -127,7 +321,7 @@ halucinator  -c=<memory_file.yaml> -c=<intercept_file.yaml> -c=<address_file.yam
 To give an idea how to use Halucinator an example is provided in `test/STM32/example`.
 
 #### Setup
-Note: This was done prior and the files are in the repo in `test/STM/example`.
+Note: This was done prior and the files are in the repo in `test/STM32/example`.
 If you just want to run the example without building it just go to Running UART Example below.
 
 This procedure should be followed for other binaries.
@@ -142,14 +336,14 @@ In list below after the colon (:) denotes the file/cmd .
 7. (Optional) create shell script to run it: `run.sh`
 
 Note: Symbols used in the address file can be created from an elf file with symbols
-using `hal_make_addrs` This requires installing angr in halucinator's virtual environment.
+using `hal_make_addr`. This requires installing angr in halucinator's virtual environment.
 This was used to create `Uart_Hyperterminal_IT_O0_addrs.yaml`
 
-To use it the first time you would. Install angr (e.g. `pip install angr` from
+To use it the first time you would install angr (e.g. `pip install angr` from
 the halucinator virtual environment)
 
 ```sh
-hal_make_addrs -b <path to elf file>
+hal_make_addr -b <path to elf file>
 ```
 
 #### Running UART Example
@@ -165,14 +359,14 @@ In separate terminal start halucinator with the firmware.
 
 ```bash
 workon halucinator
-<halucinator_repo_root>$./halucinator -c=test/STM32/example/Uart_Hyperterminal_IT_O0_config.yaml \
+halucinator -c=test/STM32/example/Uart_Hyperterminal_IT_O0_config.yaml \
   -c=test/STM32/example/Uart_Hyperterminal_IT_O0_addrs.yaml \
   -c=test/STM32/example/Uart_Hyperterminal_IT_O0_memory.yaml --log_blocks -n Uart_Example
 
-or
-<halucinator_repo_root>& test/STM32/example/run.sh
+# or use the convenience script:
+bash test/STM32/example/run.sh
 ```
-Note the --log_blocks and -n are optional.
+Note the `--log_blocks` and `-n` are optional.
 
 You will eventually see in both terminals messages containing
 ```
@@ -212,7 +406,7 @@ machine:   # Optional, describes qemu machine used in avatar entry optional defa
   init_sp: (None)<int>,     # Initial value for sp reg, Obtained from 0x0000_0000
                         # of memory named init_mem if it exists else memory
                         # named flash
-  gdb_exe: ('arm-none-eabi-gdb')<path> # Path to gdb to use
+  gdb_exe: ('gdb-multiarch')<path> # Path to gdb to use
 
 
 memories:  #List of the memories to add to the machine
@@ -286,3 +480,60 @@ passed in using -s. This is a csv file each line defining a symbol as shown belo
 ```csv
 symbol_name<str>, start_addr<int>, last_addr<int>
 ```
+
+## Testing
+
+HALucinator has a comprehensive test suite with 28,600+ tests achieving 84% code coverage.
+
+### Running Unit Tests
+
+```bash
+# Run all CI-safe tests
+PYTHONPATH=src:test/pytest/helpers python3 -m pytest test/pytest/ \
+  -m "not slow_zmq and not needs_root" \
+  -p no:timeout --tb=short
+
+# Run with coverage
+PYTHONPATH=src:test/pytest/helpers python3 -m pytest test/pytest/ \
+  -m "not slow_zmq and not needs_root" \
+  -p no:timeout --cov=halucinator --cov-report=term-missing
+```
+
+### Running E2e Firmware Tests
+
+These require a built QEMU (run `./build_qemu.sh` first) and the
+`HALUCINATOR_QEMU_ARM` environment variable set.
+
+```bash
+export HALUCINATOR_QEMU_ARM=<path to qemu-system-arm>
+bash ./test/STM32/example/run_test.bash
+bash ./test/zephyr/zephyr_fs/run_tests.bash
+bash ./test/zephyr/frdm_k64f_UART_Excellent_Test/run_tests.bash
+bash ./test/zephyr/olimex_stm32_h103_UART_Excellent_test/run_tests.bash
+bash ./test/firmware-rehosting/p2im-drone/run_tests.bash
+```
+
+### Test Markers
+
+Tests are categorized with pytest markers defined in `conftest.py`:
+
+- `slow_zmq`: Tests that use real zmq sockets/threads (may hang in combined runs)
+- `needs_root`: Tests that require root privileges (raw sockets, scapy)
+
+### CI/CD
+
+The GitHub Actions workflow (`.github/workflows/virtual-environment-tests.yml`)
+runs on every push and pull request to master. It tests on both Ubuntu 22.04
+and 24.04 in parallel, builds QEMU for all architectures (cached per OS),
+runs QEMU smoke tests, all e2e firmware tests (STM32, Zephyr, multi-arch),
+and the full pytest suite with coverage reporting.
+
+## Available BP Handler Families
+
+- **generic**: Common handlers (ReturnZero, SkipFunc, Counter, Timer, etc.)
+- **stm32f4**: STM32F4 HAL (UART, GPIO, SPI, ethernet, timers, WiFi)
+- **libopencm3**: libopencm3 (ADC, DMA, flash, GPIO, RCC, SPI, timer, USART)
+- **atmel_asf_v3**: Atmel ASF (contiki, ethernet, radio, SD/MMC, timers, USART)
+- **mbed**: Mbed OS (boot, serial, timer)
+- **vxworks**: VxWorks RTOS (boot, filesystem, ethernet, interrupts, scheduler, tasks)
+- **zephyr**: Zephyr RTOS (filesystem, UART)

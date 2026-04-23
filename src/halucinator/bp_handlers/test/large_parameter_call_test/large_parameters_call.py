@@ -2,11 +2,17 @@
 # (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, 
 # the U.S. Government retains certain rights in this software.
 
+from __future__ import annotations
+
 from ...bp_handler import BPHandler, bp_handler
 import logging
 from .... import hal_log
 import sys
 from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
@@ -25,24 +31,24 @@ class ParameterTest(BPHandler):
         Each function called function writes its parameters using write_int
         which is intercepted to check parameters.
     '''
-    def __init__(self):
+    def __init__(self) -> None:
         # Used to save stack pointers to ensure clean up is done properly
-        self.four_sp = None
-        self.five_sp = None
-        self.ten_sp = None
-        self.states = defaultdict(list)
-        self.state = 'start'
-        self.passed = True
+        self.four_sp: Optional[int] = None
+        self.five_sp: Optional[int] = None
+        self.ten_sp: Optional[int] = None
+        self.states: Dict[str, List[int]] = defaultdict(list)
+        self.state: str = 'start'
+        self.passed: bool = True
 
     @bp_handler(['write_int'])
-    def write_int(self, qemu, addr):
+    def write_int(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
         i = qemu.get_arg(0)
         self.states[self.state].append(i)
         log.info("Write Int: %i"% i)
         return True, None
 
     @bp_handler(['run_test'])
-    def run_test(self, qemu, addr):
+    def run_test(self, qemu: HALQemuTarget, addr: int) -> Any:
         '''
             This will call memory copy the first time
         '''
@@ -54,7 +60,7 @@ class ParameterTest(BPHandler):
 
 
     @bp_handler(['call_five'])
-    def call_five(self, qemu, addr):
+    def call_five(self, qemu: HALQemuTarget, addr: int) -> Any:
         '''
             call_five
         '''
@@ -68,7 +74,7 @@ class ParameterTest(BPHandler):
         
 
     @bp_handler(['call_ten'])
-    def call_ten(self, qemu, addr):
+    def call_ten(self, qemu: HALQemuTarget, addr: int) -> Any:
         '''
             call_ten
         '''
@@ -81,7 +87,7 @@ class ParameterTest(BPHandler):
         return qemu.call('ten_parameters',range(1,11), self, 'end_ten')
 
     @bp_handler(['end_ten'])
-    def end_ten(self, qemu, addr):
+    def end_ten(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
         log.info("Running Ten End")
         if self.ten_sp != qemu.regs.sp:
             log.error("Call Ten Corrupted SP: In %#x, Out %#x"%(self.ten_sp, qemu.regs.sp))
@@ -92,7 +98,7 @@ class ParameterTest(BPHandler):
         return True, None
 
     @bp_handler(['exit'])
-    def end_test(self, qemu, addr):
+    def end_test(self, qemu: HALQemuTarget, addr: int) -> None:
         '''
             Make sure we executed everyting like we expected
         '''

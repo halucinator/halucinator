@@ -3,10 +3,12 @@
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
+from __future__ import annotations
 
 import binascii
 import logging
 import sys
+from typing import IO, Any, List, Mapping, Optional, Union
 
 import serial  # pylint: disable=import-error
 
@@ -19,9 +21,10 @@ log = logging.getLogger(__name__)
 class SerialTunnel:
     """Serial Tunnel"""
 
-    def __init__(self, port, ioserver, baudrate, use_pipe=False):
-        self.ioserver = ioserver
-        self.prev_print = None
+    def __init__(self, port: str, ioserver: IOServer, baudrate: int, use_pipe: bool = False) -> None:
+        self.ioserver: IOServer = ioserver
+        self.prev_print: Optional[str] = None
+        self.host_port: Any
         if use_pipe:
             self.host_port = open("port", "w+")  # pylint: disable=consider-using-with
             if not self.host_port:
@@ -31,13 +34,13 @@ class SerialTunnel:
             self.host_port = serial.Serial(port, baudrate)
         ioserver.register_topic("Peripheral.UTTYModel.tx_buf", self.write_handler)
 
-    def write_handler(self, ioserver, msg):  # pylint: disable=unused-argument
+    def write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:  # pylint: disable=unused-argument
         """handle the reading from VM (VM is writing)"""
         tx_bytes = msg["chars"]
         print(f"VM Response: {str(tx_bytes)} = {binascii.hexlify(tx_bytes)}")
         self.host_port.write(tx_bytes)
 
-    def send_data(self, msg_id, chars):
+    def send_data(self, msg_id: str, chars: Any) -> None:
         """send data to VM"""
         s_data = {"interface_id": msg_id, "char": chars}
         self.ioserver.send_msg("Peripheral.UTTYModel.rx_char_or_buf", s_data)

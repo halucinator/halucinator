@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from os import sys, path
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
@@ -8,6 +10,7 @@ import zmq
 from multiprocessing import Process
 from .ioserver import IOServer
 import logging
+from typing import Any, List, Optional, Union
 
 import os
 import socket
@@ -17,40 +20,40 @@ import scapy.all as scapy
 import serial
 log = logging.getLogger(__name__)
 
-__run_server = True
-__host_port = None
-__rx_buffering= False
+__run_server: bool = True
+__host_port: Optional[Any] = None
+__rx_buffering: bool = False
 
-def rx_from_host(io_server, msg_id):
+def rx_from_host(io_server: IOServer, msg_id: str) -> None:
     global __run_server
     global __host_port
     global __rx_buffering
-    topic = "Peripheral.UTTYModel.rx_char_or_buf"
+    topic: str = "Peripheral.UTTYModel.rx_char_or_buf"
     #topic = "Interrupt.Trigger"
 
-    buffer=[]
+    buffer: List[int] = []
     #__rx_buffering = True
     while (__run_server):
-        
+
         if __rx_buffering:
             # TODO: Support buffering, time based?
             #data = {'interface_id': msg_id, 'buff': []]}
-            char = __host_port.read()
-            
+            char: bytes = __host_port.read()
+
             if len(buffer) < 40:
-                char_byte = int.from_bytes(char, byteorder='little')
+                char_byte: int = int.from_bytes(char, byteorder='little')
                 buffer.append(char_byte)
             else:
                 char_byte = int.from_bytes(char, byteorder='little')
                 buffer.append(char_byte)
-                data = {'interface_id': msg_id, 'char': buffer}
+                data: dict[str, Any] = {'interface_id': msg_id, 'char': buffer}
                 #to_emu_socket.send_string(msg)
                 print("Sent message to emulator ", buffer)
                 io_server.send_msg(topic,data)
                 buffer=[]
         else:
             char = __host_port.read()
-            
+
             char_byte = int.from_bytes(char, byteorder='little')
             print(char_byte)
             data = {'interface_id': msg_id, 'char': char_byte}
@@ -58,7 +61,7 @@ def rx_from_host(io_server, msg_id):
             io_server.send_msg(topic,data)
 
 
-def start(port, io_server, msg_id="COM1",baudrate =9600):
+def start(port: str, io_server: IOServer, msg_id: str = "COM1", baudrate: int = 9600) -> None:
     global __run_server
     global __host_port
     __host_port = serial.Serial(port, baudrate)

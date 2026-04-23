@@ -1,0 +1,124 @@
+architecture: ARM
+base_address: 0
+entry_point: 0x8004ef8
+
+intercepts:
+  - class: halucinator.bp_handlers.IPythonShell
+    function: HardFault_Handler
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_Delay
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Init
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_GetState
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Transmit
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Transmit_IT
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Transmit_DMA
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Receive
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Receive_IT
+  - class: project.bp_handlers.stm32f1_uart.STM32F1UART
+    function: HAL_UART_Receive_DMA
+  - class: halucinator.bp_handlers.generic.common.ReturnZero
+    function: return_zero
+    symbol: HAL_UART_TxCpltCallback
+    addr: 134228192
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_UART_RxCpltCallback
+    addr: 134237124
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_Init
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_InitTick
+  - class: halucinator.bp_handlers.Counter
+    function: HAL_IncTick
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_MspInit
+    run_once: true
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_RCC_ClockConfig
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_RCC_GetHCLKFreq
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_RCC_GetPCLK1Freq
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_RCC_GetSysClockFreq
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_RCC_OscConfig
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_SYSTICK_Config
+  - class: halucinator.bp_handlers.generic.common.ReturnZero
+    function: return_zero
+    symbol: UART_SetConfig
+    addr: 134227388
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.generic.common.ReturnZero
+    function: return_zero
+    symbol: DebugMon_Handler
+    addr: 134237824
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_WaitOnRXNEFlagUntilTimeout
+    addr: 134223568
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_I2C_Init
+    addr: 134223664
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_I2C_Mem_Write
+    addr: 134223876
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_I2C_Mem_Read
+    addr: 134224148
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_WriteByte
+    addr: 134234068
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_ReadByte
+    addr: 134234132
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_ReadBytes
+    addr: 134234192
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_ReadByteArray
+    addr: 134234244
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: HAL_I2C_MspInit
+    addr: 134237400
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_IsAcknowledgeFailed
+    addr: 134222886
+    run_once: false
+    watchpoint: false
+  - class: halucinator.bp_handlers.ReturnZero
+    function: I2C_WaitOnMasterAddressFlagUntilTimeout
+    run_once: false
+    watchpoint: false

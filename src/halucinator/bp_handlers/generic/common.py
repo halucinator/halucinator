@@ -1,19 +1,55 @@
 # Copyright 2021 National Technology & Engineering Solutions of Sandia, LLC
 # (NTESS). Under the terms of Contract DE-NA0003525 with NTESS,
 # the U.S. Government retains certain rights in this software.
+from __future__ import annotations
 
 """
 Implements the breakpoint handlers for common functions
 """
 
 import logging
+import time
 from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict, Optional, cast
+
 from halucinator.peripheral_models import canary
-from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 from halucinator import hal_log
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
+
+
+class SleepTime(BPHandler):
+    """
+    Break point handler that sleeps for a configured amount of time
+
+    Halucinator configuration usage:
+    - class: halucinator.bp_handlers.SleepTime
+      function: <func_name> (Can be anything)
+      registration_args: {sleep_time: 10}
+      addr: <addr>
+    """
+
+    def __init__(self) -> None:
+        self.sleep_times: Dict[int, int] = {}
+
+    def register_handler(
+        self, qemu: HALQemuTarget, addr: int, func_name: str, sleep_time: int = 10
+    ) -> HandlerFunction:  # pylint: disable=unused-argument
+        self.sleep_times[addr] = sleep_time
+        return cast(HandlerFunction, SleepTime.sleep_time)
+
+    @bp_handler
+    def sleep_time(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
+        """
+        Sleep for the configured amount of time and return 0
+        """
+        time.sleep(self.sleep_times[addr])
+        return False, 0
 
 
 class ReturnZero(BPHandler):
@@ -27,19 +63,19 @@ class ReturnZero(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, silent=False
-    ):  # pylint: disable=unused-argument
+        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.silent[addr] = silent
         self.func_names[addr] = func_name
-        return ReturnZero.return_zero
+        return cast(HandlerFunction, ReturnZero.return_zero)
 
     @bp_handler
-    def return_zero(self, qemu, addr):  # pylint: disable=unused-argument
+    def return_zero(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """
@@ -59,21 +95,21 @@ class ReturnConstant(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.ret_values = {}
-        self.silent = {}
-        self.func_names = {}
+    def __init__(self) -> None:
+        self.ret_values: Dict[int, Optional[int]] = {}
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, ret_value=None, silent=False
-    ):  # pylint: disable=unused-argument, too-many-arguments
+        self, qemu: HALQemuTarget, addr: int, func_name: str, ret_value: Optional[int] = None, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=unused-argument, too-many-arguments
         self.ret_values[addr] = ret_value
         self.silent[addr] = ret_value
         self.func_names[addr] = func_name
-        return ReturnConstant.return_constant
+        return cast(HandlerFunction, ReturnConstant.return_constant)
 
     @bp_handler
-    def return_constant(self, qemu, addr):  # pylint: disable=unused-argument
+    def return_constant(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return constant
         """
@@ -95,22 +131,22 @@ class Canary(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.func_names = {}
-        self.canary_type = {}
-        self.msg = {}
+    def __init__(self) -> None:
+        self.func_names: Dict[int, str] = {}
+        self.canary_type: Dict[int, Optional[str]] = {}
+        self.msg: Dict[int, str] = {}
         self.model = canary.CanaryModel
 
     def register_handler(
-        self, qemu, addr, func_name, canary_type=None, msg=""
-    ):  # pylint: disable=too-many-arguments, unused-argument
+        self, qemu: HALQemuTarget, addr: int, func_name: str, canary_type: Optional[str] = None, msg: str = ""
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument
         self.func_names[addr] = func_name
         self.canary_type[addr] = canary_type
         self.msg[addr] = msg
-        return Canary.handle_canary
+        return cast(HandlerFunction, Canary.handle_canary)
 
     @bp_handler
-    def handle_canary(self, qemu, addr):
+    def handle_canary(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
         """
         Call the peripheral model
         """
@@ -135,14 +171,14 @@ class PrintChar(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
-        self.intercept = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
+        self.intercept: Dict[int, bool] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, silent=False, intercept=True
-    ):  # pylint: disable=too-many-arguments, unused-argument
+        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False, intercept: bool = True
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument
         """
         register the put_char method to handle all BP's
         for this class.
@@ -154,10 +190,10 @@ class PrintChar(BPHandler):
         self.func_names[addr] = func_name
         self.intercept[addr] = intercept
 
-        return PrintChar.put_char
+        return cast(HandlerFunction, PrintChar.put_char)
 
     @bp_handler
-    def put_char(self, qemu, addr):
+    def put_char(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -184,23 +220,23 @@ class PrintString(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
-        self.arg_num = {}
-        self.max_len = {}
-        self.intercept = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
+        self.arg_num: Dict[int, int] = {}
+        self.max_len: Dict[int, int] = {}
+        self.intercept: Dict[int, bool] = {}
 
     def register_handler(
         self,
-        qemu,
-        addr,
-        func_name,
-        arg_num=0,
-        max_len=256,
-        silent=False,
-        intercept=True,
-    ):  # pylint: disable=too-many-arguments, unused-argument
+        qemu: HALQemuTarget,
+        addr: int,
+        func_name: str,
+        arg_num: int = 0,
+        max_len: int = 256,
+        silent: bool = False,
+        intercept: bool = True,
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument
         """
         register the put_char method to handle all BP's
         for this class.
@@ -213,10 +249,10 @@ class PrintString(BPHandler):
         self.silent[addr] = silent
         self.func_names[addr] = func_name
         self.intercept[addr] = intercept
-        return PrintString.print_string
+        return cast(HandlerFunction, PrintString.print_string)
 
     @bp_handler
-    def print_string(self, qemu, addr):
+    def print_string(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -244,19 +280,19 @@ class SkipFunc(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, silent=False
-    ):  # pylint: disable=unused-argument
+        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.silent[addr] = silent
         self.func_names[addr] = func_name
-        return SkipFunc.skip
+        return cast(HandlerFunction, SkipFunc.skip)
 
     @bp_handler
-    def skip(self, qemu, addr):  # pylint: disable=unused-argument
+    def skip(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Just return
         """
@@ -276,21 +312,21 @@ class MovePC(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
-        self.move_pc_amount = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
+        self.move_pc_amount: Dict[int, int] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, move_by=4, silent=True
-    ):  # pylint: disable=unused-argument,too-many-arguments
+        self, qemu: HALQemuTarget, addr: int, func_name: str, move_by: int = 4, silent: bool = True
+    ) -> HandlerFunction:  # pylint: disable=unused-argument,too-many-arguments
         self.silent[addr] = silent
         self.func_names[addr] = func_name
         self.move_pc_amount[addr] = move_by
-        return MovePC.move_pc
+        return cast(HandlerFunction, MovePC.move_pc)
 
     @bp_handler
-    def move_pc(self, qemu, addr):
+    def move_pc(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -323,21 +359,21 @@ class KillExit(BPHandler):
         silent:     Controlls if print statements are made to hal_log
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.func_names = {}
-        self.exit_status = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.func_names: Dict[int, str] = {}
+        self.exit_status: Dict[int, int] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, exit_code=0, silent=False
-    ):  # pylint: disable=unused-argument,too-many-arguments
+        self, qemu: HALQemuTarget, addr: int, func_name: str, exit_code: int = 0, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=unused-argument,too-many-arguments
         self.silent[addr] = silent
         self.func_names[addr] = func_name
         self.exit_status[addr] = exit_code
-        return KillExit.kill_and_exit
+        return cast(HandlerFunction, KillExit.kill_and_exit)
 
     @bp_handler
-    def kill_and_exit(self, qemu, addr):
+    def kill_and_exit(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -360,13 +396,13 @@ class SetRegisters(BPHandler):
       addr_hook: True
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.changes = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.changes: Dict[int, Dict[str, int]] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, registers={}, silent=False
-    ):  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
+        self, qemu: HALQemuTarget, addr: int, func_name: str, registers: Dict[str, int] = {}, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
         self.silent[addr] = silent
         log.debug(
             "Registering: %s at addr: %s with SetRegisters %s",
@@ -375,10 +411,10 @@ class SetRegisters(BPHandler):
             registers,
         )
         self.changes[addr] = registers
-        return SetRegisters.set_registers
+        return cast(HandlerFunction, SetRegisters.set_registers)
 
     @bp_handler
-    def set_registers(self, qemu, addr, *args):  # pylint: disable=unused-argument
+    def set_registers(self, qemu: HALQemuTarget, addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """
@@ -401,13 +437,13 @@ class SetMemory(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self):
-        self.silent = {}
-        self.changes = {}
+    def __init__(self) -> None:
+        self.silent: Dict[int, bool] = {}
+        self.changes: Dict[int, Dict[int, int]] = {}
 
     def register_handler(
-        self, qemu, addr, func_name, addresses={}, silent=False
-    ):  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
+        self, qemu: HALQemuTarget, addr: int, func_name: str, addresses: Dict[int, int] = {}, silent: bool = False
+    ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
         self.silent[addr] = silent
         log.debug(
             "Registering: %s at addr: %s with SetMemory %s",
@@ -416,10 +452,10 @@ class SetMemory(BPHandler):
             addresses,
         )
         self.changes[addr] = addresses
-        return SetMemory.set_memory
+        return cast(HandlerFunction, SetMemory.set_memory)
 
     @bp_handler
-    def set_memory(self, qemu, addr, *args):  # pylint: disable=unused-argument
+    def set_memory(self, qemu: HALQemuTarget, addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """

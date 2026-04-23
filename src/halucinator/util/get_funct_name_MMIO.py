@@ -1,14 +1,18 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 import os
 import yaml
 from collections import defaultdict
-from elf_sym_hal_getter import build_addr_to_sym_lookup
+from typing import Dict, List
+
+from halucinator.util.elf_sym_hal_getter import build_addr_to_sym_lookup
 
 
-def get_names_for_addrs(stats_file, binary):
+def get_names_for_addrs(stats_file: str, binary: str) -> None:
 
     with open(stats_file, 'rb') as infile:
         stats = yaml.safe_load(infile)

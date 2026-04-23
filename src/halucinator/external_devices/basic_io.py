@@ -4,8 +4,11 @@
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
+from __future__ import annotations
 
 import logging
+from typing import Any, Dict, Mapping, Union
+
 from halucinator.external_devices.ioserver import IOServer
 
 log = logging.getLogger(__name__)
@@ -16,10 +19,10 @@ class BasicIO:
     Reads and Writes BasicIO
     """
 
-    def __init__(self, ioserver):
-        self.ioserver = ioserver
-        self.analog_values = {}
-        self.digital_values = {}
+    def __init__(self, ioserver: IOServer) -> None:
+        self.ioserver: IOServer = ioserver
+        self.analog_values: Dict[str, Any] = {}
+        self.digital_values: Dict[str, Any] = {}
         ioserver.register_topic(
             "Peripheral.DigitalIOModel.internal_update", self.digital_write_handler
         )
@@ -27,47 +30,47 @@ class BasicIO:
             "Peripheral.AnalogIOModel.internal_update", self.analog_write_handler
         )
 
-    def digital_write_handler(self, ioserver, msg):  # pylint: disable=unused-argument
+    def digital_write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:  # pylint: disable=unused-argument
         """
         Receives Digital IO Updates
         """
         self.digital_values[msg["id"]] = msg["value"]
 
-    def analog_write_handler(self, ioserver, msg):  # pylint: disable=unused-argument
+    def analog_write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:  # pylint: disable=unused-argument
         """
         Receives Analog IO updates
         """
         self.analog_values[msg["id"]] = msg["value"]
 
-    def send_digital_data(self, channel_id, value):
+    def send_digital_data(self, channel_id: str, value: Any) -> None:
         """
         Sends data to DigitalIOModel
         """
         msg = {"id": channel_id, "value": value}
         self.ioserver.send_msg("Peripheral.DigitalIOModel.external_update", msg)
 
-    def send_analog_data(self, channel_id, value):
+    def send_analog_data(self, channel_id: str, value: Any) -> None:
         """
         Send data to AnalogIOModel
         """
         msg = {"id": channel_id, "value": value}
         self.ioserver.send_msg("Peripheral.AnalogIOModel.external_update", msg)
 
-    def print_digital_values(self):
+    def print_digital_values(self) -> None:
         """
         Prints the received digital values
         """
         for key, value in self.digital_values.items():
             print(f"Digital: {key}: {value}")
 
-    def print_analog_values(self):
+    def print_analog_values(self) -> None:
         """
         Prints the received analog values
         """
         for key, value in self.analog_values.items():
             print(f"Analog: {key}: {value}")
 
-    def print_values(self):
+    def print_values(self) -> None:
         """
         Prints analog and digital values
         """

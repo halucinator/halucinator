@@ -1,12 +1,14 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
+
+import logging
+import os
+from typing import Dict, Optional
 
 from .peripheral import requires_tx_map, requires_rx_map, requires_interrupt_map
 from . import peripheral_server
-from collections import defaultdict
-import os
-import logging
 log = logging.getLogger(__name__)
 
 
@@ -16,11 +18,11 @@ log = logging.getLogger(__name__)
 @peripheral_server.peripheral_model
 class SDCardModel(object):
     STATES = {'READY': 1}
-    BLOCK_SIZE = {}
-    filename = {}
+    BLOCK_SIZE: Dict[int, int] = {}
+    filename: Dict[int, str] = {}
 
     @classmethod
-    def set_config(cls, sd_id, filename, block_size):
+    def set_config(cls, sd_id: int, filename: Optional[str], block_size: int) -> None:
         cls.BLOCK_SIZE[sd_id] = 0x200
         if filename is not None:
             if peripheral_server.base_dir is not None:
@@ -32,7 +34,7 @@ class SDCardModel(object):
                 cls.filename[sd_id] = filename
 
     @classmethod
-    def get_filename(cls, sd_id):
+    def get_filename(cls, sd_id: int) -> str:
         if sd_id not in cls.filename:
             if peripheral_server.base_dir is not None:
                 cls.filename[sd_id] = os.path.join(
@@ -43,7 +45,7 @@ class SDCardModel(object):
         return cls.filename[sd_id]
 
     @classmethod
-    def read_block(cls, sd_id, block_num):
+    def read_block(cls, sd_id: int, block_num: int) -> bytes:
         '''
             Reads data from the file, and returns the data if possible 
             return None
@@ -58,7 +60,7 @@ class SDCardModel(object):
 
     @classmethod
     @requires_tx_map
-    def write_block(cls, sd_id, block_num, data):
+    def write_block(cls, sd_id: int, block_num: int, data: bytes) -> bool:
         '''
             Writes the data to a file, and returns True if no errors else 
             return False
@@ -76,10 +78,10 @@ class SDCardModel(object):
         return False
 
     @classmethod
-    def get_block_size(cls, sd_id):
+    def get_block_size(cls, sd_id: int) -> int:
         return SDCardModel.BLOCK_SIZE[sd_id]
 
     @classmethod
     @requires_rx_map
-    def get_state(cls, sd_id):
+    def get_state(cls, sd_id: int) -> int:
         return SDCardModel.STATES['Ready']

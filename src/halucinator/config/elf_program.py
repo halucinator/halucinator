@@ -1,12 +1,20 @@
+from __future__ import annotations
+
+import importlib
+import logging
+import math
+import os
+import subprocess
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 from elftools.elf.elffile import ELFFile
+
 from halucinator.config.memory_config import HalMemConfig
 from halucinator.config.symbols_config import HalSymbolConfig
 from halucinator import hal_log as hal_log_conf
-import os
-import subprocess
-import logging
-import math
-import importlib
+
+if TYPE_CHECKING:
+    from halucinator.hal_config import HalucinatorConfig
 
 
 log = logging.getLogger(__name__)
@@ -19,10 +27,10 @@ class ELFProgram(object):
 
         It must be run after memory sections are parsed
     '''
-    def __init__(self, config_filename, config, hal_config):
-        self.config_file = config_filename
-        self.config = config
-        self.hal_config = hal_config
+    def __init__(self, config_filename: str, config: Dict[str, Any], hal_config: HalucinatorConfig) -> None:
+        self.config_file: str = config_filename
+        self.config: Dict[str, Any] = config
+        self.hal_config: HalucinatorConfig = hal_config
         self._parse_config(config)
         
         if self.build is not None:
@@ -32,33 +40,33 @@ class ELFProgram(object):
         # Just easier to add them manually
         # self.add_memories_configs()  
 
-    def _parse_config(self, config):
+    def _parse_config(self, config: Dict[str, Any]) -> List[str]:
         '''
             Validates the elf program config and applies defaults
 
             :param config (dict):  ELF program dict
         '''
-        errs = []
-        self.name = config['name'] if 'name' in config else None
-        self.build = config['build'] if 'build' in config else None
-        self.execute_before = config['execute_before'] if 'execute_before' in config else True
-        self.elf_filename = config['elf']
-        self.elf_module_relative = config['elf_module_relative'] if 'elf_module_relative' in config else None
-        self._intercepts = config['intercepts'] if 'intercepts' in config else []
+        errs: List[str] = []
+        self.name: Optional[str] = config['name'] if 'name' in config else None
+        self.build: Optional[Dict[str, Any]] = config['build'] if 'build' in config else None
+        self.execute_before: bool = config['execute_before'] if 'execute_before' in config else True
+        self.elf_filename: str = config['elf']
+        self.elf_module_relative: Optional[str] = config['elf_module_relative'] if 'elf_module_relative' in config else None
+        self._intercepts: List[Dict[str, Any]] = config['intercepts'] if 'intercepts' in config else []
         errs.extend(self._validate_intercepts())
             
         self.elf_filename = self.get_fullpath(self.elf_filename, 
                                               self.config_file, 
                                               self.elf_module_relative)
-        self.exit_function = config['exit_function'] if 'exit_function' in config else 'exit'
-        self.exit_to = None  # set with machine entry_point if this is to execute first
+        self.exit_function: str = config['exit_function'] if 'exit_function' in config else 'exit'
+        self.exit_to: Optional[int] = None  # set with machine entry_point if this is to execute first
         return errs
 
-    def _validate_intercepts(self):
+    def _validate_intercepts(self) -> List[str]:
         '''
             Validate that the format of the intercept has required fields
         '''
-        errs = []
+        errs: List[str] = []
         if self._intercepts:
             for i in self._intercepts:
                 if 'handler' not in i:
@@ -68,7 +76,7 @@ class ELFProgram(object):
         log.debug("".join(errs))  #TODO remove and integrate with config error process
         return errs
 
-    def get_fullpath(self, file_str, config_path, module_str=None ):
+    def get_fullpath(self, file_str: str, config_path: str, module_str: Optional[str] = None) -> str:
         '''
             Gets the full path for a file.  If file_str is a full path
             it just returns it, else if module_str is specified 
@@ -88,7 +96,7 @@ class ELFProgram(object):
                 base_dir = os.path.dirname(config_path)
             return os.path.join(base_dir, file_str)
 
-    def run_build_cmd(self):
+    def run_build_cmd(self) -> None:
         '''
             Runs the program build command 
             :param path(str):  Path to execute command from. 
@@ -109,7 +117,7 @@ class ELFProgram(object):
                 log.error("Error building elf program\n")
                 exit(-1)
 
-    def add_memories_configs(self):
+    def add_memories_configs(self) -> None:
         '''
             Adds the memories to support running this elf to
             the memory config used to build the qemu_machine
@@ -164,7 +172,7 @@ class ELFProgram(object):
             log.debug(f"Adding memory to machine {name}:{mem_config}")
             self.hal_config.memories[name] = mem_config
 
-    def set_intercepts(self,qemu_target):
+    def set_intercepts(self, qemu_target: Any) -> bool:
         '''
             Rewrites the program under test (put) to use the functions
             provided by this elf.
@@ -195,7 +203,7 @@ class ELFProgram(object):
 
         return no_error
 
-    def load_segments(self, qemu_target):
+    def load_segments(self, qemu_target: Any) -> None:
         '''
             Load the elf segments to memory
 
@@ -210,7 +218,7 @@ class ELFProgram(object):
                     hal_log.debug(f"Loading segment {seg.header}")
                     qemu_target.write_memory(base_addr, 1, seg.data(), raw=True)
 
-    def initialize(self, qemu_target):
+    def initialize(self, qemu_target: Any) -> None:
         '''
             Initializes the elf program in the target after 
             it is created.
@@ -226,7 +234,7 @@ class ELFProgram(object):
             exit_func_addr = self.get_function_addr(self.exit_function)
             qemu_target.write_branch(exit_func_addr, self.exit_to)
 
-    def get_sym_name(self, name):
+    def get_sym_name(self, name: str) -> str:
         '''
             Makes the symbol name unique for this program
 
@@ -234,14 +242,14 @@ class ELFProgram(object):
         '''
         return f"${self.name}${name}"
 
-    def get_function_addr(self, func_name):
+    def get_function_addr(self, func_name: str) -> Optional[int]:
         '''
             returns the address of a function in this elf file
         '''
         name = self.get_sym_name(func_name)
         return self.hal_config.get_addr_for_symbol(name)
 
-    def add_symbols(self):
+    def add_symbols(self) -> None:
         '''
             Adds the symbols in the elf file to halucinators
             config list of symbols so they can be looked up
@@ -258,7 +266,7 @@ class ELFProgram(object):
                 
                 self.hal_config.symbols.append(sym)
     
-    def get_entry_addr(self):
+    def get_entry_addr(self) -> int:
         '''
             Gets the address of the entry point for the elf file
         '''

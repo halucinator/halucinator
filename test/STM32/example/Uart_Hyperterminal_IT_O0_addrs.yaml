@@ -77,3 +77,4 @@ symbols:
   134227832: register_fini
   134227852: _init
   134227864: _fini
+intercepts: []

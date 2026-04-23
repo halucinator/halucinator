@@ -4,15 +4,20 @@
 
 # Created by BYU Capstone Team 44 2020-2021
 # Project sponsored by National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+from __future__ import annotations
 
 import logging
 import os
 import struct
 from os import path, sys
 from stat import S_ISDIR
+from typing import TYPE_CHECKING, Tuple, Type
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.host_fs import HostFSModel
+
+if TYPE_CHECKING:
+    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +28,7 @@ hal_log = hal_log.getHalLogger()
 
 class ZephyrFS(BPHandler):
 
-    def read_string(self, qemu, addr):
+    def read_string(self, qemu: HALQemuTarget, addr: int) -> str:
         """Helper function to read strings from QEMU memory
 
         :param qemu: Firmware Emulator
@@ -45,16 +50,16 @@ class ZephyrFS(BPHandler):
         return p_data.decode("utf-8")
 
 
-    def __init__(self, impl=HostFSModel):
+    def __init__(self, impl: Type[HostFSModel] = HostFSModel) -> None:
         """Initialization of ZephyrFS class and tx/rx buffers
 
         :param impl: FS Peripheral Model, defaults to HostFSModel
         :type impl: HostFSModel, optional
         """
-        self.model = impl()
+        self.model: HostFSModel = impl()
 
     @bp_handler(['flash_area_stub'])
-    def flash_area_stub(self, qemu, bp_addr):
+    def flash_area_stub(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """Stub handler for flash_area_* functions
 
         :param qemu: Firmware Emulator
@@ -72,7 +77,7 @@ class ZephyrFS(BPHandler):
         return True, 0
 
     @bp_handler(['fs_mount'])
-    def fs_mount(self, qemu, bp_addr):
+    def fs_mount(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """Mounts a virtual storage medium to the host virtual filesystem.
            All FS calls to that mount point will correspond with the appropriate
            storage directory in `<host working dir>/storage/`.
@@ -99,7 +104,7 @@ class ZephyrFS(BPHandler):
         return True, r_val
 
     @bp_handler(['fs_statvfs'])
-    def fs_statvfs(self, qemu, bp_addr):
+    def fs_statvfs(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_statvfs breakpoint handler, polls host FS for filesystem size information.
 
         :param qemu: Firmware Emulator
@@ -124,7 +129,7 @@ class ZephyrFS(BPHandler):
         return True, 0
 
     @bp_handler(['fs_stat'])
-    def fs_stat(self, qemu, bp_addr):
+    def fs_stat(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_stat breakpoint handler, polls host FS for file/folder information.
 
         :param qemu: Firmware Emulator
@@ -151,7 +156,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_unlink'])
-    def fs_unlink(self, qemu, bp_addr):
+    def fs_unlink(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_unlink breakpoint handler, removes a file/folder in VFS if existing
 
         :param qemu: Firmware Emulator
@@ -174,7 +179,7 @@ class ZephyrFS(BPHandler):
         return True, ret
 
     @bp_handler(['fs_open'])
-    def fs_open(self, qemu, bp_addr):
+    def fs_open(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_open breakpoint handler, returns a handle for Host VFS files if existing,
            with mode flags specified.
 
@@ -206,7 +211,7 @@ class ZephyrFS(BPHandler):
         return True, result
 
     @bp_handler(['fs_read'])
-    def fs_read(self, qemu, bp_addr):
+    def fs_read(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_read breakpoint handler, reads from a file handle (if valid) to a specified
            address, returns the number of bytes read to r0.
 
@@ -234,7 +239,7 @@ class ZephyrFS(BPHandler):
         return True, result
 
     @bp_handler(['fs_write'])
-    def fs_write(self, qemu, bp_addr):
+    def fs_write(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_write breakpoint handler, writes to a file handle (if valid)
            from a specified address, returns the number of bytes written to r0.
 
@@ -261,7 +266,7 @@ class ZephyrFS(BPHandler):
         return True, amount_written
 
     @bp_handler(['fs_seek'])
-    def fs_seek(self, qemu, bp_addr):
+    def fs_seek(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_seek breakpoint handler, seeks a file handle in r0 (if valid) to
            a specified offset, relative to a specified `whence` parameter in r1.
 
@@ -286,7 +291,7 @@ class ZephyrFS(BPHandler):
         return True, result
 
     @bp_handler(['fs_close'])
-    def fs_close(self, qemu, bp_addr):
+    def fs_close(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_close breakpoint handler, closes a file handle in r0 (if valid)
            and flushes file contents to disk.
 
@@ -313,7 +318,7 @@ class ZephyrFS(BPHandler):
         return True, result
 
     @bp_handler(['fs_unmount'])
-    def fs_unmount(self, qemu, bp_addr):
+    def fs_unmount(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_unmount breakpoint handler, removes Host VFS symlinks for the associated
            storage mount.
 
@@ -340,7 +345,7 @@ class ZephyrFS(BPHandler):
     # returns the position of
     # the cursor in the current file
     @bp_handler(['fs_tell'])
-    def fs_tell(self, qemu, bp_addr):
+    def fs_tell(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """returns the position of the cursor in the current file
 
         :param qemu: Firmware Emulator
@@ -362,7 +367,7 @@ class ZephyrFS(BPHandler):
         return True, f_pos
 
     @bp_handler(['fs_sync'])
-    def fs_sync(self, qemu, bp_addr):
+    def fs_sync(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_sync breakpoint handler, does nothing because Zephyr does nothing.
 
         :param qemu: Firmware Emulator
@@ -384,7 +389,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_closedir'])
-    def fs_closedir(self, qemu, bp_addr):
+    def fs_closedir(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_closedir breakpoint handler, closes a directory handle (if valid).
 
         :param qemu: Firmware Emulator
@@ -406,7 +411,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_mkdir'])
-    def fs_mkdir(self, qemu, bp_addr):
+    def fs_mkdir(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_mkdir breakpoint handler, creates a folder on a mounted filesystem.
 
         :param qemu: Firmware Emulator
@@ -427,7 +432,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_opendir'])
-    def fs_opendir(self, qemu, bp_addr):
+    def fs_opendir(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_opendir breakpoint handler, opens a directory handle for a specified path.
 
         :param qemu: Firmware Emulator
@@ -458,7 +463,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_readdir'])
-    def fs_readdir(self, qemu, bp_addr):
+    def fs_readdir(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_readdir breakpoint handler, reads next information from a directory handle.
 
         :param qemu: Firmware Emulator
@@ -490,7 +495,7 @@ class ZephyrFS(BPHandler):
         return True, retval
 
     @bp_handler(['fs_rename'])
-    def fs_rename(self, qemu, bp_addr):
+    def fs_rename(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_rename breakpoint handler, renames a file from source path to destination path.
 
         :param qemu: Firmware Emulator
@@ -517,7 +522,7 @@ class ZephyrFS(BPHandler):
 
 
     @bp_handler('fs_truncate')
-    def fs_truncate(self, qemu, bp_addr):
+    def fs_truncate(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
         """fs_truncate breakpoint handler, truncates or expands a file handle's file to a
            specified length.
 

@@ -4,8 +4,12 @@
 """
 Peripheral model for basic analog input and output
 """
+from __future__ import annotations
+
 import logging
 from collections import defaultdict
+from typing import Any, Dict, Union
+
 from halucinator.peripheral_models import peripheral_server
 
 
@@ -22,7 +26,7 @@ class DigitalIOModel:
     values = defaultdict(int)
 
     @classmethod
-    def get_id(cls, channel_id):
+    def get_id(cls, channel_id: Union[int, str]) -> Union[int, str]:
         """
         Gets id for channel_id
         """
@@ -33,7 +37,7 @@ class DigitalIOModel:
         return channel_id
 
     @classmethod
-    def get_value(cls, channel_id):
+    def get_value(cls, channel_id: Union[int, str]) -> int:
         """
         Returns the value for given channel_id
         """
@@ -41,7 +45,7 @@ class DigitalIOModel:
         return cls.values[io_id]
 
     @classmethod
-    def set_value(cls, channel_id, value):
+    def set_value(cls, channel_id: Union[int, str], value: int) -> None:
         """
         Saves the internal value
         """
@@ -50,7 +54,7 @@ class DigitalIOModel:
 
     @classmethod
     @peripheral_server.tx_msg
-    def internal_update(cls, channel_id, value):
+    def internal_update(cls, channel_id: Union[int, str], value: int) -> Dict[str, Any]:
         """
         Sends message indicating internal value has been updated
         """
@@ -60,7 +64,7 @@ class DigitalIOModel:
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def external_update(cls, msg):
+    def external_update(cls, msg: Dict[str, Any]) -> None:
         """
         Handle Receiption of data from Peripheral Server
         """
@@ -82,7 +86,7 @@ class AnalogIOModel:
     values = defaultdict(float)
 
     @classmethod
-    def get_id(cls, channel_id):
+    def get_id(cls, channel_id: Union[int, str]) -> Union[int, str]:
         """
         Gets the id for the channel_id
         """
@@ -93,7 +97,7 @@ class AnalogIOModel:
         return channel_id
 
     @classmethod
-    def get_value(cls, channel_id):
+    def get_value(cls, channel_id: Union[int, str]) -> float:
         """
         Returns the value for given channel_id
         """
@@ -101,7 +105,7 @@ class AnalogIOModel:
         return cls.values[io_id]
 
     @classmethod
-    def set_value(cls, channel_id, value):
+    def set_value(cls, channel_id: Union[int, str], value: float) -> None:
         """
         Saves the internal value
         """
@@ -110,7 +114,7 @@ class AnalogIOModel:
 
     @classmethod
     @peripheral_server.tx_msg
-    def internal_update(cls, channel_id, value):
+    def internal_update(cls, channel_id: Union[int, str], value: float) -> Dict[str, Any]:
         """
         Sends message indicating internal value has been updated
         """
@@ -120,7 +124,7 @@ class AnalogIOModel:
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def external_update(cls, msg):
+    def external_update(cls, msg: Dict[str, Any]) -> None:
         """
         Handle Receiption of data from Peripheral Server
         """

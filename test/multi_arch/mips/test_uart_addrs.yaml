@@ -1,0 +1,6 @@
+symbols:
+  0x00010088: main
+  0x00010220: _start
+  0x00010180: uart_init
+  0x000101d8: uart_read
+  0x000101a8: uart_write
