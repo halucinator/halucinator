@@ -49,6 +49,8 @@ jobs:
                         binutils-arm-none-eabi \
                         g++ \
                         gcc-arm-none-eabi \
+                        libnewlib-arm-none-eabi \
+                        libstdc++-arm-none-eabi-newlib \
                         git \
                         gdb-multiarch \
                         libaio-dev \
