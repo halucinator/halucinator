@@ -11,6 +11,6 @@ protobuf<=3.20
 deprecated
 pylint==2.13.5
 yamllint==1.26.3
-black==22.3.0
+black==26.3.1
 cle
 setuptools<81
