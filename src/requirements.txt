@@ -2,7 +2,7 @@ PyYAML
 zmq
 IPython
 pyelftools
-scapy
+scapy>=2.7.0
 pycparser
 avatar2
 pyserial
