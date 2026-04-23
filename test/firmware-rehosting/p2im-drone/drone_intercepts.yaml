@@ -3,7 +3,6 @@ intercepts:
     {
         class: halucinator.bp_handlers.generic.counter.Counter,
         function: HAL_GetTick,
-        addr: 134222180,
         registration_args: { increment: 50 },
         run_once: false,
         watchpoint: false
@@ -11,84 +10,72 @@ intercepts:
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: MSP_SendIdent,
-        addr: 134234852,
         run_once: false,
         watchpoint: false
       },
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: MSP_SendStatus,
-        addr: 134234912,
         run_once: false,
         watchpoint: false
       },
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: MSP_SendAttitude,
-        addr: 134235052,
         run_once: false,
         watchpoint: false
       },
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: MSP_SendRawIMU,
-        addr: 134234968,
         run_once: false,
         watchpoint: false
       },
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: MSP_SendPID,
-        addr: 134235124,
         run_once: false,
         watchpoint: false
       },
     {
         class: halucinator.bp_handlers.ReturnZero,
         function: AK8963_Init,
-        addr: 134229100,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MS5611,
         function: MS5611_ReadADC,
-        addr: 134229972,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MS5611,
         function: MS5611_Init,
-        addr: 134230576,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MPU9250,
         function: MPU9250_Init,
-        addr: 134228636,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MPU9250,
         function: MPU9250_ReadAccelData,
-        addr: 134228756,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MPU9250,
         function: MPU9250_ReadGyroData,
-        addr: 134228916,
         run_once: false,
         watchpoint: false
       },
     {
         class: project.bp_handlers.drone_peripherals.MPU9250,
         function: AK8963_ReadData,
-        addr: 134229316,
         run_once: false,
         watchpoint: false
       }
