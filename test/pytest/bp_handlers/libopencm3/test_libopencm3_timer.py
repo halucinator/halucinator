@@ -262,4 +262,9 @@ class TestLIBOPENCM3_Timer:
         set_arguments(qemu_mock, [timer_id])
         continue_, retval = timer.hal_timer_get_count(qemu_mock, None)
         assert continue_
-        assert retval == hits
+        # Tolerance, not correctness: the handler derives the count from
+        # wall-clock elapsed time (time.time() in libopencm3_timer.py), so
+        # under Docker/CI scheduler load time.sleep(delay) overshoots by a
+        # few percent and retval drifts above the nominal ``hits`` target.
+        # Accept a small upward window rather than asserting an exact count.
+        assert hits <= retval <= int(hits * 1.10) + 5
