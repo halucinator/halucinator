@@ -198,6 +198,10 @@ INVALID_REGISTER = "sp_usr"
 
 
 def test_monitor_emulating_continues_when_passing_breakpoints():
+    # API drift: in the current monitor_emulating, when pass_breakpoint is
+    # True we no longer re-call target.cont() from the monitor. The intercept
+    # watchman (see bp_handlers.intercepts) has already resumed the target,
+    # so the monitor just transitions state to RUNNING. Assert that.
     mock_debug.reset()
     mock_debug.state = DebugState.EMULATING
     intercepts.emulation_complete = True
@@ -208,7 +212,7 @@ def test_monitor_emulating_continues_when_passing_breakpoints():
 
     assert intercepts.emulation_complete == False
     assert intercepts.pass_breakpoint == True
-    mock_debug.target.cont.assert_called_once()
+    mock_debug.target.cont.assert_not_called()
     assert mock_debug.state == DebugState.RUNNING
 
 
@@ -295,17 +299,20 @@ def test_monitor_stopped_ignores_stops():
     assert mock_debug.last_action == CallbackState.NEXT
 
 
-@mock.patch(
-    "halucinator.bp_handlers.debugger.WrongStateError",
-    return_value=MockTarget.return_value,
-)
-def test_monitor_running_ignores_requests_and_finds_stops(mockError):
+def test_monitor_running_services_requests_and_finds_stops():
+    # API drift: monitor_running previously rejected in-flight REQUESTs while
+    # the target was RUNNING (replying with WrongStateError). The new impl
+    # services them — it stops the target, runs the request, then resumes —
+    # to support DAP setBreakpoints while running. Stop is therefore called
+    # twice: once for the in-flight request, once for the explicit STOP.
     mock_debug.reset()
     mock_debug.target.state = TargetStates.RUNNING
     mock_debug.target.stop = mock.Mock()
+    mock_debug.target.cont = mock.Mock()
     mock_debug.callback.call_callbacks = mock.Mock()
     resp = mock.Mock()
     func = mock.Mock()
+    func.return_value = MockTarget.return_value
 
     mock_debug.request_queue.put(
         (debugger.RequestType.REQUEST, func, {}, resp)
@@ -315,15 +322,14 @@ def test_monitor_running_ignores_requests_and_finds_stops(mockError):
     mock_debug.monitor_running()
 
     assert mock_debug.state == DebugState.STOPPED
-    mock_debug.target.stop.assert_called_once_with()
+    assert mock_debug.target.stop.call_count == 2
     mock_debug.callback.call_callbacks.assert_called_once_with(
         CallbackState.STOP
     )
     resp.put.assert_has_calls(
-        [mock.call((False, MockTarget.return_value)), mock.call(True)]
+        [mock.call((True, MockTarget.return_value)), mock.call(True)]
     )
-    func.assert_not_called()
-    mockError.assert_called_once_with()
+    func.assert_called_once_with()
 
 
 @mock.patch("halucinator.bp_handlers.debugger.check_hal_bp", return_value=True)
@@ -994,16 +1000,25 @@ def test_cont_through_not_change_pass_breakpoint_when_not_stopped():
     assert intercepts.pass_breakpoint == False
 
 
-@mock.patch.object(debugger.log, "error")
-def test_stop_logs_error_when_Halucinator_stopped(mock_log):
+def test_stop_when_target_already_stopped_emits_stop_event_and_returns_true():
+    # API drift: stop() no longer branches on the debugger's own self.state.
+    # It now inspects the *target's* state via target.get_status(). If the
+    # target is already STOPPED, stop() is a no-op on the target, but it
+    # still normalises debugger state to STOPPED and fires a STOP callback
+    # so the DAP client gets a "stopped" event. Returns True — the previous
+    # "log-an-error-and-return-False" path is gone.
     mock_debug.target.reset()
     mock_debug.reset()
     mock_debug.state = DebugState.STOPPED
+    mock_debug.callback.call_callbacks = mock.Mock()
 
     val = mock_debug.stop()
 
-    mock_log.assert_called_once()
-    assert val == False
+    assert val == True
+    assert mock_debug.state == DebugState.STOPPED
+    mock_debug.callback.call_callbacks.assert_called_once_with(
+        CallbackState.STOP
+    )
 
 
 def test_set_debug_breakpoint_calls_target_and_adds_debug_breakpoint_to_dict():
