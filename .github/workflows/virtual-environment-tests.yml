@@ -25,6 +25,11 @@ jobs:
       HALUCINATOR_QEMU_MIPS: "${{ github.workspace }}/deps/build-qemu/mips-softmmu/qemu-system-mips"
       HALUCINATOR_QEMU_PPC: "${{ github.workspace }}/deps/build-qemu/ppc-softmmu/qemu-system-ppc"
       HALUCINATOR_QEMU_PPC64: "${{ github.workspace }}/deps/build-qemu/ppc64-softmmu/qemu-system-ppc64"
+      # avatar2's QemuTarget constructor falls back to AVATAR2_QEMU_EXECUTABLE
+      # when the caller passes executable=None. Point it at the built ARM QEMU
+      # so test_arm_qemu.py's avatar2-spawning tests find a binary even if
+      # HALUCINATOR_QEMU_ARM is unset in a given shell.
+      AVATAR2_QEMU_EXECUTABLE: "${{ github.workspace }}/deps/build-qemu/arm-softmmu/qemu-system-arm"
 
     steps:
     - uses: actions/checkout@v5
