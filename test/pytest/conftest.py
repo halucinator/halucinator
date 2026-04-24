@@ -4,13 +4,35 @@ Session-scoped conftest for halucinator test suite.
 - Disables zmq.Context.__del__ to prevent C-level abort during GC
 - Auto-marks tests that use real zmq/raw sockets so CI can skip them
 - Runs test_debug_shell.py first (IPython/zmq import order matters)
-- Forces clean exit to avoid interpreter shutdown hangs
+- Neutralizes the DAP-disconnect handler's os._exit so any test that
+  exercises that path doesn't take down the pytest process
 """
-import os
-import sys
-import threading
-
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Keep the DAP-disconnect shutdown handler from killing the test process.
+#
+# The DAP "disconnect" request handler calls halucinator.debug_adapter
+# ._shutdown_handler(0) — in production that's os._exit(0), which is
+# exactly the right thing when a debug client closes but is catastrophic
+# under pytest: the session exits silently with code 0, hiding every
+# earlier failure. Swap in a no-op for the whole test session.
+#
+# The import is guarded because the module pulls in avatar2/IPython; some
+# very-minimal test invocations may run before those are available.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _stub_debug_adapter_shutdown(monkeypatch):
+    try:
+        from halucinator.debug_adapter import debug_adapter
+    except Exception:   # noqa: BLE001
+        yield
+        return
+    monkeypatch.setattr(
+        debug_adapter, "_shutdown_handler", lambda _code: None, raising=False,
+    )
+    yield
 
 # ---------------------------------------------------------------------------
 # Prevent zmq.Context.__del__ from aborting the process.
@@ -68,21 +90,3 @@ def pytest_collection_modifyitems(config, items):
     items[:] = first + rest
 
 
-# ---------------------------------------------------------------------------
-# Clean exit
-# ---------------------------------------------------------------------------
-
-_session_exit_status = 0
-
-
-def pytest_sessionfinish(session, exitstatus):
-    """Capture exit status before unconfigure (session isn't available there)."""
-    global _session_exit_status
-    _session_exit_status = exitstatus
-
-
-def pytest_unconfigure(config):
-    """Force-exit to avoid interpreter shutdown hangs from zmq threads."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(_session_exit_status)

@@ -4,6 +4,7 @@ import base64
 import bisect
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -28,6 +29,13 @@ dump_messages = False
 PC_REGISTER = "pc"
 SP_REGISTER = "sp"
 DEFAULT_PORT = 34157
+
+# Terminate-on-DAP-disconnect hook. Production wants an immediate hard exit
+# (os._exit bypasses daemon-thread teardown, interpreter shutdown hangs, etc.),
+# but calling os._exit from a test kills the pytest process too, silently
+# masking any failures that ran earlier in the session. Tests override this
+# with a no-op fixture instead of monkeypatching os._exit globally.
+_shutdown_handler: Callable[[int], None] = os._exit
 
 
 class LineTranslator(object):
@@ -735,14 +743,14 @@ def disconnect(dap: DAPConnection, args: Dict[str, Any]) -> None:
 
     Always terminate halucinator on disconnect — there's no use case for
     keeping a halucinator session alive after the debug client goes away.
+    The shutdown routes through _shutdown_handler so tests can stub it.
     """
     dap.send_response()
     # Schedule exit after sending response (give socket time to flush)
     def _exit() -> None:
         import time as _t
         _t.sleep(0.3)
-        import os as _os
-        _os._exit(0)
+        _shutdown_handler(0)
     threading.Thread(target=_exit, daemon=True).start()
 
 
