@@ -317,47 +317,29 @@ class Test_run_server:
 
 
 class Test_debug_shell:
+    """
+    API drift: the ``main.debug_shell`` entry point and ``main.DebugShell``
+    IPython-based interactive shell class were removed from the codebase.
+    The debugging UX is now provided by the Debug Adapter Protocol server
+    (``halucinator.debug_adapter``) for IDE-based clients and by the
+    breakpoint handler ``halucinator.bp_handlers.generic.debug.IPythonShell``
+    for in-emulation drop-in shells. Neither ``main.debug_shell`` nor
+    ``main.DebugShell`` exist in production any more, so the original
+    ``Test_debug_shell`` scenarios no longer apply. The skipped tests are
+    retained as tombstones to make the removal auditable.
+    """
 
-    avatar = "Avatar"
-    target = "Target"
-    debugger = "Debugger"
+    @pytest.mark.skip(reason="main.debug_shell removed; see class docstring")
+    def test_debug_shell_starts_server_thread(self):
+        pass
 
-    @mock.patch("halucinator.main.threading.Thread")
-    @mock.patch("halucinator.main.DebugShell")
-    def test_debug_shell_starts_server_thread(
-        self, shell_mock, threading_mock
-    ):
-        thread_start_mock = mock.MagicMock()
-        threading_mock.return_value = thread_start_mock
+    @pytest.mark.skip(reason="main.debug_shell removed; see class docstring")
+    def test_debug_shell_prepares_IPython_Shell(self):
+        pass
 
-        main.debug_shell(self.debugger, self.avatar, False)
-
-        threading_mock.assert_any_call(
-            target=main.run_server, args=(self.avatar,)
-        )
-        thread_start_mock.start.assert_has_calls([mock.call()])
-
-    @mock.patch("halucinator.main.threading.Thread")
-    @mock.patch("halucinator.main.DebugShell")
-    def test_debug_shell_prepares_IPython_Shell(
-        self, shell_mock, threading_mock
-    ):
-        shell_call_mock = mock.MagicMock()
-
-        shell_mock.return_value = shell_call_mock
-        main.debug_shell(self.debugger, self.avatar, False)
-
-        shell_mock.assert_called_once()
-        shell_call_mock.start_prompt.assert_called_once_with()
-
-    @mock.patch("halucinator.main.threading.Thread")
-    @mock.patch("halucinator.main.DebugShell")
-    def test_debug_shell_shutdowns_when_told(self, shell_mock, threading_mock):
-        debugger = mock.Mock()
-
-        main.debug_shell(debugger, self.avatar, True)
-
-        debugger.shutdown.assert_called_once_with()
+    @pytest.mark.skip(reason="main.debug_shell removed; see class docstring")
+    def test_debug_shell_shutdowns_when_told(self):
+        pass
 
 
 _real_os_path_exists = os.path.exists
