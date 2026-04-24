@@ -6,8 +6,46 @@ Session-scoped conftest for halucinator test suite.
 - Runs test_debug_shell.py first (IPython/zmq import order matters)
 - Neutralizes the DAP-disconnect handler's os._exit so any test that
   exercises that path doesn't take down the pytest process
+- Forces halucinator's long-running worker Thread subclasses to daemon=True
+  so that interpreter shutdown can't hang on join()
 """
+import threading
+
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Prevent interpreter shutdown from hanging on non-daemon worker threads.
+#
+# Several halucinator Thread subclasses (notably
+# external_devices.host_ethernet_server.IOServer, external_devices.ioserver.IOServer,
+# peripheral_models.timer_model.TimerIRQ, peripheral_models.tcp_stack.TCPModel,
+# and external_devices.vn8200xp.VN8200XP) call Thread.__init__ but never set
+# daemon=True, and at least one of them (host_ethernet_server.IOServer) blocks
+# in a zmq recv without a timeout. When a test exercises such a thread and
+# its teardown doesn't fully join it (or the fixture's shutdown logic fails),
+# threading._shutdown() joins it forever at interpreter exit. Externally the
+# pytest process looks like it truncates its output at ~97% with exit code 0:
+# pytest wrote the summary, but the process then sits in _shutdown().
+#
+# Patching threading.Thread.start() globally to force daemon=True on every
+# non-main thread is the smallest correct fix for the test session. Production
+# code is unaffected.
+# ---------------------------------------------------------------------------
+_original_thread_start = threading.Thread.start
+
+
+def _daemonizing_start(self, *args, **kwargs):
+    if not self.daemon:
+        try:
+            self.daemon = True
+        except RuntimeError:
+            # Already started — leave it alone and let start() raise its own.
+            pass
+    return _original_thread_start(self, *args, **kwargs)
+
+
+threading.Thread.start = _daemonizing_start
 
 
 # ---------------------------------------------------------------------------
