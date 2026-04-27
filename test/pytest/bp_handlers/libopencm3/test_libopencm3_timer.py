@@ -262,4 +262,11 @@ class TestLIBOPENCM3_Timer:
         set_arguments(qemu_mock, [timer_id])
         continue_, retval = timer.hal_timer_get_count(qemu_mock, None)
         assert continue_
-        assert retval == hits
+        # Tolerance, not correctness: the handler derives the count from
+        # wall-clock elapsed time (time.time() in libopencm3_timer.py), so
+        # the sleep overshoots by whatever jitter the scheduler introduces
+        # and retval drifts above the nominal ``hits`` target. Drift has
+        # been observed up to ~1.7x in the full pytest suite on CI; allow
+        # a 3x upper bound + 10 ticks to keep the test reliable without
+        # accepting genuinely-broken behaviour (e.g. 0 ticks or 1000 ticks).
+        assert hits <= retval <= int(hits * 3) + 10

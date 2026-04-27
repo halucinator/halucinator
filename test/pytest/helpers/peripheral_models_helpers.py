@@ -115,6 +115,10 @@ def setup_ioserver_device(
     # provisional fix fix_server_shutdown() is applied below. It needs to be
     # removed once IOServer.shutdown is fixed.
     fix_server_shutdown(io_server.rx_socket, io_server.tx_socket, 1000)
+    # Give the IOServer thread a moment to actually return from its recv
+    # loop — under full-suite scheduler load the transition from
+    # "shutdown requested" to "thread exited" isn't instantaneous.
+    io_server.join(timeout=2.0)
     assert not io_server.is_alive()
     logger.debug("Shutdown IO server")
 

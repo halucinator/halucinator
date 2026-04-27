@@ -4,6 +4,7 @@ import base64
 import bisect
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -29,6 +30,13 @@ PC_REGISTER = "pc"
 SP_REGISTER = "sp"
 DEFAULT_PORT = 34157
 
+# Terminate-on-DAP-disconnect hook. Production wants an immediate hard exit
+# (os._exit bypasses daemon-thread teardown, interpreter shutdown hangs, etc.),
+# but calling os._exit from a test kills the pytest process too, silently
+# masking any failures that ran earlier in the session. Tests override this
+# with a no-op fixture instead of monkeypatching os._exit globally.
+_shutdown_handler: Callable[[int], None] = os._exit
+
 
 class LineTranslator(object):
     """ Translation handler between line numbers and instruction offsets
@@ -49,7 +57,31 @@ class LineTranslator(object):
                 sorted by line number for bisect lookups. Duplicate line
                 numbers (overlapping/aliased addresses) are dropped — first
                 occurrence wins.
+
+        Raises:
+            ValueError: if the list is not strictly monotonically increasing
+                by both line number and offset. Real gview files always list
+                instructions in file order, so a violation here indicates
+                the input was corrupted or built from a broken source.
         """
+        # Sanity-check input ordering. gview files list instructions in
+        # file order; any violation means bad input. We validate against
+        # the raw list (before sort/dedup) so callers get a clean error
+        # instead of silently-wrong lookups.
+        for i in range(1, len(lineOffsetList)):
+            prev_line, prev_off = lineOffsetList[i - 1]
+            cur_line, cur_off = lineOffsetList[i]
+            if cur_line <= prev_line:
+                raise ValueError(
+                    "Line numbers out of order: %d >= %d"
+                    % (prev_line, cur_line)
+                )
+            if cur_off <= prev_off:
+                raise ValueError(
+                    "offsets out of order: %s >= %s"
+                    % (hex(prev_off), hex(cur_off))
+                )
+
         # Sort by line number, deduplicate by line (same line can't have
         # two different addresses). Mask Thumb bit so lookups match.
         sorted_pairs = sorted(lineOffsetList, key=lambda p: (p[0], p[1]))
@@ -197,8 +229,12 @@ class HalRuntime(object):
             # Fallback: target stopped for an unrecognized reason (e.g. CONT
             # callback that fired because PC didn't match any known bp due to
             # Thumb bit or other quirks). Always send a stopped event so the
-            # VSCode debug UI transitions out of "running" state.
-            self._event_callback("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True})
+            # VSCode debug UI transitions out of "running" state. Report
+            # "step" rather than "breakpoint" — a breakpoint reason without
+            # a corresponding bp confuses VSCode's highlight state, while
+            # "step" just nudges the UI to redraw without making claims
+            # about why we stopped.
+            self._event_callback("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
 
     def launch(self, source: Dict[str, Any]) -> None:
         """ "Launches" this HalRuntime by registering it for event updates.
@@ -222,8 +258,12 @@ class HalRuntime(object):
 
     def _actual_launch(self) -> None:
         self._callback_id = self.debugger.add_callback(self._state_callback)
-        # Note: start_monitoring is now called when the DAP server starts in
-        # main.py, so the request_queue is always being serviced.
+        # main.py also calls start_monitoring() before starting the DAP
+        # server, so that the request_queue is always serviced; call it
+        # here too so the runtime is correct even when exercised without
+        # main.py's setup (tests, or future alternative entry points).
+        # start_monitoring is idempotent — a second call is a no-op.
+        self.debugger.start_monitoring()
 
         # Always send a stopped-at-entry event to the client. The DAP client
         # expects this after sending 'launch' so it can show the "Continue"
@@ -735,14 +775,14 @@ def disconnect(dap: DAPConnection, args: Dict[str, Any]) -> None:
 
     Always terminate halucinator on disconnect — there's no use case for
     keeping a halucinator session alive after the debug client goes away.
+    The shutdown routes through _shutdown_handler so tests can stub it.
     """
     dap.send_response()
     # Schedule exit after sending response (give socket time to flush)
     def _exit() -> None:
         import time as _t
         _t.sleep(0.3)
-        import os as _os
-        _os._exit(0)
+        _shutdown_handler(0)
     threading.Thread(target=_exit, daemon=True).start()
 
 

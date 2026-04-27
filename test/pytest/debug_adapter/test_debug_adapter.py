@@ -1,4 +1,5 @@
 import io
+import threading
 from unittest import mock
 from typing import Dict
 
@@ -494,12 +495,34 @@ def test_DapServer(socket, dapConnection):
     listener.__enter__ = mock.Mock(return_value=listener)
     listener.__exit__ = mock.Mock(return_value=False)
 
-    # Simulate disconnect for the first connnection, SIGINT for the second
-    listener.accept.side_effect = [(s1, "127.0.0.1"), (s2, "127.0.0.1")]
-    s2.side_effect = KeyboardInterrupt()
+    # DAPServer handles each accepted connection on a background thread, so
+    # we can't use a KeyboardInterrupt raised by the mock sock to break the
+    # main accept() loop — that exception lives in the worker thread. Instead,
+    # accept the two test connections and then raise KeyboardInterrupt from
+    # accept() itself on the third call to stop the main loop.
+    accept_results = [
+        (s1, "127.0.0.1"),
+        (s2, "127.0.0.1"),
+        KeyboardInterrupt(),
+    ]
+
+    def accept_side_effect():
+        result = accept_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    listener.accept.side_effect = accept_side_effect
     dapConnection.side_effect = lambda a, b: b()
 
-    debug_adapter.DAPServer(Mock_Debugger(), port)()
+    # Wait for the two connection-handler threads to finish before asserting
+    # sock.close was called — _handle_connection closes in its finally block.
+    debug_adapter.DAPServer(
+        Mock_Debugger(), port, bind_addr="0.0.0.0"
+    )()
+    for t in threading.enumerate():
+        if t.name.startswith("Thread-") and t is not threading.current_thread():
+            t.join(timeout=2.0)
     listener.bind.assert_called_once_with(("0.0.0.0", port))
     s1.close.assert_called_once()
     s2.close.assert_called_once()

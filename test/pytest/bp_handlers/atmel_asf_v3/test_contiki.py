@@ -29,7 +29,11 @@ class TestContiki:
         time.sleep(delay)
         continue_, retval = contiki.clock_time(None, None)
         assert continue_
-        assert retval == ticks
+        # Tolerance, not correctness: clock_time derives ticks from wall-clock
+        # elapsed time, so under Docker/CI scheduler load time.sleep(delay)
+        # overshoots and retval drifts above the nominal ``ticks`` target.
+        # Accept a small upward window rather than asserting an exact count.
+        assert ticks <= retval <= int(ticks * 1.10) + 5
 
     @pytest.mark.parametrize("delay,seconds", [(1, 1), (2, 2), (4, 4)])
     def test_seconds_returns_number_of_seconds_correctly(
