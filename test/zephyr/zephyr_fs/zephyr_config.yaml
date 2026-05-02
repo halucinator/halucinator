@@ -149,29 +149,35 @@ intercepts:
   function: fs_truncate
 
 
-# Fault handler — skip rather than drop to IPython in headless mode
-- class: halucinator.bp_handlers.SkipFunc
+# Helpful breakpoints
+
+- class: halucinator.bp_handlers.IPythonShell
   symbol: z_arm_fault
   function: z_arm_fault
 
-# UART stubs — these must not override ZephyrUART handlers above
-- class: halucinator.bp_handlers.ReturnZero
+# UART TODO
+
+- class: halucinator.bp_handlers.IPythonShell
   symbol: uart_console_isr
   function: uart_console_isr
 
-- class: halucinator.bp_handlers.ReturnZero
+- class: halucinator.bp_handlers.IPythonShell
   symbol: uart_mcux_configure
   function: uart_mcux_configure
 
-- class: halucinator.bp_handlers.ReturnZero
+- class: halucinator.bp_handlers.IPythonShell
+  symbol: uart_mcux_poll_in
+  function: uart_mcux_poll_in
+
+- class: halucinator.bp_handlers.IPythonShell
   symbol: uart_mcux_err_check
   function: uart_mcux_err_check
 
-- class: halucinator.bp_handlers.ReturnZero
+- class: halucinator.bp_handlers.IPythonShell
   symbol: UART_GetDefaultConfig
   function: UART_GetDefaultConfig
 
-- class: halucinator.bp_handlers.ReturnZero
+- class: halucinator.bp_handlers.IPythonShell
   symbol: UART_ClearStatusFlags
   function: UART_ClearStatusFlags
 
