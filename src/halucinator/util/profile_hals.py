@@ -1,41 +1,29 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-
-from __future__ import annotations
-
-import hashlib
-import logging
-import os
-import pickle  # existing code uses pickle for state serialization
-import sqlite3
-from collections import defaultdict, deque
-from typing import Any, DefaultDict, Deque, Dict, List, Optional, Tuple, Union
 
 import yaml
 from avatar2 import Avatar, GDBTarget, ARM_CORTEX_M3, TargetStates
+import logging
+import os
 from IPython import embed
+import sqlite3
+import hashlib
+import pickle
+from collections import deque, defaultdict
 
 
 class State_Recorder(object):
 
-    def __init__(
-        self,
-        db_name: Union[bytes, str],
-        gdb: GDBTarget,
-        memories: List[Tuple[int, int]],
-        elf_file: str,
-    ) -> None:
+    def __init__(self, db_name, gdb, memories, elf_file):
 
-        self.db_name: Union[bytes, str] = db_name
+        self.db_name = db_name
 
-        self.memories: List[Tuple[int, int]] = memories
-        self.gdb: Any = gdb
-        self.break_points: Dict[int, Tuple[str, bool]] = {}
-        self.call_stack: Deque[Tuple[str, int]] = deque()
-        self.ret_addrs: DefaultDict[int, Deque[Tuple[str, int]]] = defaultdict(deque)
-        self.elf_file: str = ""
-        self.app_id: Optional[int] = None
+        self.memories = memories
+        self.gdb = gdb
+        self.break_points = {}
+        self.call_stack = deque()
+        self.ret_addrs = defaultdict(deque)
 
         db = sqlite3.connect(self.db_name)
         db.text_factory = bytes
@@ -43,13 +31,22 @@ class State_Recorder(object):
         self.get_app_id(elf_file, db)
         db.close()
 
-    def add_function(self, function: str) -> None:
-        # * on break point sets on first instruction, not first line of code from source
-        bp = self.gdb.set_breakpoint("*"+function)
+    def add_function(self, function):
+        # Accept either a symbol (legacy avatar2 path — set_breakpoint
+        # handles "*func") or a plain integer address (HalBackend path).
+        if isinstance(function, int):
+            bp = self.gdb.set_breakpoint(function)
+        else:
+            try:
+                bp = self.gdb.set_breakpoint("*" + function)
+            except TypeError:
+                # HalBackend.set_breakpoint requires an int; the caller
+                # should have resolved the symbol. Surface the error
+                # rather than silently dropping.
+                raise
         self.break_points[bp] = (function, True)
 
-    def set_exit_bp(self, function: str, entry_id: int) -> None:
-
+    def set_exit_bp(self, function, entry_id):
         ret_addr = self.gdb.regs.lr
         ret_addr &= 0xFFFFFFFE  # Clearing Thumb bit, causes jTrace debugger issues
         if len(self.ret_addrs['ret_addr']) == 0:
@@ -61,7 +58,7 @@ class State_Recorder(object):
         else:
             self.ret_addrs[ret_addr].append((function, entry_id))
 
-    def create_sql_tables(self, db: sqlite3.Connection) -> None:
+    def create_sql_tables(self, db):
         '''
             Creates the SQL database for recording data into
             args:
@@ -79,7 +76,7 @@ class State_Recorder(object):
         # the id of the entry state record
         db.commit()
 
-    def get_app_id(self, elf_file: str, db: sqlite3.Connection) -> None:
+    def get_app_id(self, elf_file, db):
         self.elf_file = elf_file
         with open(elf_file, 'rb') as elf_fd:
             elf_bin = elf_fd.read()
@@ -99,7 +96,7 @@ class State_Recorder(object):
         else:
             self.app_id = row[0]
 
-    def save_state_to_db(self, function: str, is_entry: bool) -> int:
+    def save_state_to_db(self, function, is_entry):
         '''
             Saves the processor's state to the database
             args:
@@ -131,20 +128,33 @@ class State_Recorder(object):
             self.call_stack.append((function, record_id))
         return record_id
 
-    def get_state(self) -> Tuple[Dict[int, Any], Dict[str, Any]]:
+    def get_state(self):
         '''
-            Gets the processor state
+            Gets the processor state. Works on both avatar2 QemuTargets
+            (via self.gdb.avatar.arch.registers) and HalBackend
+            instances (via self.gdb.list_registers()).
         '''
-        mems: Dict[int, Any] = {}
+        mems = {}
         for (start, size) in self.memories:
             mems[start] = self.gdb.read_memory(start, 1, size, raw=True)
 
-        registers: Dict[str, Any] = {}
-        for reg in self.gdb.avatar.arch.registers:
-            registers[reg] = self.gdb.read_register(reg)
+        # Prefer the backend-agnostic list_registers if available
+        # (HalBackend). Fall back to avatar2's arch.registers otherwise.
+        if hasattr(self.gdb, "list_registers"):
+            reg_names = self.gdb.list_registers()
+        else:
+            reg_names = self.gdb.avatar.arch.registers
+
+        registers = {}
+        for reg in reg_names:
+            try:
+                registers[reg] = self.gdb.read_register(reg)
+            except (ValueError, AttributeError):
+                # Skip registers the backend doesn't expose
+                continue
         return mems, registers
 
-    def handle_bp(self, bp: int) -> None:
+    def handle_bp(self, bp):
         (function, is_entry) = self.break_points[bp]
         print("BP Hit: ", function, " is_enrty: ", is_entry)
         record_id = self.save_state_to_db(function, is_entry)
@@ -160,7 +170,7 @@ class State_Recorder(object):
                 self.gdb.remove_breakpoint(bp)
 
 
-def handle_bp(avatar: Any, message: Any) -> None:
+def handle_bp(avatar, message):
     global Recorder
     bp = int(message.breakpoint_number)
     Recorder.handle_bp(bp)
