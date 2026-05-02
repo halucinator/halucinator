@@ -1,32 +1,29 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
 
-from __future__ import annotations
 
 import zmq
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 from .ioserver import IOServer
 import logging
-from typing import Any, Mapping, Optional, Union
-
 log = logging.getLogger(__name__)
 
 
 class GenericPrintServer(object):
    
-    def __init__(self, ioserver: IOServer, subscribe_topic: Optional[str] = None) -> None:
-        self.ioserver: IOServer = ioserver
-        self.prev_print: Optional[str] = None
+    def __init__(self, ioserver, subscribe_topic=None):
+        self.ioserver = ioserver
+        self.prev_print = None
         if subscribe_topic is not None:
             ioserver.register_topic(subscribe_topic, self.write_handler)
 
-    def write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:
+    def write_handler(self, ioserver, msg):
 
         data = ['%s: %s'%(key,data.decode('latin-1')) in msg.items()]
         print("Got: %s" %"".join(data))
-
-    def send_data(self, topic: str, id: str, chars: Any) -> None:
+        
+    def send_data(self, topic, id, chars):
         d = {'interface_id': id, 'char': chars}
         log.debug("Sending Message (%s) %s" % (topic, str(d)))
         self.ioserver.send_msg(topic, d)
