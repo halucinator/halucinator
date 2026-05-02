@@ -5,8 +5,6 @@
 """
 Primary parser and validator of halucinator config file
 """
-from __future__ import annotations
-
 import csv
 import importlib
 import inspect
@@ -14,8 +12,6 @@ import logging
 import os
 import sys
 from struct import unpack
-from typing import Any, Dict, List, NewType, Optional, Tuple, Union
-
 import yaml
 
 from halucinator import hal_log as hal_log_conf
@@ -23,9 +19,6 @@ from halucinator.config.target_archs import HALUCINATOR_TARGETS
 from halucinator.config.elf_program import ELFProgram
 from halucinator.config.memory_config import HalMemConfig
 from halucinator.config.symbols_config import HalSymbolConfig
-
-# Openable is a NewType to distinguish file paths from other strings.
-Openable = NewType("Openable", str)
 
 log = logging.getLogger(__name__)
 hal_log = hal_log_conf.getHalLogger()
@@ -40,16 +33,16 @@ class HalInterceptConfig:
     # pylint: disable=too-many-instance-attributes
     def __init__(
         self,
-        config_file: str,
-        cls: str,
-        function: str,
-        addr: Optional[int] = None,
-        symbol: None = None,
-        class_args: Optional[Dict[str, Any]] = None,
-        registration_args: Optional[Dict[str, Any]] = None,
-        run_once: bool = False,
-        watchpoint: Union[str, bool] = False,
-    ) -> None:  # pylint: disable=too-many-instance-attributes,too-many-arguments
+        config_file,
+        cls,
+        function,
+        addr=None,
+        symbol=None,
+        class_args=None,
+        registration_args=None,
+        run_once=False,
+        watchpoint=False,
+    ):  # pylint: disable=too-many-instance-attributes,too-many-arguments
         self.config_file = config_file
         self.symbol = symbol
 
@@ -68,7 +61,7 @@ class HalInterceptConfig:
         self.run_once = run_once
         self.watchpoint = watchpoint  # Valid 'r', 'w' ,'rw'
 
-    def _check_handler_is_valid(self) -> bool:
+    def _check_handler_is_valid(self):
         """
         Checks if the handler specified in the config
         is valid
@@ -104,7 +97,7 @@ class HalInterceptConfig:
             valid = False
         return valid
 
-    def is_valid(self) -> bool:
+    def is_valid(self):
         """
         Used to check if intercept is valid
         """
@@ -123,22 +116,12 @@ class HalInterceptConfig:
             valid = False
         return valid
 
-    def __repr__(self) -> str:
-        if self.bp_addr is None:
-            return "(%s){symbol: %s, addr: None, class: %s, function:%s}" % (
-                self.config_file,
-                self.symbol,
-                self.cls,
-                self.function,
-            )
-        else:
-            return "(%s){symbol: %s, addr: %#x, class: %s, function:%s}" % (
-                self.config_file,
-                self.symbol,
-                self.bp_addr,
-                self.cls,
-                self.function,
-            )
+    def __repr__(self):
+        addr_str = hex(self.bp_addr) if isinstance(self.bp_addr, int) else str(self.bp_addr)
+        return (
+            f"({self.config_file})"
+            "{" f"symbol: {self.symbol}, addr: {addr_str}, class: {self.cls}, function:{self.function}" "}"
+        )
 
 
 class HALMachineConfig:
@@ -151,16 +134,16 @@ class HALMachineConfig:
     # pylint: disable=too-many-instance-attributes
     def __init__(
         self,
-        config_file: Optional[str] = None,
-        arch: str = "cortex-m3",
-        cpu_model: str = "cortex-m3",
-        entry_addr: Optional[int] = None,
-        init_sp: Optional[int] = None,
-        gdb_exe: str = "gdb-multiarch",
-        vector_base: int = 0x08000000,
-        gdb_arch: Optional[str] = None,
-        machine: Optional[str] = None,
-    ) -> None:  # pylint: disable=too-many-arguments
+        config_file=None,
+        arch="cortex-m3",
+        cpu_model="cortex-m3",
+        entry_addr=None,
+        init_sp=None,
+        gdb_exe="gdb-multiarch",
+        vector_base=0x08000000,
+        gdb_arch=None,
+        machine=None,
+    ):  # pylint: disable=too-many-arguments
         self.arch = arch
         self.machine = machine
         self.cpu_model = cpu_model
@@ -170,28 +153,40 @@ class HALMachineConfig:
         self.gdb_arch = gdb_arch
         self.vector_base = vector_base
         self.config_file = config_file
-        self._using_default_machine = True if config_file is None else False
+        self.using_default_machine = config_file is None
+        self._using_default_machine = self.using_default_machine  # private alias
 
         if self.arch not in HALUCINATOR_TARGETS:
             hal_log.critical(
                 "Arch %s not supported.  Supported Archs: %s",
                 self.arch,
-                HALUCINATOR_TARGETS.keys,
+                list(HALUCINATOR_TARGETS.keys()),
             )
 
-    def get_avatar_arch(self) -> Any:
+    def get_avatar_arch(self):
         """
         Returns the Avatar Architecture
         """
         return HALUCINATOR_TARGETS[self.arch]["avatar_arch"]
 
-    def get_qemu_target(self) -> Any:
+    def get_qemu_target(self):
         """
-        Returns the QEMU Target
+        Returns the QEMU Target class (legacy avatar2 path).
         """
-        return HALUCINATOR_TARGETS[self.arch]["qemu_target"]
+        resolver = HALUCINATOR_TARGETS[self.arch]["qemu_target"]
+        return resolver() if callable(resolver) else resolver
 
-    def get_qemu_path(self) -> Optional[str]:
+    def get_backend(self, emulator: str = "avatar2"):
+        """
+        Return a HalBackend for this machine config.
+
+        emulator: "avatar2" (default), "qemu", or "unicorn".
+        Defaults to "avatar2" so existing code is unaffected.
+        """
+        from halucinator.backends import get_backend
+        return get_backend(backend_type=emulator, arch=self.arch)
+
+    def get_qemu_path(self):
         """
         Returns path for starting qemu
         """
@@ -214,7 +209,7 @@ class HALMachineConfig:
         sys.exit(1)
         return None
 
-    def __repr__(self) -> str:
+    def __repr__(self):
         return (
             f"({self.arch}) Machine arch:{self.arch}, cpu_type:{self.cpu_model}, "
             f"entry_addr:{hex(self.entry_addr)}, gdb_exe:{self.gdb_exe}"
@@ -229,18 +224,18 @@ class HalucinatorConfig:
     its components and to validate the config.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
 
         self.machine = HALMachineConfig()
-        self.options: Dict[str, Any] = {}
-        self.memories: Dict[str, HalMemConfig] = {}
-        self.intercepts: List[HalInterceptConfig] = []
-        self.watchpoints: List[Any] = []
-        self.symbols: List[HalSymbolConfig] = []
-        self.callables: List[Any] = []
+        self.options = {}
+        self.memories = {}
+        self.intercepts = []
+        self.watchpoints = []
+        self.symbols = []
+        self.callables = []
         self.elf_program = None
 
-    def add_yaml(self, yaml_filename: str) -> None:
+    def add_yaml(self, yaml_filename):
         """
         Opens and parses a yaml file adding it contents
         to this config
@@ -248,14 +243,9 @@ class HalucinatorConfig:
         with open(yaml_filename, "rb") as infile:
             part_config = yaml.load(infile, Loader=yaml.FullLoader)
 
-            # if empty file, don't crash, rather log and continue
-            if part_config is None:
-                log.warning(
-                    "%s is empty or could not be loaded correctly, skipping",
-                    yaml_filename,
-                )
+            if not part_config:
+                log.warning("Empty or null YAML file: %s", yaml_filename)
                 return
-
             if "machine" in part_config:
                 self._parse_machine(part_config["machine"], yaml_filename)
             if "memories" in part_config:
@@ -272,28 +262,7 @@ class HalucinatorConfig:
             if "elf_program" in part_config:
                 self._parse_elf_program(part_config["elf_program"], yaml_filename)
 
-    def reload_yaml_intercepts(self, yaml_filename: str) -> bool:
-        """
-        Reloads configuration data from a yaml file.
-        This function will delete any existing intercepts associated with yaml_filename
-        before re-reading and adding all intercepts defined in yaml_filename to
-        self.intercepts.
-        """
-        self.intercepts = [
-            i for i in self.intercepts if i.config_file != yaml_filename
-        ]
-
-        with open(yaml_filename, "rb") as infile:
-            part_config = yaml.load(infile, Loader=yaml.FullLoader)
-            if "intercepts" in part_config:
-                self._parse_intercepts(part_config["intercepts"], yaml_filename)
-
-        if not self.prepare_and_validate():
-            log.error("Config invalid")
-            return False
-        return True
-
-    def add_csv_symbols(self, csv_file: str) -> None:
+    def add_csv_symbols(self, csv_file):
         """
         Reads in a file of csv with format
         symbol_name, first_addr, last_addr
@@ -308,23 +277,18 @@ class HalucinatorConfig:
                     HalSymbolConfig(csv_file, row[0].strip(), addr, size)
                 )
 
-    def _parse_machine(self, machine_dict: Dict[str, Any], filename: Optional[str]) -> None:
+    def _parse_machine(self, machine_dict, filename):
         """
         Parse the machine entry from the config file
         """
         prev_machine = self.machine
         self.machine = HALMachineConfig(filename, **machine_dict)
-        if not prev_machine._using_default_machine:
+        if not prev_machine.using_default_machine:
             hal_log.warning(
                 "Overwriting previous machine %s with %s", prev_machine, self.machine
             )
 
-    def _parse_memory(
-        self,
-        mem_dict: Dict[str, Union[Dict[str, Union[str, int]], Dict[str, int]]],
-        yaml_filename: str,
-        emulate_required: bool = False,
-    ) -> None:
+    def _parse_memory(self, mem_dict, yaml_filename, emulate_required=False):
         """
         Parsers memory config from yaml file.
         """
@@ -345,7 +309,7 @@ class HalucinatorConfig:
 
             self.memories[mem_name] = new_mem
 
-    def _parse_elf_program(self, elf_dict: Dict[str, Any], yaml_file: str) -> None:
+    def _parse_elf_program(self, elf_dict, yaml_file):
         """
         Parse the elf program entry from the config file
         """
@@ -354,7 +318,7 @@ class HalucinatorConfig:
             self.elf_program.exit_to = self.machine.entry_addr
             self.machine.entry_addr = self.elf_program.get_entry_addr()
 
-    def _parse_intercepts(self, intercept_lst: List[Dict[str, Union[str, int]]], yaml_file: str) -> None:
+    def _parse_intercepts(self, intercept_lst, yaml_file):
         """
             Parse the intercept entries from the config file
             expect the below format.
@@ -371,7 +335,7 @@ class HalucinatorConfig:
                 intercept = HalInterceptConfig(yaml_file, **int_conf)
                 self.intercepts.append(intercept)
 
-    def _parse_symbols(self, sym_dict: Dict[int, str], yaml_file: str) -> None:
+    def _parse_symbols(self, sym_dict, yaml_file):
         """
         Parses the symbol entry from the config file
         """
@@ -379,7 +343,7 @@ class HalucinatorConfig:
             sym = HalSymbolConfig(yaml_file, name=sym_name, addr=addr)
             self.symbols.append(sym)
 
-    def get_addr_for_symbol(self, sym_name: str) -> Optional[int]:
+    def get_addr_for_symbol(self, sym_name):
         """
         Gets that address for specified symbol
 
@@ -391,7 +355,7 @@ class HalucinatorConfig:
                 return sym.addr
         return None
 
-    def resolve_intercept_bp_addrs(self) -> None:
+    def resolve_intercept_bp_addrs(self):
         """
         Gets all the address of all symbols in intercepts and sets the address
         appropriately.
@@ -407,7 +371,7 @@ class HalucinatorConfig:
                 else:
                     log.warning("Unresolved symbol: %s, %s", inter.symbol, inter)
 
-    def get_symbol_name(self, addr: int) -> str:
+    def get_symbol_name(self, addr):
         """
         Gets symbol name that contains address
         """
@@ -417,31 +381,32 @@ class HalucinatorConfig:
                 return sym.name
         return hex(addr)
 
-    def get_symbol_offset(self, addr: int) -> Optional[Tuple[str, int]]:
+    def reload_yaml_intercepts(self, yaml_filename):
         """
-        Gets nearest earlier symbol and offset for address
+        Clears existing intercepts and reloads them from yaml_filename.
+        Returns the new intercept list.
+        """
+        self.intercepts = []
+        with open(yaml_filename, "rb") as infile:
+            part_config = yaml.load(infile, Loader=yaml.FullLoader)
+        if part_config and "intercepts" in part_config:
+            self._parse_intercepts(part_config["intercepts"], yaml_filename)
+        return self.intercepts
 
-        :param addr:  Address to look up
-        :returns: Tuple of (symbol_name, offset) or None
+    def get_symbol_offset(self, addr):
         """
-        nearest = None
+        Returns (symbol_name, offset) for the symbol containing addr, or None.
+        """
         for sym in self.symbols:
-            if addr >= sym.addr:
-                offs = addr - sym.addr
-                if nearest is None or nearest[1] > offs:
-                    nearest = (sym.name, offs)
-        return nearest
+            if addr >= sym.addr and addr < (sym.addr + (sym.size or 0)):
+                return (sym.name, addr - sym.addr)
+        return None
 
-    def get_symbol_list(self) -> List[Tuple[str, int]]:
-        """
-        Gets all symbol names as a list of (name, address) pairs.
-        """
-        s_names = []
-        for sym in self.symbols:
-            s_names.append((sym.name, sym.addr))
-        return s_names
+    def get_symbol_list(self):
+        """Returns list of (name, addr) tuples for all symbols."""
+        return [(sym.name, sym.addr) for sym in self.symbols]
 
-    def memory_by_name(self, name: str) -> Optional[HalMemConfig]:
+    def memory_by_name(self, name):
         """
         Finds the memory with a given name
 
@@ -454,7 +419,7 @@ class HalucinatorConfig:
 
         return None
 
-    def memory_containing(self, addr: int) -> Optional[HalMemConfig]:
+    def memory_containing(self, addr):
         """
         Finds the memory that contains the given address
 
@@ -467,7 +432,7 @@ class HalucinatorConfig:
                 return mem
         return None
 
-    def prepare_and_validate(self) -> bool:
+    def prepare_and_validate(self):
         """
         Prepares the config for use and validates required entries are
         present.
@@ -484,8 +449,8 @@ class HalucinatorConfig:
         # Validate Intercepts
         if len(self.intercepts) == 0:
             hal_log.warning("Intercepts is Empty")
-        bp_addrs: Dict[int, HalInterceptConfig] = {}
-        del_inters: List[HalInterceptConfig] = []
+        bp_addrs = {}
+        del_inters = []
         for inter in self.intercepts:
             if (
                 self.machine.arch == "cortex-m3"
@@ -515,7 +480,7 @@ class HalucinatorConfig:
 
         return valid
 
-    def validate_cortexm_entry_and_sp(self) -> bool:
+    def validate_cortexm_entry_and_sp(self):
         """
         validates that cortex-m3 devices have an entry point and initial sp value.
         If not tries to get them from the memory at address 0
@@ -543,7 +508,7 @@ class HalucinatorConfig:
                     self.machine.init_sp = stack_pointer
         return True
 
-    def initialize_target(self, qemu_target: Any) -> None:
+    def initialize_target(self, qemu_target):
         """
         Initializes the qemu target after it is created
 

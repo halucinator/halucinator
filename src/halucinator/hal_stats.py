@@ -1,22 +1,19 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
-
-from typing import Any, Dict, Optional, Union
 
 import yaml
 
-stats: Dict[Union[str, int], Any] = {}
-_stats_file: Optional[str] = None
+stats = {}
+_stats_file = None
 
 
-def set_filename(filename: str) -> None:
+def set_filename(filename):
     global _stats_file
     _stats_file = filename
 
 
-def write_on_update(set_key: str, value: Any) -> None:
+def write_on_update(set_key, value):
     '''
         Writes the stats information when if value is added to the set in 
         the stats dictionary
