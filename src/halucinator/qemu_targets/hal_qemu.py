@@ -4,7 +4,6 @@ import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from avatar2 import QemuTarget
-from halucinator import hal_config
 
 log = logging.getLogger(__name__)
 
@@ -417,6 +416,7 @@ class HALQemuTarget(QemuTarget):
             "addr": addr,
             "watchpoint": watchpoint,
         }
+        from halucinator import hal_config
         intercept_config = hal_config.HalInterceptConfig(__file__, **config)
         from halucinator.bp_handlers import intercepts
 
