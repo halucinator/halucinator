@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 
 from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+from halucinator.qemu_targets.arm_qemu import ARMQemuTarget
 
 
 @pytest.fixture
@@ -32,6 +33,26 @@ def qemu_mock():
     )
     mock_model.write_memory_bytes = types.MethodType(
         HALQemuTarget.write_memory_bytes, mock_model
+    )
+    # Wire read_register to read from mock_model.regs so that
+    # get_arg/set_args work the same way set_arguments() expects.
+    def _read_register(reg_name):
+        return getattr(mock_model.regs, reg_name)
+
+    def _write_register(reg_name, value):
+        setattr(mock_model.regs, reg_name, value)
+
+    mock_model.read_register = _read_register
+    mock_model.write_register = _write_register
+
+    mock_model.get_arg = types.MethodType(
+        ARMQemuTarget.get_arg, mock_model
+    )
+    mock_model.set_args = types.MethodType(
+        ARMQemuTarget.set_args, mock_model
+    )
+    mock_model.read_string = types.MethodType(
+        ARMQemuTarget.read_string, mock_model
     )
 
     return mock_model
