@@ -2,7 +2,6 @@
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
-from __future__ import annotations
 
 import binascii
 import logging
@@ -10,7 +9,6 @@ import os
 import struct
 import yaml
 from collections import deque
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from avatar2 import Avatar, QemuTarget
 from capstone import *
@@ -27,18 +25,18 @@ hal_log = hal_log.getHalLogger()
 
 
 class AllocedMemory():
-    def __init__(self, target: QemuTarget, base_addr: int, size: int) -> None:
-        self.target: QemuTarget = target
-        self.base_addr: int = base_addr
-        self.size: int = size
-        self.in_use: bool = True
+    def __init__(self, target, base_addr, size):
+        self.target = target
+        self.base_addr = base_addr
+        self.size = size
+        self.in_use = True
         #TODO add ability to set watchpoint for bounds checking
 
-    def zero(self) -> None:
+    def zero(self):
         zeros = "\x00"* self.size
         self.target.write_memory(self.base_addr, 1, zeros, raw=True)
 
-    def alloc_portion(self, size: int) -> Tuple[Any, Any]:
+    def alloc_portion(self, size):
         if size < self.size:
             new_alloc = AllocedMemory(self.target, self.base_addr, size)
             self.base_addr += size
@@ -50,7 +48,7 @@ class AllocedMemory():
         else:
             raise ValueError("Trying to alloc %i bytes from chuck of size %i" %(size, self.size))
 
-    def merge(self, block: Any) -> None:
+    def merge(self, block):
         '''
             Merges blocks with this one
         '''
@@ -63,22 +61,22 @@ class PowerPCQemuTarget(QemuTarget):
         halucinator.  Enables read/writing and returning from
         functions in a calling convention aware manner
     '''
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.irq_base_addr: Optional[int] = None
+        self.irq_base_addr = None
         self.avatar.load_plugin('assembler')
         self.avatar.load_plugin('disassembler')
         # self.init_halucinator_heap()
-        self.calls_memory_blocks: Dict[Any, Any] = {}  # Look up table of allocated memory
+        self.calls_memory_blocks = {}  # Look up table of allocated memory
                                        # used to perform calls
 
-    def read_string(self, addr: int, max_len: int = 256) -> str:
+    def read_string(self, addr, max_len=256):
         s = self.read_memory(addr, 1, max_len, raw=True)
         s = s.decode('latin-1')
         return s.split('\x00')[0]
 
 
-    def dictify(self, ignore: Optional[List[str]] = None) -> Any:
+    def dictify(self, ignore=None):
         if ignore is None:
             ignore = ['state', 'status', 'regs', 'protocols', 'log', 'avatar',
                       'alloced_memory', 'free_memory', 'calls_memory_blocks']
@@ -102,7 +100,7 @@ class PowerPCQemuTarget(QemuTarget):
 
     #     raise ValueError("Memory region named 'halucinator required")
 
-    def hal_alloc(self, size: int) -> Any:
+    def hal_alloc(self, size):
 
         if size % 4:
             size += 4 - (size % 4) # keep aligned on 4 byte boundary
@@ -122,7 +120,7 @@ class PowerPCQemuTarget(QemuTarget):
             self.alloced_memory.add(alloced_block)
         return alloced_block
 
-    def hal_free(self, mem: Any) -> None:
+    def hal_free(self, mem):
         mem.is_used = False
         self.alloced_memory.remove(mem)
         merged_block = None
@@ -143,7 +141,7 @@ class PowerPCQemuTarget(QemuTarget):
             self.free_scratch_memory(merged_block)
 
 
-    def get_arg(self, idx: int) -> int:
+    def get_arg(self, idx):
         '''
             Gets the value for a function argument (zero indexed)
 
@@ -160,7 +158,7 @@ class PowerPCQemuTarget(QemuTarget):
             raise ValueError("Invalid arg index")
 
 
-    def set_arg(self, idx: int, value: int) -> None:
+    def set_arg(self, idx, value):
         '''
             Sets the value for a function argument (zero indexed)
 
@@ -175,7 +173,7 @@ class PowerPCQemuTarget(QemuTarget):
             "implemented")
         
 
-    def set_args(self, args: List[int]) -> int:
+    def set_args(self, args):
         '''
             Sets the value for a function argument (zero indexed)
 
@@ -195,13 +193,13 @@ class PowerPCQemuTarget(QemuTarget):
         self.write_register('sp', sp)
         return sp
 
-    def push_lr(self) -> None:
+    def push_lr(self):
         sp = self.read_register('sp')
         sp -= 4
         self.write_memory(sp, 4,self.read_register('lr'))
         self.write_register('sp', sp)
 
-    def get_ret_addr(self) -> int:
+    def get_ret_addr(self):
         '''
             Gets the return address for the function call
 
@@ -209,24 +207,24 @@ class PowerPCQemuTarget(QemuTarget):
         '''
         return self.regs.lr
 
-    def set_ret_addr(self, ret_addr: int) -> None:
+    def set_ret_addr(self, ret_addr):
         '''
             Sets the return address for the function call
             :param ret_addr Value for return address
         '''
         self.regs.lr = ret_addr
 
-    def execute_return(self, ret_value: int) -> None:
+    def execute_return(self, ret_value):
         if ret_value != None:
             # Puts ret value in r3
             self.regs.r3 = ret_value & 0xFFFFFFFF #Truncate to 32 bits
         self.regs.pc = self.regs.lr
 
 
-    def get_irq_base_addr(self) -> int:
+    def get_irq_base_addr(self):
         raise NotImplementedError
         
-    def irq_set_qmp(self, irq_num: int = 1) -> None:
+    def irq_set_qmp(self, irq_num=1):
         '''
             Set interrupt using qmp.
             DO NOT execute in context of a bp handler, use irq_set_bp instead
@@ -235,7 +233,7 @@ class PowerPCQemuTarget(QemuTarget):
         '''
         raise NotImplementedError
 
-    def irq_clear_qmp(self, irq_num: int = 1) -> None:
+    def irq_clear_qmp(self, irq_num=1):
         '''
             Clear interrupt using qmp.
             DO NOT execute in context of a bp handler, use irq_clear_bp
@@ -244,16 +242,16 @@ class PowerPCQemuTarget(QemuTarget):
         '''
         raise NotImplementedError
         
-    def irq_set_bp(self, irq_num: int = 1) -> None:
+    def irq_set_bp(self, irq_num=1):
         raise NotImplementedError
         
-    def irq_clear_bp(self, irq_num: int) -> None:
+    def irq_clear_bp(self, irq_num):
         raise NotImplementedError
         
-    def irq_pulse(self, irq_num: int = 1, cpu: int = 0) -> None:
+    def irq_pulse(self, irq_num=1, cpu=0):
         raise NotImplementedError
         
-    def get_symbol_name(self, addr: int) -> str:
+    def get_symbol_name(self, addr):
         """
         Get the symbol for an address
 
@@ -263,7 +261,7 @@ class PowerPCQemuTarget(QemuTarget):
 
         return self.avatar.config.get_symbol_name(addr)
 
-    def set_bp(self, addr: int, handler_cls: Any, handler: Any, run_once: bool = False) -> None:
+    def set_bp(self, addr, handler_cls, handler, run_once=False):
         '''
             Adds a break point setting the class and method to handler it.
 
@@ -283,17 +281,11 @@ class PowerPCQemuTarget(QemuTarget):
         intercept_config = hal_config.HalInterceptConfig(__file__, **config)
         intercepts.register_bp_handler(self, intercept_config)
 
-    def call_varg(self, ret_bp_handler: Any, callee: Any, *args: Any) -> Any:
+    def call_varg(self, ret_bp_handler, callee, *args):
         raise NotImplementedError("Calling Varg functions not supported")
 
-    def call(
-        self,
-        callee: Union[int, str],
-        args: Optional[List[Any]] = None,
-        bp_handler_cls: Union[str, Any] = None,
-        ret_bp_handler: Optional[str] = None,
-        debug: bool = False,
-    ) -> Tuple[bool, Optional[Any]]:
+    def call(self, callee, args=None, bp_handler_cls=None, ret_bp_handler=None,
+            debug=False):
         '''
             Calls a function in the binary and returning to ret_bp_handler.
             Using this without side effects requires conforming to calling
@@ -379,7 +371,7 @@ class PowerPCQemuTarget(QemuTarget):
         return False, None
 
 
-    def write_branch(self, addr: int, branch_target: int, options: Optional[Any] = None) -> None:
+    def write_branch(self, addr, branch_target, options=None):
         '''
             Places an absolute branch at address addr to
             branch_target
@@ -396,14 +388,12 @@ class PowerPCQemuTarget(QemuTarget):
         self.write_memory(addr, 1, instructions, len(instructions), raw=True)
         return
 
-    def save_state(
-        self,
-        silent: bool = False,
-        dirname: Optional[str] = None,
-        overwrite: bool = False,
-        specified_memory: Optional[Any] = None,
-        specified_registers: Optional[Any] = None,
-    ) -> Tuple[bool, Optional[Any]]:
+    def save_state(self,
+            silent=False,
+            dirname=None,
+            overwrite=False,
+            specified_memory=None,
+            specified_registers=None):
 
         if not silent:
             hal_log.debug("#######################")

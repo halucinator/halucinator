@@ -1,22 +1,17 @@
-## Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+## Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
-import functools
-import pickle  # existing code uses pickle for DB deserialization
 import sqlite3
-import struct
+from tkinter import Tk
+from tkinter.ttk import Label
+import tkinter.ttk
+import tkinter as tk
+#from StringIO import StringIO
 from io import BytesIO
-
-try:
-    import tkinter as tk
-    import tkinter.ttk
-    from tkinter import Tk
-    from tkinter.ttk import Label
-except ImportError:
-    tk = None  # type: ignore[assignment]
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Union
+import pickle
+import functools
+import struct
 
 from .util.parse_symbol_tables import DWARFReader, sym_format
 
@@ -29,13 +24,13 @@ class lazy_property(object):
     From https://stackoverflow.com/a/6849299
     '''
 
-    def __init__(self, fget: Callable[..., Any]) -> None:
-        self.fget: Callable[..., Any] = fget
+    def __init__(self, fget):
+        self.fget = fget
 
         # copy the getter function's docstring and other attributes
         functools.update_wrapper(self, fget)
 
-    def __get__(self, obj: Any, cls: Any) -> Any:
+    def __get__(self, obj, cls):
         if obj is None:
             return self
 
@@ -45,32 +40,32 @@ class lazy_property(object):
 
 
 class Recording(object):
-    def __init__(self, db: sqlite3.Connection, row_id: int, funct_name: str, entry_id: int, app_id: int) -> None:
-        self.row_id: int = row_id
-        self.db: sqlite3.Connection = db
-        self.funct_name: str = funct_name
-        self.entry_id: int = entry_id
-        self.app_id: int = app_id
+    def __init__(self, db, row_id, funct_name, entry_id, app_id):
+        self.row_id = row_id
+        self.db = db
+        self.funct_name = funct_name
+        self.entry_id = entry_id
+        self.app_id = app_id
 
     @lazy_property
-    def before_state(self) -> Dict[str, Any]:
+    def before_state(self):
         '''
             Lazily set property will query DB on first access to this property
-            self.before_state = {'memory':{offset: mem},
+            self.before_state = {'memory':{offset: mem}, 
                                  'regs':{'<reg_name>':value}
         '''
         return self._get_state(self.entry_id)
 
     @lazy_property
-    def after_state(self) -> Dict[str, Any]:
+    def after_state(self):
         '''
             Lazily set property will query DB on first access to this property
-            self.after_state = {'memory':{offset: mem},
+            self.after_state = {'memory':{offset: mem}, 
                                  'regs':{'<reg_name>':value}
         '''
         return self._get_state(self.row_id)
 
-    def _get_state(self, row_id: int) -> Dict[str, Any]:
+    def _get_state(self, row_id):
         '''
             Reads the state from the database and returns as a dict
         '''
@@ -81,17 +76,17 @@ class Recording(object):
         regs = pickle.loads(regs)
         return {'memory': memory, 'regs': regs}
 
-    def get_ret_value(self) -> Any:
+    def get_ret_value(self):
         #import IPython; IPython.embed()
         return self.after_state['regs']['r0']
 
-    def get_before_value(self, addr: int, size: int) -> Any:
+    def get_before_value(self, addr, size):
         return self._get_value(addr, size, self.before_state)
 
-    def get_after_value(self, addr: int, size: int) -> Any:
+    def get_after_value(self, addr, size):
         return self._get_value(addr, size, self.after_state)
 
-    def _get_value(self, addr: int, size: int, state: Dict[str, Any]) -> Any:
+    def _get_value(self, addr, size, state):
         for offset, mem in list(state['memory'].items()):
             print("Memory: ", hex(offset), ":", hex((offset + len(mem))))
 
@@ -103,7 +98,7 @@ class Recording(object):
 
         return ''
 
-    def get_param(self, param_num: int, size: int = 4) -> Any:
+    def get_param(self, param_num, size=4):
         # All params need to come from before state
         if param_num < 4 and param_num >= 0:
             return self.before_state['regs']['r%i' % param_num]
@@ -121,15 +116,15 @@ class Recording(object):
 
 
 class App(object):
-    def __init__(self, db_name: str) -> None:
-        self.db: sqlite3.Connection = sqlite3.connect(db_name)
+    def __init__(self, db_name):
+        self.db = sqlite3.connect(db_name)
         self.db.text_factory = bytes
-        self.root: Tk = Tk()
-        self.dwarf_readers: Dict[int, DWARFReader] = {}
+        self.root = Tk()
+        self.dwarf_readers = {}
         self.create_gui_elements()
         self.root.mainloop()
 
-    def get_dwarf_reader(self, app_id: int) -> DWARFReader:
+    def get_dwarf_reader(self, app_id):
         if app_id not in self.dwarf_readers:
             c = self.db.cursor()
             c.execute("SELECT bin FROM applications WHERE (id == ?)", (app_id,))
@@ -138,7 +133,7 @@ class App(object):
             self.dwarf_readers[app_id] = DWARFReader(app_bin)
         return self.dwarf_readers[app_id]
 
-    def get_exit_records(self) -> Dict[int, Recording]:
+    def get_exit_records(self):
         '''
             Returns a set of function names and app_id from db 
                 index 0 is function name and index 1 is app_id
@@ -149,7 +144,7 @@ class App(object):
             self.exit_records[row[0]] = Recording(self.db, *row)
         return self.exit_records
 
-    def create_recording_listing(self) -> None:
+    def create_recording_listing(self):
         '''
             Populates the tree of recordings
         '''
@@ -164,25 +159,25 @@ class App(object):
             self.tree.insert(funct_lut[f_name], tk.END,
                              iid=r_id, text="Exit_ID %i" % r_id)
 
-    def create_gui_elements(self) -> None:
+    def create_gui_elements(self):
         '''
             Creates the elements in the GUI
         '''
         # Label for functions that are recorded
-        self.table_funcs: Label = Label(master=self.root, text="Functions")
+        self.table_funcs = Label(master=self.root, text="Functions")
         # self.table_funcs.config(width=400)
 
         # Tree of recording listings
-        self.tree: tkinter.ttk.Treeview = tkinter.ttk.Treeview(master=self.root)
+        self.tree = tkinter.ttk.Treeview(master=self.root)
         # self.tree.column('#0', minwidth=400)
         self.tree.bind('<Button-1>', self.on_func_click)
         self.create_recording_listing()
 
         # Label for diplaying recording details
-        self.record_label: Label = Label(master=self.root, text="Recorded")
+        self.record_label = Label(master=self.root, text="Recorded")
 
         # Tree for displaying record details
-        self.record_tree: tkinter.ttk.Treeview = tkinter.ttk.Treeview(master=self.root,
+        self.record_tree = tkinter.ttk.Treeview(master=self.root,
                                                 columns=("Type", "Name", "Size", "Before", "After"))
         self.record_tree.heading('#1', text='Type')
         self.record_tree.heading('#2', text='Name')
@@ -192,7 +187,7 @@ class App(object):
         self.record_tree.tag_configure('DIFF', background='light coral')
         self.set_layout()
 
-    def set_layout(self) -> None:
+    def set_layout(self):
         '''
             Sets the layout for the gui
         '''
@@ -211,7 +206,7 @@ class App(object):
         self.root.grid_columnconfigure(1, weight=1, minsize=500)
         self.root.grid_rowconfigure(1, weight=1)
 
-    def display_recording(self, record: Recording) -> None:
+    def display_recording(self, record):
         '''
             Displays the selected recording
         '''
@@ -257,8 +252,8 @@ class App(object):
             self.add_children(record, sym_reader, p_die,
                               parent_values, row, deref)
 
-    def add_children(self, record: Recording, sym_reader: DWARFReader, sym_die: Any, parent_values: Dict[str, Any], parent: Any,
-                     deref_addrs: Dict[str, Set[Any]]) -> None:
+    def add_children(self, record, sym_reader, sym_die, parent_values, parent,
+                     deref_addrs):
         '''
             Adds symbol to the record tree
         '''
@@ -360,14 +355,14 @@ class App(object):
                 # These are likely primitives don't need to add children
                 pass
 
-    def tag_if_diff(self, row: Any, a_val: Any, b_val: Any) -> None:
+    def tag_if_diff(self, row, a_val, b_val):
         if b_val != a_val:
             r_id = row
             while r_id != '':
                 self.record_tree.item(r_id, tag='DIFF')
                 r_id = self.record_tree.parent(r_id)
 
-    def add_record_row(self, parent: Any, sym_reader: DWARFReader, sym_die: Any, name: Optional[str], b_val: Any, a_val: Any) -> Any:
+    def add_record_row(self, parent, sym_reader, sym_die, name, b_val, a_val):
         if sym_die.tag == 'DW_TAG_enumeration_type':
             ty = sym_reader.get_enum_str(sym_die)
         else:
@@ -379,7 +374,7 @@ class App(object):
         self.tag_if_diff(row, a_val, b_val)
         return row
 
-    def on_func_click(self, event: Any) -> None:
+    def on_func_click(self, event):
         clicked_id = self.tree.identify('item', event.x, event.y)
         try:
             iid = int(clicked_id)

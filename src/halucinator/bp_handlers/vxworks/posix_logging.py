@@ -3,15 +3,9 @@
 # the U.S. Government retains certain rights in this software.
 
 '''Posix Logging'''
-from __future__ import annotations
-
 import logging
-from typing import TYPE_CHECKING, Optional, Tuple
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +22,7 @@ class PosixLogging(BPHandler):
     #              POSIX API              #
     #######################################
     @bp_handler(['creat'])
-    def creat(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:
+    def creat(self, qemu, handler):
         '''creat'''
         log.debug("creat")
         name = qemu.read_string( qemu.get_arg(0))
@@ -37,7 +31,7 @@ class PosixLogging(BPHandler):
         return False, None
 
     @bp_handler(['open'])
-    def open(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:
+    def open(self, qemu, handler):
         '''open'''
         log.debug("open")
         name = qemu.read_string(qemu.get_arg(0))
@@ -47,7 +41,7 @@ class PosixLogging(BPHandler):
         return False, None
 
     @bp_handler(['mkdir'])
-    def mkdir(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:
+    def mkdir(self, qemu, handler):
         '''mkdir'''
         log.debug("mkdir")
         name = qemu.read_string( qemu.get_arg(0))
@@ -55,7 +49,7 @@ class PosixLogging(BPHandler):
         return False, None
 
     @bp_handler(['xdelete'])
-    def x_delete(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:
+    def x_delete(self, qemu, handler):
         '''x_delete'''
         log.debug("x_delete")
         name = qemu.read_string( qemu.get_arg(0))

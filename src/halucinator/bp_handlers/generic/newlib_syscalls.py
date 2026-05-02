@@ -1,16 +1,8 @@
-from __future__ import annotations
-
-import logging
-import sys
-from typing import TYPE_CHECKING, Tuple
-
 from halucinator.bp_handlers import BPHandler, bp_handler
 from halucinator import hal_log
+import logging, sys
 
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
-
-log: logging.Logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
 
 class NewLibSysCalls(BPHandler):
@@ -19,7 +11,7 @@ class NewLibSysCalls(BPHandler):
     '''
 
     @bp_handler(['_write'])
-    def _write(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def _write(self, qemu, addr):
         '''
             Just print data to the screen and return
         '''

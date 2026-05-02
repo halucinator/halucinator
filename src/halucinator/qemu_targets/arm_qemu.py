@@ -5,18 +5,15 @@
 ARMQEMU target.  This class represents the arm machine and defines architecture specific
 operations that halucinator performs. This target the ARMv4-v6 (not Cortex) 32bit architecuters
 """
-from __future__ import annotations
-
 from collections import deque
 
 import binascii
 import logging
 import struct
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
 
 from avatar2 import QemuTarget
 
-from halucinator import hal_config, hal_log
+from halucinator import hal_log
 from halucinator.bp_handlers import intercepts
 
 log = logging.getLogger(__name__)
@@ -29,20 +26,20 @@ class AllocedMemory:
     classes.  Most heap state is maintained in halucinator
     """
 
-    def __init__(self, target: QemuTarget, base_addr: int, size: int) -> None:
-        self.target: QemuTarget = target
-        self.base_addr: int = base_addr
-        self.size: int = size
-        self.in_use: bool = True
+    def __init__(self, target, base_addr, size):
+        self.target = target
+        self.base_addr = base_addr
+        self.size = size
+        self.in_use = True
 
-    def zero(self) -> None:
+    def zero(self):
         """
         Zero out allocated memory
         """
         zeros = "\x00" * self.size
         self.target.write_memory(self.base_addr, 1, zeros, raw=True)
 
-    def alloc_portion(self, size: int) -> Tuple[Any, Any]:
+    def alloc_portion(self, size):
         """
         Allocate a portion in the
         """
@@ -56,7 +53,7 @@ class AllocedMemory:
             return self, None
         raise ValueError(f"Trying to alloc {size} bytes from chuck of size {self.size}")
 
-    def merge(self, block: Any) -> None:
+    def merge(self, block):
         """
         Merges blocks with this one
         """
@@ -75,16 +72,16 @@ class ARMQemuTarget(QemuTarget):
 
     # pylint: disable=too-many-public-methods
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.irq_base_addr: Optional[int] = None
+        self.irq_base_addr = None
         self.avatar.load_plugin("assembler")
         self.avatar.load_plugin("disassembler")
         self._init_halucinator_heap()
-        self.calls_memory_blocks: Dict[Any, Any] = {}
-        self.REGISTER_IRQ_OFFSET: int = 4  # pylint: disable=invalid-name
+        self.calls_memory_blocks = {}
+        self.REGISTER_IRQ_OFFSET = 4  # pylint: disable=invalid-name
 
-    def read_string(self, addr: int, max_len: int = 256) -> str:
+    def read_string(self, addr, max_len=256):
         """
         Read string from target memory
         """
@@ -92,7 +89,21 @@ class ARMQemuTarget(QemuTarget):
         ret_str = ret_str.decode("latin-1")
         return ret_str.split("\x00")[0]
 
-    def dictify(self, ignore: Optional[List[str]] = None) -> Any:
+    def read_memory_word(self, addr):
+        value = self.read_memory(addr, 4, 1)
+        assert isinstance(value, int)
+        return value
+
+    def read_memory_bytes(self, addr, size):
+        return self.read_memory(addr, 1, size, raw=True)
+
+    def write_memory_word(self, addr, value):
+        return self.write_memory(addr, 4, value, 1)
+
+    def write_memory_bytes(self, addr, value):
+        return self.write_memory(addr, 1, value, len(value), raw=True)
+
+    def dictify(self, ignore=None):
         """
         Used to get dictify to ignore parts of this class to allow subclassing QemuTarget
         """
@@ -110,7 +121,7 @@ class ARMQemuTarget(QemuTarget):
             ]
         super().dictify(ignore)
 
-    def _init_halucinator_heap(self) -> None:
+    def _init_halucinator_heap(self):
         """
         Initializes the scratch memory in the target that halucinator
         can use.  This requires that a 'halucinator' memory region
@@ -120,14 +131,14 @@ class ARMQemuTarget(QemuTarget):
             if mem_name == "halucinator":
                 heap = AllocedMemory(self, mem_data.base_addr, mem_data.size)
                 heap.in_use = False
-                self.alloced_memory: Set[AllocedMemory] = set()
-                self.free_memory: Set[AllocedMemory] = set()
+                self.alloced_memory = set()
+                self.free_memory = set()
                 self.free_memory.add(heap)
                 return
 
         raise ValueError("Memory region named 'halucinator required")
 
-    def hal_alloc(self, size: int) -> Any:
+    def hal_alloc(self, size):
         """
         Allocates memory in the 'halucinator' memory space as a heap
         """
@@ -149,7 +160,7 @@ class ARMQemuTarget(QemuTarget):
             self.alloced_memory.add(alloced_block)
         return alloced_block
 
-    def hal_free(self, mem: Any) -> None:
+    def hal_free(self, mem):
         """
         Free's memory from the halucinator heap
         """
@@ -172,52 +183,7 @@ class ARMQemuTarget(QemuTarget):
         else:
             self.free_scratch_memory(merged_block)
 
-    def get_registers(self) -> Set[str]:
-        """
-        Returns the set of available register names
-        """
-        return self.regs._get_names()
-
-    def read_memory_word(self, addr: int) -> int:
-        """
-        Returns the word at the given address
-
-        :param addr:  The address to dereference
-        :returns:     The value at that address (as a 4-byte int)
-        """
-        return self.read_memory(addr, 4, 1)
-
-    def read_memory_bytes(self, addr: int, size: int) -> bytes:
-        """
-        Returns bytes at the given address
-
-        :param addr:  The address to read from
-        :param size:  Number of bytes to read
-        :returns:     The bytes read
-        """
-        return self.read_memory(addr, 1, size, raw=True)
-
-    def write_memory_word(self, addr: int, value: int) -> bool:
-        """
-        Writes the given value to the given address as a 4-byte word
-
-        :param addr:  The address to write to
-        :param value: The value to write (as a 4-byte int)
-        :returns:     True on success
-        """
-        return self.write_memory(addr, 4, value)
-
-    def write_memory_bytes(self, addr: int, value: bytes) -> bool:
-        """
-        Writes the given bytes to the given address
-
-        :param addr:  The address to write to
-        :param value: The bytes to write
-        :returns:     True on success
-        """
-        return self.write_memory(addr, 1, value, len(value), raw=True)
-
-    def get_arg(self, idx: int) -> int:
+    def get_arg(self, idx):
         """
         Gets the value for a function argument (zero indexed)
 
@@ -233,23 +199,7 @@ class ARMQemuTarget(QemuTarget):
             return self.read_memory(stack_addr, 4, 1)
         raise ValueError("Invalid arg index")
 
-    def set_arg(self, idx: int, value: int) -> None:
-        """
-        Sets the value for a single function argument (zero indexed)
-
-        :param idx      The argument index to set
-        :param value    Value to set the argument to
-        """
-        if 0 <= idx < 4:
-            self.write_register(f"r{idx}", value)
-        elif idx >= 4:
-            sp = self.read_register("sp")
-            stack_addr = sp + (idx - 4) * 4
-            self.write_memory(stack_addr, 4, value)
-        else:
-            raise ValueError(f"Invalid arg index: {idx}")
-
-    def set_args(self, args: List[int]) -> int:
+    def set_args(self, args):
         """
         Sets the value for a function argument (zero indexed)
 
@@ -270,7 +220,7 @@ class ARMQemuTarget(QemuTarget):
         self.write_register("sp", sp)
         return sp
 
-    def push_lr(self) -> None:
+    def push_lr(self):
         """
         Push lr register to stack
         """
@@ -280,7 +230,7 @@ class ARMQemuTarget(QemuTarget):
         self.write_memory(sp, 4, self.read_register("lr"))
         self.write_register("sp", sp)
 
-    def get_ret_addr(self) -> int:
+    def get_ret_addr(self):
         """
         Gets the return address for the function call
 
@@ -288,14 +238,14 @@ class ARMQemuTarget(QemuTarget):
         """
         return self.regs.lr
 
-    def set_ret_addr(self, ret_addr: int) -> None:
+    def set_ret_addr(self, ret_addr):
         """
         Sets the return address for the function call
         :param ret_addr Value for return address
         """
         self.regs.lr = ret_addr
 
-    def execute_return(self, ret_value: int) -> None:
+    def execute_return(self, ret_value):
         """
         Performs a function return, returning ret_value. If ret_value is none returns "void"
         """
@@ -304,7 +254,7 @@ class ARMQemuTarget(QemuTarget):
             self.regs.r0 = ret_value & 0xFFFFFFFF  # Truncate to 32 bits
         self.regs.pc = self.regs.lr
 
-    def _get_irq_addr(self, irq_num: int) -> int:
+    def _get_irq_addr(self, irq_num):
         """
         Gets the MMIO address used for `irq_num`
         """
@@ -321,14 +271,14 @@ class ARMQemuTarget(QemuTarget):
             )
         )
 
-    def _get_qom_list(self, path: str = "unattached") -> Any:
+    def _get_qom_list(self, path="unattached"):
         """
         Returns properties for the path
         """
         # pylint: disable=unexpected-keyword-arg
         return self.protocols.monitor.execute_command("qom-list", args={"path": path})
 
-    def _get_irq_path(self) -> Any:
+    def _get_irq_path(self):
         """
         Returns the qemu object model path (QOM) for the interrupt controller
         """
@@ -342,7 +292,7 @@ class ARMQemuTarget(QemuTarget):
             )
         )
 
-    def irq_enable_qmp(self, irq_num: int = 1) -> None:
+    def irq_enable_qmp(self, irq_num=1):
         """
         Enables interrupt using qmp.
         DO NOT execute in context of a bp handler, use irq_enable_bp instead
@@ -355,7 +305,7 @@ class ARMQemuTarget(QemuTarget):
             "qom-set", args={"path": path, "property": "enable-irq", "value": irq_num}
         )
 
-    def irq_disable_qmp(self, irq_num: int = 1) -> None:
+    def irq_disable_qmp(self, irq_num=1):
         """
         Disable interrupt using qmp.
         DO NOT execute in context of a bp handler, use irq_disable_bp instead
@@ -368,7 +318,7 @@ class ARMQemuTarget(QemuTarget):
             "qom-set", args={"path": path, "property": "disable-irq", "value": irq_num}
         )
 
-    def irq_set_qmp(self, irq_num: int = 1) -> None:
+    def irq_set_qmp(self, irq_num=1):
         """
         Set interrupt using qmp.
         DO NOT execute in context of a bp handler, use irq_set_bp instead
@@ -381,7 +331,7 @@ class ARMQemuTarget(QemuTarget):
             "qom-set", args={"path": path, "property": "set-irq", "value": irq_num}
         )
 
-    def irq_clear_qmp(self, irq_num: int = 1) -> None:
+    def irq_clear_qmp(self, irq_num=1):
         """
         Clear interrupt using qmp.
         DO NOT execute in context of a bp handler, use irq_clear_bp
@@ -395,7 +345,7 @@ class ARMQemuTarget(QemuTarget):
             "qom-set", args={"path": path, "property": "clear-irq", "value": irq_num}
         )
 
-    def irq_set_bp(self, irq_num: int = 1) -> None:
+    def irq_set_bp(self, irq_num=1):
         """
         Set `irq_num` active using MMIO interfaces for use in bp_handlers
         """
@@ -403,7 +353,7 @@ class ARMQemuTarget(QemuTarget):
         value = self.read_memory(addr, 1, 1)
         self.write_memory(addr, 1, value & 1)  # lowest bit controls state
 
-    def irq_clear_bp(self, irq_num: int) -> None:
+    def irq_clear_bp(self, irq_num):
         """
         Clears `irq_num` using MMIO interface for use in bp_handlers
         """
@@ -412,7 +362,7 @@ class ARMQemuTarget(QemuTarget):
         log.debug("Clearing IRQ BP %i", irq_num)
         self.write_memory(addr, 1, value & 0xFE)  # lowest bit controls state
 
-    def irq_enable_bp(self, irq_num: int = 1) -> None:
+    def irq_enable_bp(self, irq_num=1):
         """
         Enables `irq_num` using MMIO interfaces for use in bp_handlers
         """
@@ -420,7 +370,7 @@ class ARMQemuTarget(QemuTarget):
         value = self.read_memory(addr, 1, 1)
         self.write_memory(addr, 1, value & 0x80)  # upper most bit controls enable
 
-    def irq_disable_bp(self, irq_num: int) -> None:
+    def irq_disable_bp(self, irq_num):
         """
         Clears `irq_num` using MMIO interface for use in bp_handlers
         """
@@ -435,7 +385,7 @@ class ARMQemuTarget(QemuTarget):
     #         "avatar-set-irq", args={"cpu_num": cpu, "irq_num": irq_num, "value": 3}
     #     )
 
-    def get_symbol_name(self, addr: int) -> str:
+    def get_symbol_name(self, addr):
         """
         Get the symbol for an address
 
@@ -446,8 +396,8 @@ class ARMQemuTarget(QemuTarget):
         return self.avatar.config.get_symbol_name(addr)
 
     def set_bp(
-        self, addr: int, handler_cls: Any, handler: Any, run_once: bool = False, watchpoint: bool = False
-    ) -> None:  # pylint: disable=too-many-arguments
+        self, addr, handler_cls, handler, run_once=False, watchpoint=False
+    ):  # pylint: disable=too-many-arguments
         """
         Adds a break point setting the class and method to handler it.
 
@@ -472,23 +422,19 @@ class ARMQemuTarget(QemuTarget):
             "addr": addr,
             "watchpoint": watchpoint,
         }
+        from halucinator import hal_config
         intercept_config = hal_config.HalInterceptConfig(__file__, **config)
         return intercepts.register_bp_handler(self, intercept_config)
 
-    def call_varg(self, ret_bp_handler: Any, callee: Any, *args: Any) -> Any:
+    def call_varg(self, ret_bp_handler, callee, *args):
         """
         call a varg function in the target
         """
         raise NotImplementedError("Calling Varg functions not supported")
 
     def call(
-        self,
-        callee: Union[int, str],
-        args: Optional[List[Any]] = None,
-        bp_handler_cls: Union[str, Any] = None,
-        ret_bp_handler: Optional[str] = None,
-        debug: bool = False,
-    ) -> Tuple[bool, Optional[Any]]:  # pylint: disable=too-many-arguments,too-many-locals
+        self, callee, args=None, bp_handler_cls=None, ret_bp_handler=None, debug=False
+    ):  # pylint: disable=too-many-arguments,too-many-locals
         """
         Calls a function in the binary and returning to ret_bp_handler.
         Using this without side effects requires conforming to calling
@@ -582,8 +528,8 @@ class ARMQemuTarget(QemuTarget):
         return False, None
 
     def write_branch(
-        self, addr: int, branch_target: int, options: Optional[Any] = None
-    ) -> None:  # pylint: disable=unused-argument
+        self, addr, branch_target, options=None
+    ):  # pylint: disable=unused-argument
         """
         Places an absolute branch at address addr to
         branch_target

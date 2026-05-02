@@ -1,10 +1,7 @@
 """
 The peripheral model for handling canaries
 """
-from __future__ import annotations
-
 import logging
-from typing import Any, Dict, Optional
 
 # from collections import deque
 
@@ -34,7 +31,7 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: bold_red + pr_format + reset,
     }
 
-    def format(self, record: logging.LogRecord) -> str:
+    def format(self, record):
         log_fmt = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
@@ -59,7 +56,7 @@ class CanaryModel:  # pylint: disable=too-few-public-methods
 
     @classmethod
     @peripheral_server.tx_msg
-    def canary(cls, qemu: Any, bp_addr: int, canary_type: str, msg: str) -> Dict[str, Any]:
+    def canary(cls, qemu, bp_addr, canary_type, msg):
         """
         returns a dictionary with information about the function that
         triggered the canary

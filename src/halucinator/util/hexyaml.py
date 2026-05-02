@@ -1,8 +1,6 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-
-from __future__ import annotations
 
 import yaml
 '''
@@ -15,7 +13,7 @@ import yaml
 '''
 
 
-def hexint_presenter(dumper: yaml.Dumper, data: int) -> yaml.Node:
+def hexint_presenter(dumper, data):
     return dumper.represent_int(hex(data))
 
 

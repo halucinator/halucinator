@@ -1,9 +1,8 @@
-"""Listens for canaries while forwarding between tty device and unix domain socket"""
+"Listens for canaries while forwarding between tty device and unix domain socket"
 # Copyright 2022 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
-from __future__ import annotations
 
 import logging
 
@@ -12,25 +11,25 @@ from halucinator.external_devices.canary import CanaryDevice
 from halucinator.external_devices.serial_uds import UDSTunnel
 
 
-log: logging.Logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser, Namespace
+    from argparse import ArgumentParser
 
-    p: ArgumentParser = ArgumentParser()
+    p = ArgumentParser()
     IOServer.add_args(p)
     p.add_argument("--id", default="/utyCo/1", help="Emulation Interace to listen to")
     p.add_argument("-a", "--addr", required=True, help="Unix socket name")
-    args: Namespace = p.parse_args()
+    args = p.parse_args()
 
     from halucinator import hal_log
 
     hal_log.setLogConfig()
 
-    io_server: IOServer = IOServer(parser_args=args)
-    uds_tunnel: UDSTunnel = UDSTunnel(io_server, args.addr, args.id)
-    canary: CanaryDevice = CanaryDevice(io_server)
+    io_server = IOServer(parser_args=args)
+    uds_tunnel = UDSTunnel(io_server, args.addr, args.id)
+    canary = CanaryDevice(io_server)
 
     io_server.start()
 

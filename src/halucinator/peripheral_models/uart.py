@@ -1,41 +1,27 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
-
-import logging
-from collections import defaultdict, deque
-from typing import Any, DefaultDict, Deque, Dict
-
-from typing_extensions import TypedDict
 
 from . import peripheral_server
+#from queue import Queue
+from threading import Event, Thread
+from collections import deque, defaultdict
+import sys
+import logging
+from itertools import repeat
+import time
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.DEBUG)
 
-
-# Note: UARTWriteMessage uses 'bytes' for chars while UARTReadMessage uses
-# 'str'. This really ought to be 'bytes', and these two TypedDicts should be
-# unified.
-class UARTWriteMessage(TypedDict):
-    id: int
-    chars: bytes
-
-
-class UARTReadMessage(TypedDict):
-    id: int
-    chars: str
-
-
 # Register the pub/sub calls and methods that need mapped
 @peripheral_server.peripheral_model
 class UARTPublisher(object):
-    rx_buffers: DefaultDict[int, Deque[str]] = defaultdict(deque)
+    rx_buffers = defaultdict(deque)
 
     @classmethod
     @peripheral_server.tx_msg
-    def write(cls, uart_id: int, chars: bytes) -> Dict[str, Any]:
+    def write(cls, uart_id, chars):
         '''
            Publishes the data to sub/pub server
         '''
@@ -44,7 +30,7 @@ class UARTPublisher(object):
         return msg
 
     @classmethod
-    def read(cls, uart_id: int, count: int = 1, block: bool = False) -> bytes:
+    def read(cls, uart_id, count=1, block=False):
         '''
             Gets data previously received from the sub/pub server
             Args:
@@ -70,7 +56,7 @@ class UARTPublisher(object):
         return chars
 
     @classmethod
-    def read_line(cls, uart_id: int, count: int = 1, block: bool = False) -> bytes:
+    def read_line(cls, uart_id, count=1, block=False):
         '''
             Gets data previously received from the sub/pub server
             Args:
@@ -103,7 +89,7 @@ class UARTPublisher(object):
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def rx_data(cls, msg: Dict[str, Any]) -> None:
+    def rx_data(cls, msg):
         '''
             Handles reception of these messages from the PeripheralServer
         '''
@@ -111,3 +97,24 @@ class UARTPublisher(object):
         uart_id = msg['id']
         data = msg['chars']
         cls.rx_buffers[uart_id].extend(data)
+
+
+from dataclasses import dataclass, asdict as _asdict
+
+
+@dataclass
+class UARTWriteMessage:
+    """Typed message for Peripheral.UARTPublisher.write topics."""
+    id: int
+    chars: bytes
+
+    def __getitem__(self, key):
+        return _asdict(self)[key]
+
+    def __eq__(self, other):
+        if isinstance(other, dict):
+            return self.id == other.get('id') and self.chars == other.get('chars')
+        return isinstance(other, UARTWriteMessage) and self.id == other.id and self.chars == other.chars
+
+    def __hash__(self):
+        return hash((self.id, self.chars))
