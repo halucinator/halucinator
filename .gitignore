@@ -54,3 +54,7 @@ halucinator.json
 # Generated SBOM (produced by CI, not checked in)
 *.spdx.json
 deps/build-qemu/
+
+# run_backend_matrix.sh per-cell logs and run summary
+.matrix_logs/
+matrix_run.log
