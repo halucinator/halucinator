@@ -1,12 +1,10 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
 from .peripheral import requires_tx_map, requires_rx_map, requires_interrupt_map
 from . import peripheral_server
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict
 
 import logging
 log = logging.getLogger(__name__)
@@ -15,12 +13,11 @@ log = logging.getLogger(__name__)
 class GPIO(object):
 
     DEFAULT = 0
-    # TODO: Should maybe be DefaultDict[int, bool] too
-    gpio_state: DefaultDict[str, int] = defaultdict(int)
+    gpio_state = defaultdict(int)
 
     @classmethod
     @peripheral_server.tx_msg
-    def write_pin(cls, gpio_id: str, value: int) -> Dict[str, Any]:
+    def write_pin(cls, gpio_id, value):
         '''
             Creates the message that peripheral_server.tx_msg will send on this 
             event
@@ -32,7 +29,7 @@ class GPIO(object):
 
     @classmethod
     @peripheral_server.tx_msg
-    def toggle_pin(cls, gpio_id: str) -> Dict[str, Any]:
+    def toggle_pin(cls, gpio_id):
         '''
             Creates the message that Peripheral.tx_msga will send on this 
             event
@@ -48,7 +45,7 @@ class GPIO(object):
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def ext_pin_change(cls, msg: Dict[str, Any]) -> None:
+    def ext_pin_change(cls, msg):
         '''
             Processes reception of messages from external 0mq server
             type is GPIO.zmq_set_gpio
@@ -59,5 +56,5 @@ class GPIO(object):
         GPIO.gpio_state[gpio_id] = value
 
     @classmethod
-    def read_pin(cls, pin_id: str) -> int:
+    def read_pin(cls, pin_id):
         return GPIO.gpio_state[pin_id]
