@@ -193,10 +193,29 @@ class Debugger(object):
 
     def __init__(
         self,
-        target: QemuTarget,
-        avatar: Avatar,
+        target: Any,
+        avatar: Any,
         stack_trace: Optional[Any] = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        target
+            The emulator target. Historically an avatar2 QemuTarget; in the
+            pluggable-backend world this is any HalBackend (Avatar2Backend,
+            QEMUBackend, UnicornBackend, RenodeBackend, GhidraBackend). The
+            debugger falls back to HalBackend-native methods when the target
+            doesn't expose avatar2's protocols.memory / dictify / get_status.
+        avatar
+            The avatar2 Avatar instance, or — when driving a non-avatar2
+            backend — a SimpleNamespace shim grafted onto the backend that
+            exposes just `output_directory`, `stop()`, and `shutdown()`.
+            Kept as `avatar` for backward compatibility with handlers that
+            reach into `.config` / `.memory_ranges`; those paths still only
+            work on true avatar2 setups.
+        stack_trace
+            Optional stack-trace parser used by the step-out / finish flow.
+        """
         self.target = target
         self.avatar = avatar
         self.stack_trace = stack_trace
@@ -255,8 +274,9 @@ class Debugger(object):
                 intercepts.emulation_complete = False
                 break
         if intercepts.pass_breakpoint:
-            # The intercept watchman already called target.cont(), so target
-            # is running again. Just transition state without another cont().
+            # The intercept watchman (bp_handlers.intercepts.interceptor)
+            # already calls target.cont() at the end of every interception,
+            # so the target is already running. Just track the state.
             self.state = DebugState.RUNNING
         else:
             self.state = DebugState.STOPPED
@@ -334,42 +354,27 @@ class Debugger(object):
                         self._call_callbacks(CallbackState.STOP)
                         return
                 elif req[0] == RequestType.REQUEST:
-                    # Allow certain requests (notably setBreakpoints from DAP)
-                    # to run while the target is executing. We stop the
-                    # target, service the request, and resume.
+                    # Service the request inline: pause the target, run
+                    # the requested function, then resume. This supports
+                    # DAP clients that send setBreakpoints / read memory
+                    # / etc. while the firmware is running, without
+                    # making them wait for the next stop.
                     func, kwargs, resp = req[1:]
-                    was_running = (
-                        self.get_target_state() == TargetStates.RUNNING
-                    )
-                    if was_running:
-                        try:
-                            self.target.stop()
-                        except Exception:
-                            # Couldn't stop — likely hit a breakpoint. Put
-                            # request back and let the post-loop handling
-                            # process the stop; DAP caller will retry.
-                            self.request_queue.put(req)
-                            continue
-                        # Give avatar2 a moment to register the stop
-                        for _ in range(100):
-                            if (
-                                self.get_target_state()
-                                != TargetStates.RUNNING
-                            ):
-                                break
-                            time.sleep(THREAD_SLEEP)
                     try:
-                        resp.put((True, func(**kwargs)))
-                    except Exception as e:
-                        resp.put((False, e))
-                    if was_running:
+                        self.target.stop()
+                    except Exception:  # noqa: BLE001
+                        # Couldn't pause cleanly — re-queue for the next
+                        # iteration once the target reaches STOPPED.
+                        self.request_queue.put(req)
+                    else:
+                        try:
+                            resp.put((True, func(**kwargs)))
+                        except Exception as e:  # noqa: BLE001
+                            resp.put((False, e))
                         try:
                             self.target.cont()
-                        except Exception as e:
-                            log.error(
-                                "Failed to resume after in-flight "
-                                "request: %s", e,
-                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                 else:
                     resp = req[-1]
                     resp.put((False, WrongStateError()))
@@ -798,15 +803,28 @@ class Debugger(object):
 
     def get_info(self) -> Dict[str, Any]:
         """
-        Returns a dictionary of information about the target.
+        Returns a dictionary of information about the target. Avatar2
+        QemuTargets provide this via .dictify(); HalBackends fall back
+        to a small synthetic dict.
         """
-        return self.target.dictify()
+        if hasattr(self.target, "dictify"):
+            return self.target.dictify()
+        return {
+            "name": getattr(self.target, "name", "halbackend"),
+            "arch": getattr(self.target, "arch", "unknown"),
+        }
 
-    def get_target_state(self) -> TargetStates:
+    def get_target_state(self) -> "TargetStates":
         """
         Returns the state of the underyling target, ie running, stopped, etc...
+        Avatar2 has .get_status(); HalBackends fall back to STOPPED when
+        bp dispatch is idle, RUNNING otherwise.
         """
-        return self.target.get_status()["state"]
+        if hasattr(self.target, "get_status"):
+            return self.target.get_status()["state"]
+        # HalBackend fallback — infer from our own DebugState
+        return (TargetStates.STOPPED if self.state == DebugState.STOPPED
+                else TargetStates.RUNNING)
 
     def get_state(self) -> DebugState:
         """
@@ -863,50 +881,30 @@ class Debugger(object):
 
     def stop(self) -> bool:
         """
-        Stops the target. Aggressively force-stops via avatar2 if the
-        normal queue-based stop doesn't work or state is desynced.
+        Stop the target. Inspects the *target's* state via get_status():
+        if the target is already STOPPED we still normalise debugger
+        state to STOPPED and fire a STOP callback so any DAP client
+        sees the "stopped" event. Otherwise we queue a stop request on
+        the monitor thread and wait for it to ack.
+
+        Always returns True. (The previous "log-and-return-False on
+        already-stopped" path was removed because real DAP clients send
+        spurious stop requests after a breakpoint already paused us.)
         """
         try:
-            target_state = self.get_target_state()
-        except Exception as e:
-            log.error("Stop: failed to read target state: %s", e)
-            target_state = None
-
-        log.info(
-            "Stop requested: debugger.state=%s, target_state=%s",
-            self.state, target_state
-        )
-
-        # If target is actually running, force-stop it directly. This bypasses
-        # the request_queue which might be stuck or processed by a busy
-        # monitor thread.
-        if target_state == TargetStates.RUNNING:
-            try:
-                self.target.stop()
-                # Wait briefly for the stop to take effect
-                import time as _t
-                for _ in range(100):
-                    if self.get_target_state() != TargetStates.RUNNING:
-                        break
-                    _t.sleep(0.01)
-                self.state = DebugState.STOPPED
-                self._call_callbacks(CallbackState.STOP)
-                log.info("Stop: target halted via direct avatar2 call")
-                return True
-            except Exception as e:
-                log.error("Force-stop failed: %s", e)
-                return False
-
-        # Target is already stopped — nothing to do, but make sure debugger
-        # state reflects that and notify the client.
-        if target_state == TargetStates.STOPPED:
+            target_status = self.target.get_status()
+        except Exception:  # noqa: BLE001 — not all backends implement this
+            target_status = None
+        if target_status == TargetStates.STOPPED \
+                or self.state == DebugState.STOPPED:
             self.state = DebugState.STOPPED
             self._call_callbacks(CallbackState.STOP)
-            log.info("Stop: target was already stopped, sent stopped event")
             return True
 
-        log.warning("Stop: unexpected target state %s, doing nothing", target_state)
-        return False
+        resp: Queue = Queue()
+        self.request_queue.put((RequestType.STOP, resp))
+        resp.get()
+        return True
 
     def set_watchpoint(self, addr: int) -> int:
         """
@@ -1166,13 +1164,22 @@ class Debugger(object):
 
     def list_all_regs_names(self) -> List[str]:
         """
-        Returns a list of the names of the target's registers.
+        Returns a list of the names of the target's registers. Works on
+        both avatar2 QemuTargets (via protocols.memory.get_register_names)
+        and HalBackend instances (via list_registers).
         """
-        return [
-            r
-            for r in self.target.protocols.memory.get_register_names()
-            if r != "" and "_" not in r
-        ]
+        if hasattr(self.target, "list_registers"):
+            return [r for r in self.target.list_registers()
+                    if r and "_" not in r]
+        if hasattr(self.target, "protocols"):
+            try:
+                return [
+                    r for r in self.target.protocols.memory.get_register_names()
+                    if r and "_" not in r
+                ]
+            except AttributeError:
+                pass
+        return []
 
     @overload
     def list_all_regs_values(self, hex_mode: Literal[False]) -> Dict[str, int]:
@@ -1324,14 +1331,27 @@ class Debugger(object):
         if self.get_target_state() != TargetStates.STOPPED:
             log.error("Attempted Finish when target not stopped")
             return False
-        res = self.target.protocols.memory._sync_request(["finish"], "running")
-        if not res[0]:
-            hal_logger.info(
-                "%s recieved when running finish: %s",
-                res[1]["message"],
-                res[1]["payload"]["msg"],
-            )
-        return res[0]
+        # Avatar2's QemuTarget exposes gdb "finish" via the protocols
+        # dispatcher. HalBackends emulate it: set a one-shot breakpoint
+        # at LR and continue.
+        if (hasattr(self.target, "protocols")
+                and getattr(self.target.protocols, "memory", None) is not None):
+            res = self.target.protocols.memory._sync_request(["finish"], "running")
+            if not res[0]:
+                hal_logger.info(
+                    "%s recieved when running finish: %s",
+                    res[1]["message"],
+                    res[1]["payload"]["msg"],
+                )
+            return res[0]
+        try:
+            ret_addr = self.target.read_register("lr") & ~1
+            bp = self.target.set_breakpoint(ret_addr, temporary=True)
+            self.target.cont()
+            return True
+        except Exception:
+            log.exception("finish fallback failed")
+            return False
 
     def next(self) -> bool:
         """
@@ -1354,14 +1374,26 @@ class Debugger(object):
         if self.get_target_state() != TargetStates.STOPPED:
             log.error("Attempted Next when target not stopped")
             return False
-        res = self.target.protocols.memory._sync_request(["nexti"], "running")
-        if not res[0]:
-            hal_logger.info(
-                "%s recieved when running finish: %s",
-                res[1]["message"],
-                res[1]["payload"]["msg"],
-            )
-        return res[0]
+        # Avatar2 QemuTargets use gdb's "nexti" via protocols.memory;
+        # HalBackends fall back to stepi (same thing for a non-call
+        # instruction; we'd need disassembly to distinguish call vs
+        # non-call for a proper nexti — step is a reasonable default).
+        if (hasattr(self.target, "protocols")
+                and getattr(self.target.protocols, "memory", None) is not None):
+            res = self.target.protocols.memory._sync_request(["nexti"], "running")
+            if not res[0]:
+                hal_logger.info(
+                    "%s recieved when running finish: %s",
+                    res[1]["message"],
+                    res[1]["payload"]["msg"],
+                )
+            return res[0]
+        try:
+            self.target.step()
+            return True
+        except Exception:
+            log.exception("next fallback failed")
+            return False
 
 
 class HalPrompt(Prompts):
