@@ -1,19 +1,13 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type
 
 from ...peripheral_models.interrupts import Interrupts
 from ...peripheral_models.timer_model import TimerModel
 from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 import time
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 from collections import defaultdict
 
 import logging
@@ -23,7 +17,7 @@ log = logging.getLogger(__name__)
 
 class STM32_TIM(BPHandler):
 
-    def __init__(self, model: Type[TimerModel] = TimerModel):
+    def __init__(self, model=TimerModel):
         self.model = model
         self.org_lr = None
         self.current_channel = 0
@@ -31,11 +25,11 @@ class STM32_TIM(BPHandler):
             # '0x40000200': 0x32
             0x40000400: 45
         }
-        self.irq_rates: Dict[Any, Any] = {}
+        self.irq_rates = {}
         self.name = 'STM32_TIM'
 
     @bp_handler(['HAL_TIM_Base_Init'])
-    def tim_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def tim_init(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -49,7 +43,7 @@ class STM32_TIM(BPHandler):
         return False, None
 
     @bp_handler(['HAL_TIM_Base_DeInit'])
-    def deinit(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def deinit(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -58,7 +52,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIM_ConfigClockSource'])
-    def config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def config(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -67,7 +61,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIMEx_MasterConfigSynchronization'])
-    def sync(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def sync(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         log.info("STM32_TIM sync, base: %#08x" % (hex(tim_base)))
@@ -75,7 +69,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIM_Base_Start_IT'])
-    def start(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def start(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -84,7 +78,7 @@ class STM32_TIM(BPHandler):
         return True, None  # Just let it run
 
     @bp_handler(['HAL_TIM_IRQHandler'])
-    def isr_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def isr_handler(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         log.info("TICK: Timer %#08x" % tim_base)
@@ -92,25 +86,25 @@ class STM32_TIM(BPHandler):
         # TODO: Tims can do other things besides elapse.
         # When we see a tim doing that, put it here
         # Leave the regs unchanged, as they should be correct.
-        qemu.regs.pc = qemu.avatar.callables['HAL_TIM_PeriodElapsedCallback']  # type: ignore
+        qemu.regs.pc = qemu.avatar.callables['HAL_TIM_PeriodElapsedCallback']
         return False, None
 
     @bp_handler(['HAL_TIM_Base_Stop_IT'])
-    def stop(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def stop(self, qemu, bp_addr):
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         self.model.stop_timer(hex(tim_base))
         return True, 0
 
     @bp_handler(['HAL_Delay'])
-    def sleep(self, qemu: HALQemuTarget, bp_handler: int) -> HandlerReturn:
+    def sleep(self, qemu, bp_handler):
         amt = qemu.regs.r0 / 1000.0
         log.debug("sleeping for %f" % amt)
         # time.sleep(amt)
         return True, 0
 
     @bp_handler(['HAL_SYSTICK_Config'])
-    def systick_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systick_config(self, qemu, bp_addr):
         #rate = qemu.regs.r0
         rate = 5
         systick_irq = 15

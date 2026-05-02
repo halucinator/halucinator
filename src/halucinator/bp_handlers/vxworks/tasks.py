@@ -3,16 +3,10 @@
 # the U.S. Government retains certain rights in this software.
 
 '''tasks module'''
-from __future__ import annotations
-
 import logging
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
 
-from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +26,13 @@ class Tasks(BPHandler):
         calling to a file.  Commonly used to get a list of tasks
         created
     '''
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
-        self.task_spawn_file: str = 'taskSpawn.log'
-        self.task_name_counter: int = 0
+        self.task_spawn_file = 'taskSpawn.log'
+        self.task_name_counter = 0
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str,
-                         task_spawn_file: Optional[str] = None) -> HandlerFunction:
+    def register_handler(self, qemu, addr, func_name,
+                         task_spawn_file=None):
         '''register_handler'''
         if task_spawn_file is not None:
             self.task_spawn_file = task_spawn_file
@@ -53,7 +47,7 @@ class Tasks(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(['log_taskSpawn'])
-    def log_task_spawn(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:
+    def log_task_spawn(self, qemu, bp_addr):
         '''
             Intercepted function with parameters
             int taskSpawn

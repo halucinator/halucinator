@@ -1,17 +1,11 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
-
-from typing import TYPE_CHECKING, Dict, Optional, Type
 
 from ...peripheral_models.sd_card import SDCardModel
-from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 from collections import defaultdict, deque
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -44,7 +38,7 @@ class SDCard(BPHandler):
     # Just let these execute
     # uint8_t sd_mmc_nb_slot(void);
 
-    def __init__(self, model: Type[SDCardModel] = SDCardModel):
+    def __init__(self, model=SDCardModel):
         self.model = model
         self.slot_configs = {0: {'capacity': 512*1024, 'block_size': 512,
                                  'write_protected': False, 'filename': 'sd_image.img'}}
@@ -53,7 +47,7 @@ class SDCard(BPHandler):
             self.model.set_config(sd_id, values['filename'],
                                   values['block_size'])
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, slots: Optional[Dict] = None) -> HandlerFunction:
+    def register_handler(self, qemu, addr, func_name, slots=None):
         '''
             slots(dict): {slot_id: {'capactiy': int (KB), 'block_size': int, 
                                     'write_protected': bool, 'filename': file}}
@@ -66,35 +60,35 @@ class SDCard(BPHandler):
         return BPHandler.register_handler(self, qemu, addr, func_name)
 
     @bp_handler(['sd_mmc_init'])
-    def log_only(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def log_only(self, qemu, bp_addr):
         # void sd_mmc_init(void);
         log.info("SD_MMC_INIT Executed")
         log.info("LR: %s", hex(qemu.regs.lr))
         return False, None
 
     @bp_handler(['sd_mmc_check'])
-    def check(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def check(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_check(uint8_t slot);
         log.info("SD_MMC_Check Executed")
         log.info("LR: %s", hex(qemu.regs.lr))
         return True, 0
 
     @bp_handler(['sd_mmc_get_type'])
-    def get_sd_type(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_sd_type(self, qemu, bp_addr):
         # card_type_t sd_mmc_get_type(uint8_t slot);
         log.info("Get SD Type Executed")
         log.info("LR: %s", hex(qemu.regs.lr))
         return True, CARD_TYPE_SD
 
     @bp_handler(['sd_mmc_get_type'])
-    def get_sd_version(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_sd_version(self, qemu, bp_addr):
         # card_version_t sd_mmc_get_version(uint8_t slot);
         log.info("Get SD Version")
         log.info("LR: %s", hex(qemu.regs.lr))
         return True, 0x20  # Version 2.00
 
     @bp_handler(['sd_mmc_get_capacity'])
-    def get_capacity(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_capacity(self, qemu, bp_addr):
          # uint32_t sd_mmc_get_capacity(uint8_t slot);
         slot = qemu.regs.r0 & 0xFF
         log.info("Get SD Get Capacity: Slot %i, Size %i" %
@@ -103,7 +97,7 @@ class SDCard(BPHandler):
         return True, self.slot_configs[slot]['capacity']
 
     @bp_handler(['sd_mmc_is_write_protected'])
-    def is_write_protected(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def is_write_protected(self, qemu, bp_addr):
         # bool sd_mmc_is_write_protected(uint8_t slot);
         slot = qemu.regs.r0 & 0xFF
         log.info("IS Write Protected: Slot %i, value: %s" %
@@ -112,7 +106,7 @@ class SDCard(BPHandler):
         return True, self.slot_configs[slot]['write_protected']
 
     @bp_handler(['sd_mmc_init_read_blocks'])
-    def init_read(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def init_read(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_init_read_blocks(uint8_t slot, uint32_t start,
         # 	uint16_t nb_block);
         slot = qemu.regs.r0 & 0xFF
@@ -125,7 +119,7 @@ class SDCard(BPHandler):
         return True, 0
 
     @bp_handler(['sd_mmc_start_read_blocks'])
-    def read_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def read_blocks(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_start_read_blocks(void *dest, uint16_t nb_block);
         dest = qemu.regs.r0
         number_blocks = qemu.regs.r1 & 0xFFFF
@@ -144,7 +138,7 @@ class SDCard(BPHandler):
         return True, 0
 
     @bp_handler(['sd_mmc_wait_end_of_read_blocks'])
-    def end_read_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def end_read_blocks(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_wait_end_of_read_blocks(bool abort);
         log.info("End Read Blocks")
         log.info("LR: %s", hex(qemu.regs.lr))
@@ -153,7 +147,7 @@ class SDCard(BPHandler):
         return True, 0
 
     @bp_handler(['sd_mmc_init_write_blocks'])
-    def init_write(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def init_write(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_init_write_blocks(uint8_t slot, uint32_t start,
             # 	uint16_t nb_block);
         slot = qemu.regs.r0 & 0xFF
@@ -166,7 +160,7 @@ class SDCard(BPHandler):
         return True, 0
 
     @bp_handler(['sd_mmc_start_write_blocks'])
-    def write_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_blocks(self, qemu, bp_addr):
        # sd_mmc_err_t sd_mmc_start_write_blocks(const void *src, uint16_t nb_block);
         src_ptr = qemu.regs.r0
         nb_blocks = qemu.regs.r1 & 0xFFFF
@@ -186,7 +180,7 @@ class SDCard(BPHandler):
         return True, 0
 
     @bp_handler(['sd_mmc_wait_end_of_write_blocks'])
-    def end_write_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def end_write_blocks(self, qemu, bp_addr):
         # sd_mmc_err_t sd_mmc_wait_end_of_write_blocks(bool abort);
         log.info("End Write Blocks")
         log.info("LR: %s", hex(qemu.regs.lr))

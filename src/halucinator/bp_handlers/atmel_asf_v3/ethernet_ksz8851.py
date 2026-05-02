@@ -1,18 +1,12 @@
 # Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
-
-from typing import TYPE_CHECKING, DefaultDict, List, Type
 
 from ...peripheral_models.ethernet import EthernetModel
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 from collections import defaultdict, deque
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -42,18 +36,18 @@ class Ksz8851Eth(BPHandler):
     PADDING = 2
     CRC_SIZE = 4
 
-    def __init__(self, model: Type[EthernetModel] = EthernetModel):
+    def __init__(self, model=EthernetModel):
         BPHandler.__init__(self)
         self.model = model
-        self.regs: DefaultDict[int, int] = defaultdict(int)
+        self.regs = defaultdict(int)
         self.model.rx_frame_isr = 20
         self.last_rx_time = time.time()
 
-    def get_id(self, qemu: HALQemuTarget) -> str:
+    def get_id(self, qemu):
         return 'ksz8851'
 
     @bp_handler(['ksz8851_reg_read'])
-    def read_reg(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def read_reg(self, qemu, bp_addr):
         reg = qemu.regs.r0
         log.debug("Reading Reg %s from pc:%s" % (hex(reg), hex(qemu.regs.lr)))
         if reg == REG_RX_FHR_BYTE_CNT:
@@ -82,7 +76,7 @@ class Ksz8851Eth(BPHandler):
         return True, self.regs[reg]
 
     @bp_handler(['ksz8851_reg_write'])
-    def write_reg(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_reg(self, qemu, bp_addr):
         reg = qemu.regs.r0
         value = qemu.regs.r1
         self.regs[reg] = value
@@ -96,7 +90,7 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851_fifo_clrbits'])
-    def clr_reg(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def clr_reg(self, qemu, bp_addr):
         reg = qemu.regs.r0
         value = qemu.regs.r1
         log.debug("Clearing Reg %i : Mask 0x%x04" % (reg, value))
@@ -104,7 +98,7 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851_fifo_setbit'])
-    def set_reg(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def set_reg(self, qemu, bp_addr):
         reg = qemu.regs.r0
         value = qemu.regs.r1
         log.info("Clearing Reg %i : Mask 0x%x04" % (reg, value))
@@ -112,13 +106,13 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851_fifo_write_begin'])
-    def fifo_write_begin(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def fifo_write_begin(self, qemu, bp_addr):
         log.debug("Write Begin Called")
         self.frame = []
         return True, None
 
     @bp_handler(['ksz8851_fifo_write'])
-    def fifo_write(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def fifo_write(self, qemu, bp_addr):
         log.debug("Write Called")
         self.frame.append(qemu.read_memory(
             qemu.regs.r0, 1, qemu.regs.r1, raw=True))
@@ -126,7 +120,7 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851_fifo_write_end'])
-    def fifo_write_end(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def fifo_write_end(self, qemu, bp_addr):
         log.debug("Write End Called")
         frame = ''.join(self.frame)
         log.info("Write Called: %s" % binascii.hexlify(frame[0:10]))
@@ -134,7 +128,7 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851_fifo_read'])
-    def fifo_read(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def fifo_read(self, qemu, bp_addr):
 
         frame = None
         while frame is None:
@@ -155,11 +149,11 @@ class Ksz8851Eth(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851snl_init'])
-    def ksz_return_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def ksz_return_ok(self, qemu, bp_addr):
         log.info("Init Called")
         return True, 0
 
     @bp_handler(['ksz8851snl_hard_reset', 'ksz8851snl_interface_init'])
-    def ksz_return_void(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def ksz_return_void(self, qemu, bp_addr):
         log.info("Init Called")
         return True, None
