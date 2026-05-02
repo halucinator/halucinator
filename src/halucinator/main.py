@@ -4,6 +4,7 @@
 """
 This is the halucinator entry point
 """
+from __future__ import annotations
 
 from argparse import ArgumentParser
 import logging
@@ -13,6 +14,7 @@ import os
 import sys
 import argparse
 import signal
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 from avatar2 import Avatar
 from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
@@ -25,6 +27,9 @@ from .util import cortex_m_helpers as CM_helpers
 from . import hal_stats
 from . import hal_log, hal_config
 
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
+
 
 log = logging.getLogger(__name__)
 hal_log.setLogConfig()
@@ -36,14 +41,14 @@ __HAL_EXIT_CODE = 0
 
 
 def get_qemu_target(
-    name,
-    config,
-    firmware=None,
-    log_basic_blocks=False,
-    gdb_port=1234,
-    singlestep=False,
-    qemu_args=None,
-):  # pylint: disable=too-many-arguments
+    name: str,
+    config: Any,
+    firmware: Optional[str] = None,
+    log_basic_blocks: Optional[str] = None,
+    gdb_port: int = 1234,
+    singlestep: bool = False,
+    qemu_args: Optional[str] = None,
+) -> Tuple[Avatar, Any]:  # pylint: disable=too-many-arguments
     """
     Instantiates QEMU instance that is used to run firmware using Avatar
     """
@@ -135,7 +140,11 @@ def get_qemu_target(
     return avatar, qemu
 
 
-def setup_memory(avatar, memory, record_memories=None):
+def setup_memory(
+    avatar: Avatar,
+    memory: Any,
+    record_memories: Optional[List[Tuple[int, int]]] = None,
+) -> None:
     """
     Sets up memory regions for the emualted devices
     Args:
@@ -170,7 +179,7 @@ def setup_memory(avatar, memory, record_memories=None):
             record_memories.append((memory.base_addr, memory.size))
 
 
-def fix_cortex_m_thumb_bit(config):
+def fix_cortex_m_thumb_bit(config: Any) -> None:
     """
     Fixes and bug in QEMU that makes so thumb bit doesn't get set on CPSR. Manually set it up
     """
@@ -189,7 +198,7 @@ def fix_cortex_m_thumb_bit(config):
             config.machine.entry_addr = entry_addr
 
 
-def register_intercepts(config, avatar, qemu):
+def register_intercepts(config: Any, avatar: Avatar, qemu: Any) -> None:
     """
     Create and registers the intercepts, must be called after avatar.init_targets()
     """
@@ -233,24 +242,24 @@ def register_intercepts(config, avatar, qemu):
 
 
 def emulate_binary(
-    config,
-    target_name=None,
-    log_basic_blocks=None,
-    rx_port=5555,
-    tx_port=5556,
-    gdb_port=1234,
-    elf_file=None,
-    db_name=None,
-    singlestep=False,
-    qemu_args=None,
-    gdb_server_port=None,
-    print_qemu_command=None,
+    config: Any,
+    target_name: Optional[str] = None,
+    log_basic_blocks: Optional[str] = None,
+    rx_port: int = 5555,
+    tx_port: int = 5556,
+    gdb_port: int = 1234,
+    elf_file: Optional[str] = None,
+    db_name: Optional[str] = None,
+    singlestep: bool = False,
+    qemu_args: Optional[str] = None,
+    gdb_server_port: Optional[int] = None,
+    print_qemu_command: Optional[bool] = None,
     emulator: str = "avatar2",
-):  # pylint: disable=too-many-arguments,too-many-locals
+) -> None:  # pylint: disable=too-many-arguments,too-many-locals
     """
     Start emulation of the firmware.
 
-    emulator: backend to use — "avatar2" (default), "qemu", or "unicorn".
+    emulator: backend to use - "avatar2" (default), "qemu", or "unicorn".
     """
 
     # Non-avatar2 backends go through the new HalBackend factory path.
@@ -271,7 +280,7 @@ def emulate_binary(
             print_qemu_command=print_qemu_command,
         )
 
-    # Legacy avatar2 path — unchanged behaviour.
+    # Legacy avatar2 path - unchanged behaviour.
     avatar, qemu = get_qemu_target(
         target_name,
         config,
@@ -290,7 +299,7 @@ def emulate_binary(
         qemu.remove_bitband = True
 
     # Setup Memory Regions
-    record_memories = []
+    record_memories: List[Tuple[int, int]] = []
     for memory in config.memories.values():
         setup_memory(avatar, memory, record_memories)
 
@@ -327,14 +336,20 @@ def emulate_binary(
         qemu.regs.sp = config.machine.init_sp  # Set SP as Qemu doesn't init correctly
         qemu.set_vector_table_base(config.machine.vector_base)
     elif config.machine.init_sp is not None:
-        # Other archs (arm64/mips/ppc/ppc64) need SP set manually — the
+        # Other archs (arm64/mips/ppc/ppc64) need SP set manually - the
         # firmware's _start prologue assumes a valid stack.
         qemu.regs.sp = config.machine.init_sp
 
     _start_execution(avatar, qemu, rx_port, tx_port, gdb_server_port)
 
 
-def _start_execution(avatar, qemu, rx_addr, tx_addr, gdb_server_port):
+def _start_execution(
+    avatar: Avatar,
+    qemu: Any,
+    rx_addr: int,
+    tx_addr: int,
+    gdb_server_port: Optional[int],
+) -> None:
     """
     Starts the actual execution of qemu,
     peripheral server with handlers to enable clean
@@ -346,7 +361,7 @@ def _start_execution(avatar, qemu, rx_addr, tx_addr, gdb_server_port):
     # Removed because of issues in python 3.10 which is default in ubuntu 22.04
     # exit_code_lock = Lock()
 
-    def halucinator_shutdown(exit_code):
+    def halucinator_shutdown(exit_code: int) -> None:
         """
         Perform a clean shutdown of halucinator
         """
@@ -363,7 +378,7 @@ def _start_execution(avatar, qemu, rx_addr, tx_addr, gdb_server_port):
             periph_server.stop()
             sys.exit(__HAL_EXIT_CODE)
 
-    def int_signal_handler(sig, frame):  # pylint: disable=unused-argument
+    def int_signal_handler(sig: int, frame: Any) -> None:  # pylint: disable=unused-argument
         print(f"Halucinator Exiting with status {__HAL_EXIT_CODE}!")
         halucinator_shutdown(__HAL_EXIT_CODE)
 
@@ -383,11 +398,21 @@ def _start_execution(avatar, qemu, rx_addr, tx_addr, gdb_server_port):
     halucinator_shutdown(0)
 
 
-def _emulate_with_backend(config, emulator, target_name=None,
-                          log_basic_blocks=None, rx_port=5555, tx_port=5556,
-                          gdb_port=1234, elf_file=None, db_name=None,
-                          singlestep=False, qemu_args=None,
-                          gdb_server_port=None, print_qemu_command=None):
+def _emulate_with_backend(
+    config: Any,
+    emulator: str,
+    target_name: Optional[str] = None,
+    log_basic_blocks: Optional[str] = None,
+    rx_port: int = 5555,
+    tx_port: int = 5556,
+    gdb_port: int = 1234,
+    elf_file: Optional[str] = None,
+    db_name: Optional[str] = None,
+    singlestep: bool = False,
+    qemu_args: Optional[str] = None,
+    gdb_server_port: Optional[int] = None,
+    print_qemu_command: Optional[bool] = None,
+) -> None:
     """
     Non-avatar2 emulation entry point using the HalBackend abstraction.
     """
@@ -419,12 +444,12 @@ def _emulate_with_backend(config, emulator, target_name=None,
     )
 
 
-def _preregister_avatar_peripherals(config, avatar):
+def _preregister_avatar_peripherals(config: Any, avatar: Avatar) -> List[AvatarPeripheral]:
     """Walk the intercepts list, instantiate each AvatarPeripheral
     subclass, and register a forwarded memory range for it. Must run
     before the QEMU config JSON is generated so avatar-rmemory regions
     land in the config file."""
-    added = []
+    added: List[AvatarPeripheral] = []
     for intercept in config.intercepts:
         bp_cls = intercepts.get_bp_handler(intercept)
         if not issubclass(bp_cls.__class__, AvatarPeripheral):
@@ -452,13 +477,13 @@ class _MMIOForwardingDispatcher(threading.Thread):
     This replaces avatar2's normal event loop (which we don't run in the
     direct-QEMU path) for the specific job of handling MMIO forwarding."""
 
-    def __init__(self, avatar, rmp):
+    def __init__(self, avatar: Avatar, rmp: Any) -> None:
         super().__init__(daemon=True, name="mmio_forwarding")
-        self.avatar = avatar
-        self.rmp = rmp
-        self._stop_evt = threading.Event()
+        self.avatar: Avatar = avatar
+        self.rmp: Any = rmp
+        self._stop_evt: threading.Event = threading.Event()
 
-    def run(self):
+    def run(self) -> None:
         from avatar2.message import (
             RemoteMemoryReadMessage, RemoteMemoryWriteMessage,
         )
@@ -474,12 +499,12 @@ class _MMIOForwardingDispatcher(threading.Thread):
                 elif isinstance(msg, RemoteMemoryWriteMessage):
                     self._handle_write(msg)
                 else:
-                    # Unknown message type — log and drop
+                    # Unknown message type - log and drop
                     log.debug("MMIO dispatcher: ignoring %r", type(msg).__name__)
             except Exception:
                 log.exception("MMIO forwarding dispatcher error")
 
-    def _handle_read(self, msg):
+    def _handle_read(self, msg: Any) -> None:
         rng = self.avatar.get_memory_range(msg.address)
         if rng is None or not rng.forwarded or rng.forwarded_to is None:
             self.rmp.send_response(msg.id, 0, False)
@@ -495,7 +520,7 @@ class _MMIOForwardingDispatcher(threading.Thread):
             log.exception("AvatarPeripheral read failed")
             self.rmp.send_response(msg.id, 0, False)
 
-    def _handle_write(self, msg):
+    def _handle_write(self, msg: Any) -> None:
         rng = self.avatar.get_memory_range(msg.address)
         if rng is None or not rng.forwarded or rng.forwarded_to is None:
             self.rmp.send_response(msg.id, 0, False)
@@ -509,11 +534,13 @@ class _MMIOForwardingDispatcher(threading.Thread):
             log.exception("AvatarPeripheral write failed")
             self.rmp.send_response(msg.id, 0, False)
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop_evt.set()
 
 
-def _start_mmio_forwarding(avatar, qemu_target):
+def _start_mmio_forwarding(
+    avatar: Avatar, qemu_target: Any
+) -> Optional[_MMIOForwardingDispatcher]:
     """If any memory range is forwarded, create a RemoteMemoryProtocol on
     the mqueue pair QEMU opened for avatar-rmemory and start the
     dispatcher thread. Returns the dispatcher (for shutdown) or None if
@@ -548,16 +575,25 @@ def _start_mmio_forwarding(avatar, qemu_target):
     return dispatcher
 
 
-def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
-                               rx_port, tx_port, gdb_port, elf_file,
-                               singlestep, qemu_args, print_qemu_command,
-                               gdb_server_port=None):
+def _emulate_with_qemu_backend(
+    config: Any,
+    target_name: Optional[str],
+    log_basic_blocks: Optional[str],
+    rx_port: int,
+    tx_port: int,
+    gdb_port: int,
+    elf_file: Optional[str],
+    singlestep: bool,
+    qemu_args: Optional[str],
+    print_qemu_command: Optional[bool],
+    gdb_server_port: Optional[int] = None,
+) -> None:
     """
     Direct-QEMU path: spawns QEMU ourselves and drives it via GDB RSP + QMP
     through QEMUBackend, without avatar2 in the loop for runtime control.
 
     We still reuse avatar2's QemuTarget for the configurable-machine JSON
-    and command-line assembly — that logic is non-trivial and duplicating
+    and command-line assembly - that logic is non-trivial and duplicating
     it here would just create drift.
     """
     import subprocess
@@ -574,7 +610,7 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
     qemu_target.qmp_port = gdb_port + 1
 
     # Step 2: wire memory regions into avatar (same as avatar2 path).
-    record_memories = []
+    record_memories: List[Tuple[int, int]] = []
     for memory in config.memories.values():
         setup_memory(avatar, memory, record_memories)
 
@@ -608,7 +644,7 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
     qemu_proc = subprocess.Popen(cmd_line, stdout=qemu_out, stderr=qemu_err)
 
     # Step 5: connect QEMUBackend (GDB + QMP).
-    backend = QEMUBackend(arch=config.machine.arch, gdb_port=gdb_port,
+    backend: "HalBackend" = QEMUBackend(arch=config.machine.arch, gdb_port=gdb_port,
                           qmp_port=gdb_port + 1)
     backend._process = qemu_proc
     # Give QEMU a moment to open its listening sockets.
@@ -636,7 +672,7 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
         backend.regs.sp = config.machine.init_sp
 
     # Step 7: register intercepts directly against the backend (no avatar2
-    # watchmen — we dispatch stop events ourselves below).
+    # watchmen - we dispatch stop events ourselves below).
     for intercept in config.intercepts:
         if intercept.bp_addr is not None:
             log.info("Registering Intercept: %s", intercept)
@@ -665,19 +701,19 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
               f"(forwards to backend GDB stub)")
 
     # Step 8: start peripheral server and run its message consumption loop
-    # in a background thread — the main thread owns the GDB dispatch loop.
+    # in a background thread - the main thread owns the GDB dispatch loop.
     periph_server.start(rx_port, tx_port, backend)
     periph_thread = threading.Thread(
         target=periph_server.run_server, daemon=True, name="periph_server"
     )
     periph_thread.start()
 
-    def _shutdown():
+    def _shutdown() -> None:
         if gdb_proxy is not None:
             gdb_proxy.stop()
         try:
             backend.shutdown()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
+        except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
         if mmio_listener is not None:
             mmio_listener.stop()
@@ -689,7 +725,7 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
         qemu_out.close()
         qemu_err.close()
 
-    def _sigint(_sig, _frame):
+    def _sigint(_sig: int, _frame: Any) -> None:
         print(f"Halucinator Exiting with status {__HAL_EXIT_CODE}!")
         _shutdown()
         sys.exit(__HAL_EXIT_CODE)
@@ -706,13 +742,13 @@ def _emulate_with_qemu_backend(config, target_name, log_basic_blocks,
         _shutdown()
 
 
-def _qemu_backend_dispatch_loop(backend):
+def _qemu_backend_dispatch_loop(backend: "HalBackend") -> None:
     """
     Drive QEMU via GDB RSP: continue, wait for stop, dispatch handler.
 
     Runs until QEMU exits or stop() is called externally. If a GDB
     proxy is open and a user client is attached, pauses until the user
-    disconnects — the two can't share the GDB RSP stream.
+    disconnects - the two can't share the GDB RSP stream.
     """
     pause_evt = getattr(backend, "_gdb_user_paused", None)
     backend.cont()
@@ -723,7 +759,7 @@ def _qemu_backend_dispatch_loop(backend):
             # actually we want to block *while* set. Invert with a loop.
             while pause_evt.is_set():
                 threading.Event().wait(0.1)
-            # Re-issue a continue — the user may have left the CPU halted.
+            # Re-issue a continue - the user may have left the CPU halted.
             backend.cont()
         stop = backend._gdb.wait_for_stop(timeout=None)  # pylint: disable=protected-access
         if stop is None:
@@ -757,9 +793,14 @@ def _qemu_backend_dispatch_loop(backend):
             backend.cont()
 
 
-def _emulate_with_unicorn_backend(config, target_name, rx_port, tx_port):
+def _emulate_with_unicorn_backend(
+    config: Any,
+    target_name: Optional[str],
+    rx_port: int,
+    tx_port: int,
+) -> None:
     """
-    In-process emulation via unicorn-engine. No subprocess, no GDB/QMP —
+    In-process emulation via unicorn-engine. No subprocess, no GDB/QMP -
     firmware runs inside the Python process via UnicornBackend.
 
     Considerably faster than the QEMU paths for short-running firmware
@@ -782,7 +823,7 @@ def _emulate_with_unicorn_backend(config, target_name, rx_port, tx_port):
     os.makedirs(os.path.join(outdir, "logs"), exist_ok=True)
     hal_stats.set_filename(outdir + "/stats.yaml")
 
-    backend = UnicornBackend(arch=arch)
+    backend: "HalBackend" = UnicornBackend(arch=arch)
 
     # Register memory regions from config, loading any firmware file bytes
     # into the region on add.
@@ -817,7 +858,7 @@ def _emulate_with_unicorn_backend(config, target_name, rx_port, tx_port):
     elif config.machine.init_sp is not None:
         backend.regs.sp = config.machine.init_sp
 
-    # Register intercepts — each becomes a UnicornBackend breakpoint.
+    # Register intercepts - each becomes a UnicornBackend breakpoint.
     for intercept in config.intercepts:
         if intercept.bp_addr is not None:
             log.info("Registering Intercept: %s", intercept)
@@ -830,14 +871,14 @@ def _emulate_with_unicorn_backend(config, target_name, rx_port, tx_port):
     )
     periph_thread.start()
 
-    def _shutdown():
+    def _shutdown() -> None:
         try:
             backend.shutdown()
         except Exception:  # noqa: BLE001
             pass
         periph_server.stop()
 
-    def _sigint(_sig, _frame):
+    def _sigint(_sig: int, _frame: Any) -> None:
         _shutdown()
         sys.exit(__HAL_EXIT_CODE)
 
@@ -852,13 +893,13 @@ def _emulate_with_unicorn_backend(config, target_name, rx_port, tx_port):
         _shutdown()
 
 
-def _in_process_dispatch_loop(backend):
+def _in_process_dispatch_loop(backend: "HalBackend") -> None:
     """
     Drive any in-process HalBackend (UnicornBackend, GhidraBackend, and
     anything else whose cont() blocks until a breakpoint fires). Read
     PC after each halt, dispatch to the registered bp_handler, and
     resume. Exits cleanly when cont() returns at an address that has
-    no registered handler — i.e. the firmware ran off the rails.
+    no registered handler - i.e. the firmware ran off the rails.
     """
     backend.cont()  # blocks until first breakpoint
     while True:
@@ -894,7 +935,9 @@ def _in_process_dispatch_loop(backend):
             return
 
 
-def _renode_mmio_setup(config, backend, outdir):
+def _renode_mmio_setup(
+    config: Any, backend: "HalBackend", outdir: str
+) -> Optional[Any]:
     """Instantiate AvatarPeripheral bp handlers and register them with
     a TCP server that Renode's Python peripheral bridge scripts talk
     to. Returns the server (so the caller can stop it on shutdown) or
@@ -902,9 +945,9 @@ def _renode_mmio_setup(config, backend, outdir):
     from halucinator.backends.renode_mmio import (
         RenodeMMIOServer, emit_repl_python_peripherals,
     )
-    peripherals = []
-    instances = []
-    added = set()
+    peripherals: List[Tuple[str, int, int]] = []
+    instances: List[Tuple[int, AvatarPeripheral]] = []
+    added: set = set()
     for intercept in config.intercepts:
         bp_cls = intercepts.get_bp_handler(intercept)
         if not issubclass(bp_cls.__class__, AvatarPeripheral):
@@ -932,8 +975,13 @@ def _renode_mmio_setup(config, backend, outdir):
     return server
 
 
-def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
-                                  gdb_server_port=None):
+def _emulate_with_renode_backend(
+    config: Any,
+    target_name: Optional[str],
+    rx_port: int,
+    tx_port: int,
+    gdb_server_port: Optional[int] = None,
+) -> None:
     """
     Direct-Renode path: spawn Antmicro Renode, generate a .resc from the
     config memories, drive register/memory/breakpoint access via GDB and
@@ -955,9 +1003,9 @@ def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
     os.makedirs(os.path.join(outdir, "logs"), exist_ok=True)
     hal_stats.set_filename(outdir + "/stats.yaml")
 
-    backend = RenodeBackend(arch=arch)
+    backend: "HalBackend" = RenodeBackend(arch=arch)
     # Stamp initial PC/SP into the .resc so Renode's CPU state matches
-    # halucinator's expectation before the first continue — the GDB-level
+    # halucinator's expectation before the first continue - the GDB-level
     # register writes alone sometimes don't propagate to the CPU.
     backend.set_initial_state(
         pc=config.machine.entry_addr,
@@ -965,7 +1013,7 @@ def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
     )
     # Renode's MappedMemory backs each region with host RAM, so a 512 MB
     # logger sink eats 512 MB of host RAM at startup and a region that
-    # overlaps the ARMv7-M private peripheral bus (0xE0000000–0xE00FFFFF
+    # overlaps the ARMv7-M private peripheral bus (0xE0000000-0xE00FFFFF
     # where the NVIC lives) silently hangs Renode at platform-load.
     # Halucinator marks Python-emulated regions with
     # `emulate_required=True` (set when the YAML's `peripherals:` block
@@ -974,7 +1022,7 @@ def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
     #   * 256 MB if the region sits entirely below the PPB
     #     (covers e.g. STM32F4 peripherals at 0x40023800 RCC, GPIO etc.)
     #   * 4 KB if the original region would extend into / past the PPB
-    #     (zephyr's logger2 region at 0xE0000000 — the firmware's data
+    #     (zephyr's logger2 region at 0xE0000000 - the firmware's data
     #     path is intercept-driven anyway, so 4 KB is enough sink).
     _RENODE_STUB_LARGE = 0x10000000   # 256 MB
     _RENODE_STUB_TINY = 0x1000         # 4 KB
@@ -1044,7 +1092,7 @@ def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
     )
     periph_thread.start()
 
-    def _shutdown():
+    def _shutdown() -> None:
         if gdb_proxy is not None:
             gdb_proxy.stop()
         if mmio_server is not None:
@@ -1065,11 +1113,16 @@ def _emulate_with_renode_backend(config, target_name, rx_port, tx_port,
         _shutdown()
 
 
-def _emulate_with_ghidra_backend(config, target_name, rx_port, tx_port):
+def _emulate_with_ghidra_backend(
+    config: Any,
+    target_name: Optional[str],
+    rx_port: int,
+    tx_port: int,
+) -> None:
     """
     In-process Ghidra PCode emulation via pyghidra. Slower than Unicorn
     but broader arch coverage since PCode runs any language Ghidra
-    supports (ARM, AArch64, MIPS, PPC32/64, RISC-V, …).
+    supports (ARM, AArch64, MIPS, PPC32/64, RISC-V, ...).
     """
     from halucinator.backends.hal_backend import MemoryRegion
     from halucinator.backends.ghidra_backend import (
@@ -1087,7 +1140,7 @@ def _emulate_with_ghidra_backend(config, target_name, rx_port, tx_port):
     os.makedirs(os.path.join(outdir, "logs"), exist_ok=True)
     hal_stats.set_filename(outdir + "/stats.yaml")
 
-    backend = GhidraBackend(arch=arch)
+    backend: "HalBackend" = GhidraBackend(arch=arch)
     for memory in config.memories.values():
         region = MemoryRegion(
             name=memory.name,
@@ -1120,7 +1173,7 @@ def _emulate_with_ghidra_backend(config, target_name, rx_port, tx_port):
     )
     periph_thread.start()
 
-    def _shutdown():
+    def _shutdown() -> None:
         try:
             backend.shutdown()
         except Exception:  # noqa: BLE001
@@ -1140,16 +1193,16 @@ def _emulate_with_ghidra_backend(config, target_name, rx_port, tx_port):
 class DebugShell:
     """IPython-based interactive shell for halucinator debugging."""
 
-    def __init__(self, debugger, avatar):
-        self.debugger = debugger
-        self.avatar = avatar
+    def __init__(self, debugger: Any, avatar: Avatar) -> None:
+        self.debugger: Any = debugger
+        self.avatar: Avatar = avatar
 
-    def start_prompt(self):
+    def start_prompt(self) -> None:
         import IPython
         IPython.embed(header="HALucinator Debug Shell", colors="neutral")
 
 
-def debug_shell(debugger, avatar, shutdown: bool):
+def debug_shell(debugger: Any, avatar: Avatar, shutdown: bool) -> None:
     """
     Launch an interactive debug shell. If shutdown=True, call debugger.shutdown()
     immediately and return. Otherwise, start the peripheral server in a background
@@ -1167,7 +1220,7 @@ def debug_shell(debugger, avatar, shutdown: bool):
     shell.start_prompt()
 
 
-def run_server(avatar):
+def run_server(avatar: Avatar) -> None:
     """Run the peripheral server until KeyboardInterrupt, then shut down avatar."""
     try:
         periph_server.run_server()
@@ -1189,7 +1242,7 @@ def run_server(avatar):
         raise SystemExit(0)
 
 
-def main():
+def main() -> None:
     """
     Halucinator Main
     """

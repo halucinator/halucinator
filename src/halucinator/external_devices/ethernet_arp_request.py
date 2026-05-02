@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from .ioserver import IOServer
 from .trigger_interrupt import SendInterrupt
@@ -10,6 +12,8 @@ from threading import Thread, Event
 import logging
 import time
 import socket
+from typing import Any, Mapping, Optional
+
 import scapy.all as scapy
 import os
 
@@ -17,28 +21,28 @@ log = logging.getLogger(__name__)
 
 
 class ARPSender(object):
-    def __init__(self, ioserver, host_interface=None):
+    def __init__(self, ioserver: IOServer, host_interface: Optional[str] = None) -> None:
         '''
             args:
-            :param ioserver:        The zeromq IO server to use for sending and 
+            :param ioserver:        The zeromq IO server to use for sending and
                                     receiveing messages
-            :param host_interface:  The name of the host ethernet interface to 
-                                    connect to. If present all frames sent or 
+            :param host_interface:  The name of the host ethernet interface to
+                                    connect to. If present all frames sent or
                                     received are forwarded on it.
         '''
-        self.ioserver = ioserver
+        self.ioserver: IOServer = ioserver
         self.ioserver.register_topic('Peripheral.EthernetModel.tx_frame',
                                       self.received_frame)
 
         if host_interface is not None:
-            self.host_eth = HostEthernetServer(host_interface, False)
+            self.host_eth: Optional[HostEthernetServer] = HostEthernetServer(host_interface, False)
         else:
             self.host_eth = None
 
-    def send_request(self, interface_id):
+    def send_request(self, interface_id: str) -> None:
         src_mac = '00:11:22:aa:bb:cc'
         eth_frame = scapy.Ether(dst='ff:ff:ff:ff:ff:ff', src=src_mac, type=0x806)
-        arp = scapy.ARP(hwtype=0x1, ptype=0x800, hwlen=6, plen=4, op='who-has', 
+        arp = scapy.ARP(hwtype=0x1, ptype=0x800, hwlen=6, plen=4, op='who-has',
                     hwsrc=src_mac, psrc='192.168.128.120', hwdst='00:00:00:00:00:00',
                     pdst='192.168.128.100')
         eth_frame.add_payload(arp)
@@ -49,14 +53,14 @@ class ARPSender(object):
         if self.host_eth:
             self.host_eth.send_msg(None, msg)
 
-    def received_frame(self, from_server, msg):
+    def received_frame(self, from_server: IOServer, msg: Mapping[str, Any]) -> None:
         interface = msg['interface_id']
         frame = scapy.Ether(msg['frame'])
         print("%s: %s", (interface, frame))
         if self.host_eth:
             self.host_eth.send_msg(None, msg)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         if self.host_eth:
             self.host_eth.shutdown()
 
@@ -76,7 +80,7 @@ if __name__ == '__main__':
 
     import halucinator.hal_log as hal_log
     hal_log.setLogConfig()
-    
+
     log.setLevel(logging.DEBUG)
 
     io_server = IOServer(args.rx_port, args.tx_port)

@@ -1,12 +1,18 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
+
+from typing import TYPE_CHECKING, Any, DefaultDict, Deque, Type
 
 from ...peripheral_models.ethernet import EthernetModel
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 import struct
 import binascii
 import os
@@ -29,9 +35,9 @@ class STM32F4Ethernet(BPHandler):
         return qemu.read_memory(heth_ptr, 4, 1)  # heth->Instance
 
     @bp_handler(['HAL_ETH_TransmitFrame'])
-    def handle_tx(self, qemu, bp_addr):
+    def handle_tx(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
-            Reads the frame out of the emulated device, returns it and an 
+            Reads the frame out of the emulated device, returns it and an
             id for the interface(id used if there are multiple ethernet devices)
         '''
 
@@ -49,7 +55,7 @@ class STM32F4Ethernet(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_ETH_GetReceivedFrame'])
-    def handle_rx(self, qemu, bp_addr):
+    def handle_rx(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         avatar = qemu.avatar
         eth_id = self.get_id(qemu)
 
@@ -91,13 +97,13 @@ class STM32F4Ethernet(BPHandler):
         return intercept, ret_val
 
     @bp_handler(['HAL_ETH_WritePHYRegister'])
-    def write_phy(self, qemu, bp_addr):
+    def write_phy(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         reg = qemu.regs.r1 & 0xFFFF
         self.phy_registers[reg] = qemu.read_memory(qemu.regs.r2, 4, 1)
         return True, 0
 
     @bp_handler(['HAL_ETH_ReadPHYRegister'])
-    def read_phy(self, qemu, bp_addr):
+    def read_phy(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         reg = qemu.regs.r1 & 0xFFFF
         qemu.write_memory(qemu.regs.r2, 4, self.phy_registers[reg])
         return True, 0

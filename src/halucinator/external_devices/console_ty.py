@@ -6,9 +6,12 @@ Give interactive like terminal access an interface.  Prints received
 data to the console and sends data typed to the target
 """
 
+from __future__ import annotations
 
 import logging
 from binascii import hexlify
+from typing import IO, Any, List, Mapping, Optional, Union
+
 from halucinator import hal_log
 from .ioserver import IOServer
 
@@ -21,16 +24,16 @@ class TyConsole:
     Class for sending and receiving data to the UTTY devices from terminal
     """
 
-    def __init__(self, ioserver, outfile=None):
-        self.ioserver = ioserver
-        self.prev_print = ""
+    def __init__(self, ioserver: IOServer, outfile: Optional[str] = None) -> None:
+        self.ioserver: IOServer = ioserver
+        self.prev_print: str = ""
         ioserver.register_topic("Peripheral.UTTYModel.tx_buf", self.write_handler)
         if outfile is not None:
-            self.outfd = open(outfile, "wb")  # pylint: disable=consider-using-with
+            self.outfd: Optional[IO[bytes]] = open(outfile, "wb")  # pylint: disable=consider-using-with
         else:
             self.outfd = None
 
-    def write_handler(self, ioserver, msg):  # pylint: disable=unused-argument
+    def write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:  # pylint: disable=unused-argument
         """
         Handles Received messages from the zmq interface
         """
@@ -46,7 +49,7 @@ class TyConsole:
         self.prev_print = txt
         print(f"{txt}", end="", flush=True)
 
-    def send_data(self, msg_id, chars):
+    def send_data(self, msg_id: str, chars: Union[str, List[int]]) -> None:
         """
         Sends data over the zmq interface
         """

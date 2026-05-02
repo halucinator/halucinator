@@ -1,11 +1,15 @@
 # Copyright 2018 National Technology & Engineering Solutions of Sandia, LLC
-# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S. 
+# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S.
 # Government retains certain rights in this software.
+
+from __future__ import annotations
 
 import IPython
 import threading
 from threading import Thread
 import zmq
+from typing import Dict, Mapping, Union
+
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 from .ioserver import IOServer
 import logging
@@ -15,22 +19,22 @@ log.setLevel(logging.DEBUG)
 
 
 class VN8200XP(Thread):
-    def __init__(self, ioserver):
-        self.ioserver = ioserver
+    def __init__(self, ioserver: IOServer) -> None:
+        self.ioserver: IOServer = ioserver
         ioserver.register_topic(
             'Peripheral.UARTPublisher.write', self.write_handler)
 
-    def write_handler(self, ioserver, msg):
+    def write_handler(self, ioserver: IOServer, msg: Mapping[str, str]) -> None:
         print((msg,))
         IPython.embed()
 
-    def send_data(self, id, chars):
-        d = {'id': id, 'chars': chars}
+    def send_data(self, id: int, chars: str) -> None:
+        d: Dict[str, Union[int, str]] = {'id': id, 'chars': chars}
         log.debug("Sending Message %s" % (str(d)))
         self.ioserver.send_msg('Peripheral.UARTPublisher.rx_data', d)
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
 
     p = ArgumentParser()

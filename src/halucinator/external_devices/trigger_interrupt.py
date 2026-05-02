@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from os import sys, path
 
@@ -11,21 +13,21 @@ import time
 
 
 class SendInterrupt(object):
-    def __init__(self, ioserver):
-        self.ioserver = ioserver
+    def __init__(self, ioserver: IOServer) -> None:
+        self.ioserver: IOServer = ioserver
 
-    def trigger_interrupt(self, interrupt_number, walk=1):
+    def trigger_interrupt(self, interrupt_number: int, walk: int = 1) -> None:
         topic = "Interrupt.Trigger"
         for x in range(interrupt_number, interrupt_number + walk):
             data = {'num': x}
             self.ioserver.send_msg(topic, data)
 
-    def set_vector_base(self, base_addr):
+    def set_vector_base(self, base_addr: int) -> None:
         topic = "Interrupt.Base"
         data = {'base': base_addr}
         self.ioserver.send_msg(topic, data)
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-i', '--interrupt', type=int,

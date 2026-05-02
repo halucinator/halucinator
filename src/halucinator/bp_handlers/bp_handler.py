@@ -1,12 +1,17 @@
 # Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
+
 """
 Implements the BPHandlers class, bp_handle decorator, and other helpers for bp_handlers
 """
 
 import struct
-from typing import Any, Callable, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 
 # Return type for bp_handler methods: (intercept: bool, return_value: Any)
 # intercept=True means skip the original function and use return_value
@@ -14,9 +19,12 @@ HandlerReturn = Tuple[bool, Any]
 
 # Type alias for a bound method that implements a bp_handler callback
 HandlerFunction = Callable[..., HandlerReturn]
+HandlerDecorator = Callable[[HandlerFunction], HandlerFunction]
 
 
-def bp_handler(arg):
+def bp_handler(
+    arg: Union[HandlerFunction, List[str]]
+) -> Union[HandlerFunction, HandlerDecorator]:
     """
     @bp_handler decorator
 
@@ -26,12 +34,12 @@ def bp_handler(arg):
     """
     if callable(arg):
         # Handles @bp_handler with out args allows any function
-        arg.is_bp_handler = True
+        arg.is_bp_handler = True  # type: ignore
         return arg
 
     # Handles @bp_handler(['F1','F2'])
-    def bp_decorator(func):
-        func.bp_func_list = arg
+    def bp_decorator(func: HandlerFunction) -> HandlerFunction:
+        func.bp_func_list = arg  # type: ignore
         return func
 
     return bp_decorator
@@ -43,8 +51,8 @@ class BPHandler:  # pylint: disable=too-few-public-methods
     """
 
     def register_handler(
-        self, qemu, addr, func_name
-    ):  # pylint: disable=unused-argument
+        self, qemu: "HalBackend", addr: int, func_name: str
+    ) -> HandlerFunction:  # pylint: disable=unused-argument
         """
         Determines what method should used to handle the break point address
 

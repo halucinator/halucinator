@@ -1,24 +1,26 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
+from __future__ import annotations
 
 import zmq
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 from .ioserver import IOServer
 import logging
+from typing import Dict, Optional, Union
 log = logging.getLogger(__name__)
 
 
 class UARTPrintServer(object):
-   
-    def __init__(self, ioserver):
-        self.ioserver = ioserver
-        self.prev_print = None
+
+    def __init__(self, ioserver: IOServer) -> None:
+        self.ioserver: IOServer = ioserver
+        self.prev_print: Optional[str] = None
         ioserver.register_topic(
             'Peripheral.UARTPublisher.write', self.write_handler)
 
-    def write_handler(self, ioserver, msg):
+    def write_handler(self, ioserver: IOServer, msg: Dict[str, bytes]) -> None:
         txt = msg['chars'].decode('latin-1')
         if self.prev_print == '-> ' and txt == '-> ':
             return
@@ -26,13 +28,13 @@ class UARTPrintServer(object):
             self.prev_print = txt
             print("%s" % txt, end='', flush=True)
 
-    def send_data(self, id, chars):
-        d = {'id': id, 'chars': chars}
+    def send_data(self, id: int, chars: str) -> None:
+        d: Dict[str, Union[int, str]] = {'id': id, 'chars': chars}
         log.debug("Sending Message %s" % (str(d)))
         self.ioserver.send_msg('Peripheral.UARTPublisher.rx_data', d)
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_port', default=5556,
