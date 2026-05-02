@@ -1,20 +1,14 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
 import re
 from binascii import hexlify
 from os import path
 import sys
-from typing import TYPE_CHECKING, Dict, Tuple, cast
-
-from ..bp_handler import BPHandler, HandlerFunction, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 import time
 import logging
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 log = logging.getLogger(__name__)
 # log.setLevel(logging.DEBUG)
 # sys.path.insert(0,path.dirname(path.dirname(path.abspath(__file__))))
@@ -30,21 +24,21 @@ class Timer(BPHandler):
           addr: <addr>
     '''
 
-    def __init__(self) -> None:
-        self.start_time: Dict[int, float] = {}
-        self.scale: Dict[int, int] = {}
+    def __init__(self):
+        self.start_time = {}
+        self.scale = {}
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, scale: int = 1) -> HandlerFunction:
+    def register_handler(self, qemu, addr, func_name, scale=1):
         '''
 
         '''
         self.start_time[addr] = time.time()
         self.scale[addr] = scale
 
-        return cast(HandlerFunction, Timer.get_value)
+        return Timer.get_value
 
     @bp_handler
-    def get_value(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def get_value(self, qemu, addr):
         '''
             Gets the current timer value
         '''

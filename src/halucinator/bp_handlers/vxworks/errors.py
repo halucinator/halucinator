@@ -3,15 +3,9 @@
 # the U.S. Government retains certain rights in this software.
 
 '''Module for error printing'''
-from __future__ import annotations
-
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -688,7 +682,7 @@ errnos = {
     0x88022a: "S_ftpLib_REMOTE_SERVER_ERROR_554"
 }
 
-def get_error_type(errno: int) -> str:
+def get_error_type(errno):
     '''Look up the error to print'''
     if errno in errnos.keys():
         return errnos[errno]
@@ -707,11 +701,11 @@ class BColors:
 
 class ERROR(BPHandler):
     '''bp_handler for errors'''
-    def __init__(self) -> None:
-        self.last_error: Optional[str] = None
+    def __init__(self):
+        self.last_error = None
 
     @bp_handler(['errnoSet'])
-    def errno_set(self, qemu: HALQemuTarget, bp_handler: int) -> Tuple[bool, None]:
+    def errno_set(self, qemu, bp_handler):
         if qemu.regs.r0 != 0:
             error_type = get_error_type(qemu.regs.r0)
             lr = qemu.regs.lr
@@ -724,7 +718,7 @@ class ERROR(BPHandler):
         return False, None
 
     @bp_handler(['__errno'])
-    def __errno(self, qemu: HALQemuTarget, bp_handler: int) -> Tuple[bool, None]:
+    def __errno(self, qemu, bp_handler):
         log.debug(hex(qemu.regs.r0))
         errno = qemu.read_memory(qemu.regs.r0,4)
         if errno != 0:
@@ -736,7 +730,7 @@ class ERROR(BPHandler):
 
 
     @bp_handler(['ios_error', 'sys_err'])
-    def sys_err(self, qemu: HALQemuTarget, bp_handler: int) -> Tuple[bool, None]:
+    def sys_err(self, qemu, bp_handler):
         '''
             Handles ios_error and sys_err
         '''
@@ -747,7 +741,7 @@ class ERROR(BPHandler):
 
         return False, None
     @bp_handler(['logInit'])
-    def logInit(self, qemu: HALQemuTarget, bp_handler: int) -> Any:
+    def logInit(self, qemu, bp_handler):
         print('------------------------------------ LOG INIT -------------------------------------------------')
 
         # This code will attempt to do the following:
@@ -769,7 +763,7 @@ class ERROR(BPHandler):
         return qemu.call('open', [logname_addr, 0x202, 0], self, 'open_done')
 
     @bp_handler(['open_done'])
-    def open_done(self, qemu: HALQemuTarget, bp_handler: int) -> Any:
+    def open_done(self, qemu, bp_handler):
         fd = qemu.get_arg(0)
 
         print('------------------------------------ OPEN DONE -------------------------------------------------')
@@ -783,7 +777,7 @@ class ERROR(BPHandler):
         return qemu.call('write', [fd, addr, len(writeStr)], self, 'write_done')
 
     @bp_handler(['write_done'])
-    def write_done(self, qemu: HALQemuTarget, bp_handler: int) -> Any:
+    def write_done(self, qemu, bp_handler):
         ret = qemu.get_arg(0)
 
         print('------------------------------------ WRITE DONE -------------------------------------------------')
@@ -793,7 +787,7 @@ class ERROR(BPHandler):
 
 
     @bp_handler(['close_done'])
-    def close_done(self, qemu: HALQemuTarget, bp_handler: int) -> Tuple[bool, None]:
+    def close_done(self, qemu, bp_handler):
         ret = qemu.regs.r0
 
         print('------------------------------------ CLOSE DONE -------------------------------------------------')

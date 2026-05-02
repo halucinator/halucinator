@@ -1,14 +1,8 @@
 """Module to track buffer overflows"""
-from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
-
 from halucinator.peripheral_models import canary
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 
 class Alloc(BPHandler):
@@ -22,23 +16,23 @@ class Alloc(BPHandler):
       symbol: <symbol>
     """
 
-    def __init__(self, use_cookie: bool = False) -> None:
-        self.item_size: Dict[int, int] = {}  # holds the size of the extra regions
+    def __init__(self, use_cookie=False):
+        self.item_size = {}  # holds the size of the extra regions
         # is always 4 for malloc
         # for calloc it is the same as the "size" argument
-        self.memory_size: Dict[int, int] = (
+        self.memory_size = (
             {}
         )  # holds the size of the allocated memory from the program's perspective
-        self.watchpoint: Dict[int, Tuple[int, int]] = {}  # holds the watchpoint numbers
-        self.is_valid: Dict[int, bool] = (
+        self.watchpoint = {}  # holds the watchpoint numbers
+        self.is_valid = (
             {}
         )  # is used for tracking if a region of memory has been allocated/freed
-        self.cookie: Dict[int, int] = {}  # holds the cookie values
-        self.use_cookie: bool = use_cookie
+        self.cookie = {}  # holds the cookie values
+        self.use_cookie = use_cookie
         self.model = canary.CanaryModel
 
     @bp_handler(["malloc"])
-    def malloc(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def malloc(self, qemu, addr):  # pylint: disable=unused-argument
         """
         Intercepts the malloc request and increases its sizy by 8 bytes
         then sets a breakpoint to handle the return
@@ -62,7 +56,7 @@ class Alloc(BPHandler):
         return False, 0  # let malloc execute normally
 
     @bp_handler(["calloc"])
-    def calloc(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def calloc(self, qemu, addr):  # pylint: disable=unused-argument
         """
         Intercepts the calloc request and increases the number of requested
         items by 2 so that we have somewhere to place our watchpoints/cookies
@@ -89,7 +83,7 @@ class Alloc(BPHandler):
         return False, 0  # let calloc execute normally
 
     @bp_handler(["free"])
-    def free(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, Optional[int]]:
+    def free(self, qemu, addr):
         """
         Either removes the watchpoint or checks to see if the cookie values have changed
         and then frees the allocated memory
@@ -140,7 +134,7 @@ class Alloc(BPHandler):
         return False, None  # let free execute normally
 
     @bp_handler(["alloc_return_handler"])
-    def alloc_return_handler(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def alloc_return_handler(self, qemu, addr):
         """
         Either sets the watchpoints or writes the cookie values
         """
@@ -191,7 +185,7 @@ class Alloc(BPHandler):
         return False, None
 
     @bp_handler(["realloc"])
-    def realloc(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def realloc(self, qemu, addr):  # pylint: disable=unused-argument
         """
         Intercepts the realloc request and increases its size to account for the extra
         regions and changes the ptr value back to the origin of the expanded
@@ -231,7 +225,7 @@ class Alloc(BPHandler):
         return False, None  # Let realloc execute normally
 
     @bp_handler(["realloc_return_handler"])
-    def realloc_return_handler(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def realloc_return_handler(self, qemu, addr):
         """
         Sets the watchpoints or cookies, and moves the ptr back so that
         the extra memory isn't accessed
@@ -276,7 +270,7 @@ class Alloc(BPHandler):
         return False, None
 
     @bp_handler(["handle_overflow"])
-    def handle_overflow(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def handle_overflow(self, qemu, addr):
         """
         When the watchpoint is triggered it calls the
         canary peripheral

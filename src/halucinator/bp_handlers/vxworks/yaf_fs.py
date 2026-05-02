@@ -1,16 +1,10 @@
 '''bp_handlers for the dos filesystem'''
-from __future__ import annotations
-
 import logging
 import types
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Type
 
 from halucinator.bp_handlers.vxworks.ios_dev import IosDev
 from halucinator.peripheral_models.dos_fs_model import DosFsModel
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -25,11 +19,11 @@ class YafFsLib(BPHandler):
              symbol: <BOARD_SPECIFIC> or
              addr:
     '''
-    def __init__(self, impl: Type[DosFsModel] = DosFsModel, dd_dirent_offset: int = 8) -> None:
-        self.model: Type[DosFsModel] = impl
-        self.dd_dirent_offset: int = dd_dirent_offset
+    def __init__(self, impl=DosFsModel,dd_dirent_offset=8):
+        self.model = impl
+        self.dd_dirent_offset = dd_dirent_offset
 
-    def fio_move(self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
+    def fio_move(self, qemu, bp_addr, fd, arg):
         '''
             Move file
         '''
@@ -37,7 +31,7 @@ class YafFsLib(BPHandler):
         self.model.fio_move(fd, new_path)
         return True, 0
 
-    def fio_time_set(self, qemu: HALQemuTarget, bp_addr: int, fd: int, time_struct: int) -> Tuple[bool, int]:
+    def fio_time_set(self, qemu, bp_addr, fd, time_struct):
         '''
             Sets time on file
         '''
@@ -52,7 +46,7 @@ class YafFsLib(BPHandler):
         self.model.fio_time_set(fd,atime, modtime)
         return True, 0
 
-    def fio_attrib_set(self, qemu: HALQemuTarget, bp_addr: int, fd: int, st_attrib: int) -> None:
+    def fio_attrib_set(self, qemu, bp_addr,fd,st_attrib):
         '''
             0x01   read-only
             0x02   hidden
@@ -63,7 +57,7 @@ class YafFsLib(BPHandler):
         '''
 
 
-    def fio_rename(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_new_name: int) -> Tuple[bool, int]:
+    def fio_rename(self, qemu, bp_addr, fd, p_new_name):
         '''
             Rename file
         '''
@@ -72,7 +66,7 @@ class YafFsLib(BPHandler):
         self.model.fio_rename(fd, new_name)
         return True,0
 
-    def fio_read(self, qemu: HALQemuTarget, bp_addr: int, fd: int, d_size: int) -> Tuple[bool, int]:
+    def fio_read(self, qemu, bp_addr, fd, d_size):
         '''
             Read d_size bytes from file
         '''
@@ -81,7 +75,7 @@ class YafFsLib(BPHandler):
         qemu.write_memory(d_size, 4,rem)
         return True, 0
 
-    def fio_read_dir(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_dir: int) -> Tuple[bool, Optional[int]]:
+    def fio_read_dir(self, qemu, bp_addr, fd, p_dir):
         '''
             Read files in directory
         '''
@@ -111,14 +105,14 @@ class YafFsLib(BPHandler):
 
         return True, None
 
-    def fio_where(self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, Any]:
+    def fio_where(self, qemu, bp_addr, fd, arg):
         '''
             fio_where
         '''
         log.debug("FIOWHERE")
         return True, self.model.fio_where(fd)
 
-    def fio_seek (self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
+    def fio_seek (self, qemu, bp_addr, fd, arg):
         '''
             fio_seek
         '''
@@ -126,7 +120,7 @@ class YafFsLib(BPHandler):
         self.model.fio_seek(fd, arg)
         return True, 0
 
-    def fio_fstat_get(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_stat: int) -> Tuple[bool, int]:
+    def fio_fstat_get(self, qemu, bp_addr, fd, p_stat):
         '''
             fstat_get
         '''
@@ -161,7 +155,7 @@ class YafFsLib(BPHandler):
         return True, 0
 
     @bp_handler(['attrib'])
-    def attrib(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def attrib(self, qemu, bp_addr):
         '''
             STATUS attrib(
                 const char * fileName,	/* file or dir name on which to change flags */
@@ -184,7 +178,7 @@ class YafFsLib(BPHandler):
 
 
     @bp_handler(['delete'])
-    def delete(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, Any]:
+    def delete(self, qemu, bp_addr):
         '''
             delete break point handler
         '''
@@ -197,7 +191,7 @@ class YafFsLib(BPHandler):
         return True,self.model.delete(drv, path, drive)
 
     @bp_handler(['create'])
-    def create(self, qemu: HALQemuTarget, bp_addr: int) -> Any:
+    def create(self, qemu, bp_addr):
         '''
             create break point handler
         '''
@@ -213,7 +207,7 @@ class YafFsLib(BPHandler):
         return self.model.creat_or_open(name, flags, mode)
 
     @bp_handler(['open'])
-    def open(self, qemu: HALQemuTarget, bp_addr: int) -> Any:
+    def open(self, qemu, bp_addr):
         '''
             open break point handler
         '''
@@ -241,7 +235,7 @@ class YafFsLib(BPHandler):
         return self.model.creat_or_open(name,flags,mode)
 
     @bp_handler(['close'])
-    def close(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def close(self, qemu, bp_addr):
         '''
             close break point handler
         '''
@@ -260,7 +254,7 @@ class YafFsLib(BPHandler):
             return True,  0xffffffff
 
     @bp_handler(['read'])
-    def read(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def read(self, qemu, bp_addr):
         '''
             read break point handler
         '''
@@ -279,7 +273,7 @@ class YafFsLib(BPHandler):
         return True, len(data)
 
     @bp_handler(['write'])
-    def write(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def write(self, qemu, bp_addr):
         '''
             write break point handler
         '''
@@ -294,7 +288,7 @@ class YafFsLib(BPHandler):
         return True, len(buf)
 
     @bp_handler(['ioctl'])
-    def ioctl(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, Optional[int]]:
+    def ioctl(self, qemu, bp_addr):
         '''
             ioctl bp_handler
         '''

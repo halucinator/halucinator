@@ -1,18 +1,12 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
-
-from typing import TYPE_CHECKING, Type
 
 from ...peripheral_models.gpio import GPIO
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 from collections import defaultdict, deque
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -32,7 +26,7 @@ class STM32F4GPIO(BPHandler):
         return hex(port)+'_'+str(pin)
 
     @bp_handler(['HAL_GPIO_EXTI_IRQHandler'])
-    def handle_exti(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def handle_exti(self, qemu, bp_addr):
         print("HAL_GPIO_EXTI_IRQHandler calling HAL_GPIO_EXTI_Callback")
         print("GPIO=", hex(qemu.regs.r0))
         callback_addr = qemu.avatar.callables['HAL_GPIO_EXTI_Callback']
@@ -42,15 +36,15 @@ class STM32F4GPIO(BPHandler):
         return False, None
 
     @bp_handler(['HAL_GPIO_Init'])
-    def gpio_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def gpio_init(self, qemu, bp_addr):
         return True, 0
 
     @bp_handler(['HAL_GPIO_DeInit'])
-    def gpio_deinit(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def gpio_deinit(self, qemu, bp_addr):
         return True, 0
 
     @bp_handler(['HAL_GPIO_WritePin'])
-    def write_pin(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_pin(self, qemu, bp_addr):
         '''
             Reads the frame out of the emulated device, returns it and an 
             id for the interface(id used if there are multiple ethernet devices)
@@ -68,7 +62,7 @@ class STM32F4GPIO(BPHandler):
         return intercept, ret_val
 
     @bp_handler(['HAL_GPIO_TogglePin'])
-    def toggle_pin(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def toggle_pin(self, qemu, bp_addr):
         '''
             Toggles the pin
 
@@ -84,7 +78,7 @@ class STM32F4GPIO(BPHandler):
         return intercept, ret_val
 
     @bp_handler(['HAL_GPIO_ReadPin'])
-    def read_pin(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def read_pin(self, qemu, bp_addr):
          # GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef* GPIOx, uint16_t GPIO_Pin);
         port = qemu.regs.r0
         pin = qemu.regs.r1

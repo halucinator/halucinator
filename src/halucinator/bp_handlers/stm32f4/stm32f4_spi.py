@@ -1,16 +1,10 @@
 # Copyright 2018 National Technology & Engineering Solutions of Sandia, LLC
-# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S.
+# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S. 
 # Government retains certain rights in this software.
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Type
 
 from ...peripheral_models.spi import SPIPublisher
-from ..bp_handler import BPHandler, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 import logging
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 
 log = logging.getLogger(__name__)
 
@@ -23,22 +17,22 @@ class STM32F4SPI(BPHandler):
         self.model = impl
 
     @bp_handler(['HAL_SPI_Init'])
-    def hal_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def hal_ok(self, qemu, bp_addr):
         log.info("SPI Init Called")
         return True, 0
 
     @bp_handler(['HAL_SPI_DeInit'])
-    def hal_ok_2(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def hal_ok_2(self, qemu, bp_addr):
         log.info("SPI DeInit Called")
         return True, 0
 
     @bp_handler(['HAL_SPI_GetState'])
-    def get_state(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_state(self, qemu, bp_addr):
         log.info("SPI Get State")
         return True, 0x20  # 0x20 READY
 
     @bp_handler(['HAL_SPI_Transmit', 'HAL_SPI_Transmit_IT', 'HAL_SPI_Transmit_DMA'])
-    def handle_tx(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def handle_tx(self, qemu, bp_addr):
         '''
             Reads the frame out of the emulated device, returns it and an
             id for the interface(id used if there are multiple ethernet devices)
@@ -65,7 +59,7 @@ class STM32F4SPI(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_SPI_TransmitReceive', 'HAL_SPI_TransmitReceive_IT', 'HAL_SPI_TransmitReceive_DMA'])
-    def handle_txrx(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def handle_txrx(self, qemu, bp_addr):
         '''
         Does a combo tx/rx, in blocking mode
 

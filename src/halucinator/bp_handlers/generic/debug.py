@@ -1,20 +1,15 @@
 # Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
-from __future__ import annotations
 
 """
 BP Handlers primarily used for debugging
 """
-import logging
 from os import system
-from typing import TYPE_CHECKING, Any, Dict, cast
 
+import logging
 import IPython
-from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+from ..bp_handler import BPHandler, bp_handler
 
 
 log = logging.getLogger(__name__)
@@ -31,17 +26,17 @@ class IPythonShell(BPHandler):
       addr: <addr>
     """
 
-    def __init__(self) -> None:
-        self.addr2name: Dict[int, str] = {}
+    def __init__(self):
+        self.addr2name = {}
         self.ignore_list = {}
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, ignore: Any = None) -> HandlerFunction:
+    def register_handler(self, qemu, addr, func_name, ignore=None):
         self.addr2name[addr] = func_name
         self.ignore_list[addr] = ignore if ignore is not None else []
-        return cast(HandlerFunction, IPythonShell.start_shell)
+        return IPythonShell.start_shell
 
     @bp_handler
-    def start_shell(self, target: HALQemuTarget, addr: int) -> HandlerReturn:
+    def start_shell(self, target, addr):
         """
         Starts an IPython shell if pc is not on ignore list
         """
@@ -71,7 +66,7 @@ class IPythonShell(BPHandler):
         # return intercept, ret_val
         return False, ret_val
 
-    def print_helpers(self) -> None:  # pylint: disable=no-self-use
+    def print_helpers(self):  # pylint: disable=no-self-use
         """
         Prints out the available debug helpers
         """
@@ -88,16 +83,16 @@ class CortexMDebugHelper:
     Helper class that will decode status registers on ARM Cortex M devices
     """
 
-    def __init__(self, qemu: HALQemuTarget):
+    def __init__(self, qemu):
         self.qemu = qemu
 
-    def get_mem(self, addr: int) -> int:
+    def get_mem(self, addr):
         """
         Short hand method for reading a word of memory
         """
         return self.qemu.read_memory(addr, 4, 1)
 
-    def parse_cfsr(self, cfsr: int, sp_offset: int) -> None:  # pylint: disable=too-many-branches
+    def parse_cfsr(self, cfsr, sp_offset):  # pylint: disable=too-many-branches
         """
         Parses the configurable fault status register to human readable strings
         """
@@ -156,7 +151,7 @@ class CortexMDebugHelper:
         if cfsr & (1 << (16)):
             print("\tUndefined instruction UsageFault, Stacked PC has Addr")
 
-    def print_exception_stack(self, offset: int = 0) -> None:
+    def print_exception_stack(self, offset=0):
         """
         Prints registers pushed on the stack by exception entry
         """
@@ -173,7 +168,7 @@ class CortexMDebugHelper:
         print(f"  PC: {hex(self.get_mem(stack_pointer + 24))}")
         print(f"xPSR: {hex(self.get_mem(stack_pointer + 28))}")
 
-    def print_hardfault_info(self, stack_offset: int = 0) -> None:
+    def print_hardfault_info(self, stack_offset=0):
         """
         Prints Hardfault info, alias for print_hardfault_info
         """
@@ -185,13 +180,13 @@ class CortexMDebugHelper:
         cfsr = self.get_mem(0xE000ED28)
         self.parse_cfsr(cfsr, stack_offset)
 
-    def hf(self, stack_offset: int = 0) -> None:  # pylint: disable=invalid-name
+    def hf(self, stack_offset=0):  # pylint: disable=invalid-name
         """
         Prints Hardfault info, alias for print_hardfault_info
         """
         self.print_hardfault_info(stack_offset)
 
-    def get_stacked_pc(self, stackoffset: int = 0) -> int:
+    def get_stacked_pc(self, stackoffset=0):
         """
         Gets the PC pushed on the stack from in an ISR
         Offset can be used adjust if additional things have been
@@ -200,7 +195,7 @@ class CortexMDebugHelper:
         stack_pointer = self.qemu.regs.sp
         return self.get_mem(stack_pointer + (4 * 6) + stackoffset)
 
-    def parse_hardfault(self, hardfault: int, sp_offset: int) -> None:
+    def parse_hardfault(self, hardfault, sp_offset):
         """
         Parses the reason for a hardfault
         """

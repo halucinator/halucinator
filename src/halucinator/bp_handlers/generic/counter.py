@@ -1,18 +1,12 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
 
 import re
 from binascii import hexlify
 from os import path
 import sys
-from typing import TYPE_CHECKING, Dict, cast
-
-from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+from ..bp_handler import BPHandler, bp_handler
 
 # sys.path.insert(0,path.dirname(path.dirname(path.abspath(__file__))))
 
@@ -28,21 +22,21 @@ class Counter(BPHandler):
           registration_args:{increment:1} (Optional)
     '''
 
-    def __init__(self) -> None:
-        self.increment: Dict[int, int] = {}
-        self.counts: Dict[int, int] = {}
+    def __init__(self):
+        self.increment = {}
+        self.counts = {}
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, increment: int = 1) -> HandlerFunction:
+    def register_handler(self, qemu, addr, func_name, increment=1):
         '''
 
         '''
         self.increment[addr] = increment
         self.counts[addr] = 0
 
-        return cast(HandlerFunction, Counter.get_value)
+        return Counter.get_value
 
     @bp_handler
-    def get_value(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def get_value(self, qemu, addr):
         '''
             Gets the counter value
         '''

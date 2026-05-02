@@ -1,17 +1,11 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Type
 
 from ...peripheral_models.tcp_stack import TCPModel
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, HandlerReturn, bp_handler
+from ..bp_handler import BPHandler, bp_handler
 from collections import defaultdict, deque
-
-if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
 import struct
 import binascii
 import os
@@ -27,7 +21,7 @@ WIFI_CONNECTED = 3
 
 class STM32F4Wifi(BPHandler):
 
-    def __init__(self, model: Type[TCPModel] = TCPModel):
+    def __init__(self, model=TCPModel):
         # Default values from recording
         self.wifi_state = WIFI_OFF
         # This thing uses a timer, in particular TIM1.
@@ -38,7 +32,7 @@ class STM32F4Wifi(BPHandler):
         self.model = model()
 
     @bp_handler(['wifi_init'])
-    def wifi_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_init(self, qemu, bp_addr):
         '''
             Register the timers
         '''
@@ -48,11 +42,11 @@ class STM32F4Wifi(BPHandler):
         # return False, None
         # Start the TIM1 timer
         wifi_timer_rate = 2
-        self.timer.start_timer(self.tim1, 45, wifi_timer_rate)  # type: ignore
+        self.timer.start_timer(self.tim1, 45, wifi_timer_rate)
         return True, 0
 
     @bp_handler(['wifi_wakeup'])
-    def wifi_wakeup(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_wakeup(self, qemu, bp_addr):
         '''
             Register the timers
         '''
@@ -61,12 +55,12 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['Receive_Data'])
-    def receive_data(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def receive_data(self, qemu, bp_addr):
         log.info("Ignoring call to Receive_Data")
         return True, 0
 
     @bp_handler(['wifi_ap_start'])
-    def wifi_ap_start(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_ap_start(self, qemu, bp_addr):
         '''
             This version only supports the TCP/IP layer, do nothing
         '''
@@ -75,7 +69,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['wifi_socket_server_open'])
-    def wifi_socket_server_open(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_socket_server_open(self, qemu, bp_addr):
         '''
             Should call listen()
             Arg1: Port number
@@ -88,18 +82,18 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['wifi_socket_server_write'])
-    def wifi_socket_server_write(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_socket_server_write(self, qemu, bp_addr):
         '''
             This version only supports the TCP/IP layer, do nothing
         '''
         length = qemu.regs.r0
         data = qemu.read_memory(qemu.regs.r1, 1, length, raw=True)
         log.info("socket_server_write called, data: %s" % data)
-        self.model.tx_packet(data)  # type: ignore
+        self.model.tx_packet(data)
         return True, 0
 
     @bp_handler(['Wifi_SysTick_Isr'])
-    def wifi_systick_isr(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_systick_isr(self, qemu, bp_addr):
         '''
         The SysTick ISR used by the Wifi stack
         '''
@@ -110,7 +104,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['Wifi_TIM_Handler'])
-    def wifi_tim_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_tim_handler(self, qemu, bp_addr):
         """
         The STM32 Wifi stack's event dispatch queue
         Should be called over and over by a timer
@@ -126,14 +120,14 @@ class STM32F4Wifi(BPHandler):
             # call `ind_wifi_connectedi`
             self.wifi_state = WIFI_IDLE
             log.info("Setting wifi_connected state")
-            qemu.regs.pc = qemu.avatar.callables['ind_wifi_connected']  # type: ignore
+            qemu.regs.pc = qemu.avatar.callables['ind_wifi_connected']
         # If a client has connected, and we don't know that yet, call the callback and set the mode.
         elif self.wifi_state == WIFI_IDLE and self.model.conn is not None:
             # We're connected!
             # Call `ind_wifi_socket_server_client_joined`
             self.wifi_state = WIFI_CONNECTED
             log.info("Setting wifi_socket_server_client_joined state")
-            qemu.regs.pc = qemu.avatar.callables['ind_socket_server_client_joined']  # type: ignore
+            qemu.regs.pc = qemu.avatar.callables['ind_socket_server_client_joined']
         elif self.wifi_state == WIFI_CONNECTED:
             # Try to get some data!
             data = self.model.get_rx_packet()
@@ -142,7 +136,7 @@ class STM32F4Wifi(BPHandler):
                 log.info("Wifi: Received %s" % repr(data))
                 RX_DATA_BUF = 0x200f0000
                 # FIXME: It would be nice if we had a better way to do this.  We don't, but that's fine.
-                data += '\0'  # type: ignore
+                data += '\0'
                 qemu.write_memory(RX_DATA_BUF, 1, data, len(
                     data), raw=True)  # Null-terminate
                 # Call `ind_wifi_socket_data_received`
@@ -151,14 +145,14 @@ class STM32F4Wifi(BPHandler):
                 qemu.regs.r2 = len(data)  # length
                 # Chunk size.  TODO: What is this, even?
                 qemu.regs.r3 = len(data)
-                qemu.regs.pc = qemu.avatar.callables['ind_wifi_socket_data_received']  # type: ignore
+                qemu.regs.pc = qemu.avatar.callables['ind_wifi_socket_data_received']
             elif self.model.conn is None:
                 # The client left!
                 # Call `ind_wifi_socket_server_client_left`
                 log.info(
                     "Client left, setting wifi_socket_server_client_left state")
                 self.wifi_state = WIFI_IDLE
-                qemu.regs.pc = qemu.avatar.callables['ind_socket_server_client_left']  # type: ignore
+                qemu.regs.pc = qemu.avatar.callables['ind_socket_server_client_left']
         else:
             # No callback needed
             return True, 0
