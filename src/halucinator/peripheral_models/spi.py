@@ -1,34 +1,26 @@
 # Copyright 2018 National Technology & Engineering Solutions of Sandia, LLC
-# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S.
+# (NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S. 
 # Government retains certain rights in this software.
-from __future__ import annotations
 
-import logging
-from collections import defaultdict, deque
-from itertools import repeat
-from typing import Any, DefaultDict, Deque, Dict
-
-from typing import TypedDict
 
 from . import peripheral_server
+# from queue import Queue
+from threading import Event, Thread
+from collections import deque, defaultdict
+import sys
+import logging
+from itertools import repeat
+import time
 
 log = logging.getLogger(__name__)
 
-
-# There I think isn't a client of the SPI bus at present... so we can
-# just treat it as bytes always. Yay.
-class SPIMessage(TypedDict):
-    id: int
-    chars: bytes
-
-
 class UARTModel(object):
 
-    def __init__(self) -> None:
-        self.tx_buffer: Deque[bytes] = deque()
-        self.rx_buffer: Deque[bytes] = deque()
+    def __init__(self):
+        self.tx_buffer = deque()
+        self.rx_buffer = deque()
 
-    def read(self, count: int, blocking: bool = True) -> bytes:
+    def read(self, count, blocking=True):
         log.info("Reading %d bytes" % count)
         out = b""
         if self.rx_buffer:
@@ -43,35 +35,33 @@ class UARTModel(object):
                     break
         return out
 
-    def write(self, data: bytes) -> None:
+    def write(self, data):
         log.info("Writing %d bytes" % len(data))
         self.tx_buffer.append(data)
 
-    def tx_empty(self) -> bool:
+    def tx_empty(self):
         return self.tx_buffer.empty()
 
-    def rx_empty(self) -> bool:
+    def rx_empty(self):
         return self.rx_buffer.empty()
 
 
 # Register the pub/sub calls and methods that need mapped
 @peripheral_server.peripheral_model
 class SPIPublisher(object):
-    # TODO TYPE: Any
-    rx_buffers: DefaultDict[int, Deque[Any]] = defaultdict(deque)
+    rx_buffers = defaultdict(deque)
 
     @classmethod
     @peripheral_server.tx_msg
-    def write(cls, spi_id: int, chars: bytes) -> Dict[str, Any]:
+    def write(cls, spi_id, chars):
         '''
            Publishes the data to sub/pub server
         '''
         log.debug("In: SPIPublisher.write")
-        msg = {'id': spi_id, 'chars': chars}
-        return msg
+        return SPIMessage(id=spi_id, chars=chars)
 
     @classmethod
-    def read(cls, spi_id: int, count: int = 1, block: bool = False) -> str:
+    def read(cls, spi_id, count=1, block=False):
         '''
             Gets data previously received from the sub/pub server
             Args:
@@ -97,7 +87,7 @@ class SPIPublisher(object):
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def rx_data(cls, msg: Dict[str, Any]) -> None:
+    def rx_data(cls, msg):
         '''
             Handles reception of these messages from the PeripheralServer
         '''
@@ -105,3 +95,23 @@ class SPIPublisher(object):
         spi_id = msg['id']
         data = msg['chars']
         cls.rx_buffers[spi_id].extend(data)
+
+from dataclasses import dataclass, asdict
+
+
+@dataclass
+class SPIMessage:
+    """Typed message for Peripheral.SPIPublisher topics."""
+    id: int
+    chars: bytes
+
+    def __getitem__(self, key):
+        return asdict(self)[key]
+
+    def __eq__(self, other):
+        if isinstance(other, dict):
+            return self.id == other.get('id') and self.chars == other.get('chars')
+        return isinstance(other, SPIMessage) and self.id == other.id and self.chars == other.chars
+
+    def __hash__(self):
+        return hash((self.id, self.chars))
