@@ -80,7 +80,11 @@ jobs:
       uses: actions/cache/restore@v5
       with:
         path: deps/build-qemu
-        key: qemu-build-v2-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
+        # Bumping the v-prefix invalidates corrupt caches — the previous
+        # v2 entries on this fork ended up with partial/empty build dirs
+        # because the old `Save` step had `if: always()` and saved on
+        # build failure too.
+        key: qemu-build-v3-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
 
     - name: Setup Python virtualenv and install dependencies
       run: |
@@ -247,8 +251,12 @@ jobs:
         python3 ./test/python_tests/test_bp_struct.py
 
     - name: Save QEMU build cache
-      if: always() && steps.cache-qemu.outputs.cache-hit != 'true'
+      # success() — only save when every prior step on this job has
+      # passed. A failed Build QEMU step (or anything earlier) leaves
+      # deps/build-qemu/ in a partial/empty state, and saving that
+      # poisons every subsequent run that hits the same cache key.
+      if: success() && steps.cache-qemu.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: deps/build-qemu
-        key: qemu-build-v2-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
+        key: qemu-build-v3-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
