@@ -4,13 +4,9 @@
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
-from __future__ import annotations
-
-from argparse import ArgumentParser
 from binascii import hexlify
 import logging
 import socket
-from typing import Any, List, Mapping, Optional
 
 from halucinator.external_devices.ioserver import IOServer
 
@@ -23,17 +19,17 @@ class UDSTunnel:
     Creates a Tunnel between a Unix Domain Socket and a halucinator UTTYModel peripheral
     """
 
-    def __init__(self, ioserver: IOServer, socket_addr: str, tty_model_id: str) -> None:
-        self.ioserver: IOServer = ioserver
-        self.tty_model_id: str = tty_model_id
-        self.prev_print: Optional[str] = None
+    def __init__(self, ioserver, socket_addr, tty_model_id):
+        self.ioserver = ioserver
+        self.tty_model_id = tty_model_id
+        self.prev_print = None
 
-        self.host_port: socket.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.host_port = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.host_port.connect(socket_addr)
         log.debug("Connected to %s", socket_addr)
         ioserver.register_topic("Peripheral.UTTYModel.tx_buf", self.write_handler)
 
-    def write_handler(self, ioserver: IOServer, msg: Mapping[str, Any]) -> None:  # pylint: disable=unused-argument
+    def write_handler(self, ioserver, msg):  # pylint: disable=unused-argument
         """
         Sends from the UTTYModel to the UDS Socket
         """
@@ -41,14 +37,14 @@ class UDSTunnel:
         log.debug("To VM %s ", str(tx_bytes))
         self.host_port.send(tx_bytes)
 
-    def send_data(self, msg_id: str, chars: Any) -> None:
+    def send_data(self, msg_id, chars):
         """
         Sends data to the UTTYModel
         """
         msg = {"interface_id": msg_id, "char": chars}
         self.ioserver.send_msg("Peripheral.UTTYModel.rx_char_or_buf", msg)
 
-    def recv_and_forward_uds_data(self, bytes_per_recv: int = 1) -> None:
+    def recv_and_forward_uds_data(self, bytes_per_recv=1):
         """
         Receives UDS data and sends UTTYModel
         """
@@ -58,14 +54,14 @@ class UDSTunnel:
             log.debug("From VM %s", hexlify(data))
             self.send_data(self.tty_model_id, [data])
 
-    def shutdown(self) -> None:
+    def shutdown(self):
         """
         Shutdown and close the tunnel
         """
         self.host_port.close()
 
     @classmethod
-    def add_args(cls, parser: ArgumentParser) -> None:
+    def add_args(cls, parser):
         """
         Adds args needed to ArgumentParser `parser`
         """

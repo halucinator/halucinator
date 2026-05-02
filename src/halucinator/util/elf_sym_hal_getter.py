@@ -1,23 +1,14 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
 
-from __future__ import annotations
-
-import os
-from typing import Any, Dict
-
 import yaml
-
-try:
-    import cle
-except ImportError:
-    cle = None  # type: ignore[assignment]
-
 from halucinator.util import hexyaml
+import cle
+import os
 
 
-def load_binary(filename: str) -> cle.loader.Loader:
+def load_binary(filename):
     '''
         Loads binary using angr's cle loader
     '''
@@ -27,7 +18,7 @@ def load_binary(filename: str) -> cle.loader.Loader:
     return loader
 
 
-def build_addr_to_sym_lookup(binary: str) -> Dict[int, cle.Symbol]:
+def build_addr_to_sym_lookup(binary):
     '''
         Builds a look up table that maps an address to a function
         Lut has every address of a function in it and value is a symbol
@@ -44,11 +35,11 @@ def build_addr_to_sym_lookup(binary: str) -> Dict[int, cle.Symbol]:
     return sym_lut
 
 
-def get_functions_and_addresses(binary: str) -> Dict[str, int]:
+def get_functions_and_addresses(binary):
 
     loader = load_binary(binary)
 
-    functions: Dict[str, int] = {}
+    functions = {}
     for symbol in loader.symbols:
         if symbol.is_function:
             # Clear Thumb bit
@@ -56,9 +47,7 @@ def get_functions_and_addresses(binary: str) -> Dict[str, int]:
     return functions
 
 
-def format_output(
-    functions: Dict[str, int], base_addr: int = 0x00000000, entry: int = 0
-) -> Dict[str, object]:
+def format_output(functions, base_addr=0x00000000, entry=0):
     '''
         Converts the symbol dictionary to the output format used by halucinator
 
@@ -80,7 +69,7 @@ def format_output(
 
 
 
-def main() -> None:
+def main():
     '''
     Gets Symbols from elf file using the symbols table in the elf
     '''

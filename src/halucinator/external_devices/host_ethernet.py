@@ -1,8 +1,6 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-
-from __future__ import annotations
 
 from os import sys, path
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
@@ -12,15 +10,13 @@ import os
 import socket
 import time
 import binascii
-from typing import Optional
-
 import scapy.all as scapy
 
 __run_server = True
-__host_socket: Optional[socket.socket] = None
+__host_socket = None
 
 
-def rx_from_emulator(emu_rx_port: int, interface: str) -> None:
+def rx_from_emulator(emu_rx_port, interface):
     ''' 
         Receives 0mq messages from emu_rx_port    
         args:
@@ -49,7 +45,7 @@ def rx_from_emulator(emu_rx_port: int, interface: str) -> None:
               (len(frame), binascii.hexlify(frame)))
 
 
-def rx_from_host(emu_tx_port: int, msg_id: int) -> None:
+def rx_from_host(emu_tx_port, msg_id):
     global __run_server
     global __host_socket
     topic = "Peripheral.EthernetModel.rx_frame"
@@ -67,12 +63,7 @@ def rx_from_host(emu_tx_port: int, msg_id: int) -> None:
         print("Sent message to emulator ", binascii.hexlify(frame))
 
 
-def start(
-    interface: str,
-    emu_rx_port: int = 5556,
-    emu_tx_port: int = 5555,
-    msg_id: int = 1073905664,
-) -> None:
+def start(interface, emu_rx_port=5556, emu_tx_port=5555, msg_id=1073905664):
     global __run_server
     global __host_socket
     # Open socket to send raw frames on ethernet adapter
@@ -99,7 +90,7 @@ def start(
 
 
 
-def main() -> None:
+def main():
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_port', default=5556,

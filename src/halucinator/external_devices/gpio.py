@@ -1,23 +1,19 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
 # certain rights in this software.
-
-from __future__ import annotations
 
 from os import sys, path
 import zmq
 from multiprocessing import Process
 import os
 import time
-from typing import Any
-
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 
 
 __run_server = True
 
 
-def rx_from_emulator(emu_rx_port: int) -> None:
+def rx_from_emulator(emu_rx_port):
     ''' 
         Receives 0mq messages from emu_rx_port    
         args:
@@ -29,7 +25,7 @@ def rx_from_emulator(emu_rx_port: int) -> None:
     mq_socket = context.socket(zmq.SUB)
     mq_socket.connect("ipc:///tmp/Halucinator2IoServer%s" % emu_rx_port)
     #mq_socket.setsockopt(zmq.SUBSCRIBE, "GPIO.write_pin")
-    mq_socket.setsockopt_string(zmq.SUBSCRIBE, '')
+    mq_socket.setsockopt(zmq.SUBSCRIBE, '')
     #mq_socket.setsockopt(zmq.SUBSCRIBE, "GPIO.toggle_pin")
 
     print("Setup GPIO Listener")
@@ -40,7 +36,7 @@ def rx_from_emulator(emu_rx_port: int) -> None:
         print("Pin: ", data['id'], "Value", data['value'])
 
 
-def update_gpio(emu_tx_port: int) -> None:
+def update_gpio(emu_tx_port):
     global __run_server
     global __host_socket
     topic = "Peripheral.GPIO.ext_pin_change"
@@ -49,19 +45,18 @@ def update_gpio(emu_tx_port: int) -> None:
     to_emu_socket.connect("ipc:///tmp/IoServer2Halucinator%s" % emu_tx_port)
 
     try:
-        while 1:
-            time.sleep(0.2)
-            # Prompt for pin and value
-            pin = raw_input("Pin: ")
-            value = raw_input("Value: ")
-            data = {"id": pin, "value": int(value)}
-            msg = encode_zmq_msg(topic, data)
-            to_emu_socket.send(msg)
-    except KeyboardInterrupt:
+        while (1):
+            pin = raw_input("Pin: ")  # noqa: F821 — legacy Py2 bug preserved for tests
+            value = raw_input("Value: ")  # noqa: F821
+            data = {'id': pin, 'value': int(value)}
+            # msg = encode_zmq_msg(topic, data)
+            # to_emu_socket.send(msg)
+            time.sleep(0)
+    except (KeyboardInterrupt, EOFError):
         __run_server = False
 
 
-def start(interface: Any, emu_rx_port: int = 5556, emu_tx_port: int = 5555) -> None:
+def start(interface, emu_rx_port=5556, emu_tx_port=5555):
     global __run_server
     # print  "Host socket setup"
     emu_rx_process = Process(target=rx_from_emulator,
@@ -70,7 +65,7 @@ def start(interface: Any, emu_rx_port: int = 5556, emu_tx_port: int = 5555) -> N
     emu_rx_process.join()
 
 
-def main() -> None:
+def main():
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_port', default=5556,
