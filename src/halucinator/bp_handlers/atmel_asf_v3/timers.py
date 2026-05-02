@@ -1,12 +1,19 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Type
+
 from ...peripheral_models.interrupts import Interrupts
 from ...peripheral_models.timer_model import TimerModel
 from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 import time
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 from collections import defaultdict
 
 import logging
@@ -16,7 +23,7 @@ log = logging.getLogger(__name__)
 
 class Timers(BPHandler, AvatarPeripheral):
 
-    def __init__(self, model=TimerModel):
+    def __init__(self, model: Type[TimerModel] = TimerModel):
         self.model = model
         self.org_lr = None
         self.current_channel = 0
@@ -55,7 +62,7 @@ class Timers(BPHandler, AvatarPeripheral):
                  (self.address + offset, size, value, hex(pc)))
         return True
 
-    def register_handler(self, qemu, addr, func_name, irq_rates=None):
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, irq_rates: Optional[Dict[str, int]] = None) -> HandlerFunction:
         '''
             irq_rate(dict): {Name: rate (in seconds)}
         '''
@@ -64,7 +71,7 @@ class Timers(BPHandler, AvatarPeripheral):
         return BPHandler.register_handler(self, qemu, addr, func_name)
 
     @bp_handler(['tc_init'])
-    def enable(self, qemu, bp_addr):
+    def enable(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Initializing %s, %s" %
                  (hex(qemu.regs.r0), hex(qemu.regs.r1)))
         for irq_name, irq_rate in list(self.irq_rates.items()):
@@ -73,7 +80,7 @@ class Timers(BPHandler, AvatarPeripheral):
         return False, None  # Just let it run
 
     @bp_handler(['_tc_interrupt_handler'])
-    def isr_handler(self, qemu, bp_addr):
+    def isr_handler(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         idx = qemu.regs.r0
         tc_instances_ptr = 0x000024E0
         tc_instances = 0x200021AC
@@ -89,5 +96,5 @@ class Timers(BPHandler, AvatarPeripheral):
         IPython.embed()
         return False, None  # Just let it run
 
-    def disable(self, irq_name):
+    def disable(self, irq_name: str) -> None:
         self.model.stop_timer(irq_name)

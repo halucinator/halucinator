@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from .ioserver import IOServer
 from .IEEE802_15_4 import IEEE802_15_4
@@ -11,7 +13,7 @@ import time
 log = logging.getLogger(__name__)
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_ports', nargs='+', default=[5556, 5558],

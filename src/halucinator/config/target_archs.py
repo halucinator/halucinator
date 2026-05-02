@@ -2,26 +2,30 @@
 Archs specifies the halucinator specific configuration needed to support various
 target architectures.
 """
+from __future__ import annotations
 
 import os
-
-import halucinator
+from typing import Any, Dict, Iterator, Optional
 
 from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
 from avatar2.archs.mips import MIPS_BE
+
+import halucinator
+
 
 _QEMU_DEFAULT_LOC = os.path.join(
     os.path.split(os.path.split(halucinator.__path__[0])[0])[0], "deps/build-qemu"
 )
 
+
 # qemu_targets imports are deferred to break the circular import cycle:
 #   qemu_targets -> bp_handlers -> hal_config -> target_archs -> qemu_targets
-def _qemu_target(name):
+def _qemu_target(name: str) -> Any:
     from halucinator import qemu_targets
     return getattr(qemu_targets, name)
 
 
-def _get_halucinator_targets():
+def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
     """Return the raw targets dict. Separated for testability."""
     return {
         "cortex-m3": {
@@ -86,40 +90,40 @@ def _get_halucinator_targets():
 class _LazyTargets:
     """Dict-like wrapper that defers loading qemu_targets until first access."""
 
-    def __init__(self):
-        self._data = None
-        self._loaded = False
+    def __init__(self) -> None:
+        self._data: Optional[Dict[str, Dict[str, Any]]] = None
+        self._loaded: bool = False
 
-    def _ensure_loaded(self):
+    def _ensure_loaded(self) -> None:
         if not self._loaded:
             self._data = _get_halucinator_targets()
             self._loaded = True
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: str) -> Any:
         self._ensure_loaded()
         return self._data[key]
 
-    def __contains__(self, key):
+    def __contains__(self, key: object) -> bool:
         self._ensure_loaded()
         return key in self._data
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         self._ensure_loaded()
         return iter(self._data)
 
-    def keys(self):
+    def keys(self) -> Any:
         self._ensure_loaded()
         return self._data.keys()
 
-    def values(self):
+    def values(self) -> Any:
         self._ensure_loaded()
         return self._data.values()
 
-    def items(self):
+    def items(self) -> Any:
         self._ensure_loaded()
         return self._data.items()
 
-    def get(self, key, default=None):
+    def get(self, key: str, default: Optional[Any] = None) -> Any:
         self._ensure_loaded()
         return self._data.get(key, default)
 
@@ -129,7 +133,7 @@ class _LazyTargets:
 HALUCINATOR_TARGETS = _LazyTargets()
 
 
-def get_backend_for_arch(arch: str, emulator: str = "avatar2"):
+def get_backend_for_arch(arch: str, emulator: str = "avatar2") -> Any:
     """
     Return a (partially-constructed) HalBackend for *arch* using *emulator*.
 

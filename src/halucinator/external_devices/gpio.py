@@ -1,21 +1,25 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 from os import sys, path
 import zmq
 from multiprocessing import Process
 import os
 import time
+from typing import Any
+
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 
 
 __run_server = True
 
 
-def rx_from_emulator(emu_rx_port):
-    ''' 
-        Receives 0mq messages from emu_rx_port    
+def rx_from_emulator(emu_rx_port: int) -> None:
+    '''
+        Receives 0mq messages from emu_rx_port
         args:
             emu_rx_port:  The port number on which to listen for messages from
                           the emulated software
@@ -36,7 +40,7 @@ def rx_from_emulator(emu_rx_port):
         print("Pin: ", data['id'], "Value", data['value'])
 
 
-def update_gpio(emu_tx_port):
+def update_gpio(emu_tx_port: int) -> None:
     global __run_server
     global __host_socket
     topic = "Peripheral.GPIO.ext_pin_change"
@@ -56,7 +60,7 @@ def update_gpio(emu_tx_port):
         __run_server = False
 
 
-def start(interface, emu_rx_port=5556, emu_tx_port=5555):
+def start(interface: Any, emu_rx_port: int = 5556, emu_tx_port: int = 5555) -> None:
     global __run_server
     # print  "Host socket setup"
     emu_rx_process = Process(target=rx_from_emulator,
@@ -65,7 +69,7 @@ def start(interface, emu_rx_port=5556, emu_tx_port=5555):
     emu_rx_process.join()
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_port', default=5556,

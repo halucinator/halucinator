@@ -1,21 +1,27 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
 from time import sleep
-from ..bp_handler import BPHandler, bp_handler
+from typing import TYPE_CHECKING, Any
+
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import struct
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 import logging
 log = logging.getLogger(__name__)
 
 
 class MbedTimer(BPHandler):
 
-    def __init__(self, impl=None):
+    def __init__(self, impl: Any = None):
         pass
 
     @bp_handler(['wait'])
-    def wait(self, qemu, bp_addr):
+    def wait(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("MBed Wait")
         param0 = qemu.regs.r0  # a floating point value
         value = struct.pack("<I", param0)

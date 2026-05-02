@@ -3,19 +3,25 @@
 # the U.S. Government retains certain rights in this software.
 
 '''Boot class handler for all things related to bootline'''
-import logging
+from __future__ import annotations
 
-from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+import logging
+from typing import TYPE_CHECKING, Optional, Tuple
+
+from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
 class Boot(BPHandler):
     '''Handles the vxworks boot string to struct and any other boot necessities'''
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.bootline = None
+        self.bootline: Optional[str] = None
 
-    def register_handler(self, qemu, addr, func_name, bootline=None):
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, bootline: Optional[str] = None) -> HandlerFunction:
         '''register the handler with halucinator, terminate boot string if needed'''
         if func_name == 'bootStringToStruct':
             if bootline is not None:
@@ -27,7 +33,7 @@ class Boot(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(['bootStringToStruct'])
-    def usr_boot_string_to_struct(self, qemu, handler):
+    def usr_boot_string_to_struct(self, qemu: "HalBackend", handler: int) -> Tuple[bool, None]:
         '''the actual bp_handler for boot string. Write the reg_arg to memory'''
         log.debug("bootStringToStruct")
         log.debug("Setting boot string to: %s" % self.bootline)

@@ -1,7 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 
+from __future__ import annotations
 
 import argparse
 import os
@@ -13,6 +14,7 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.constants import E_FLAGS
 import binascii
 import struct
+from typing import Any, Dict, IO, List, Optional, Tuple
 
 # Little endian format strings
 LE_FORMAT_STRS = {'uint32_t': '<I', "uint16_t": '<H', 'uint8_t': '<B',
@@ -23,7 +25,7 @@ BE_FORMAT_STRS = {'uint32_t': '>I', "uint16_t": '>H', 'uint8_t': '>B',
                   'int32_t': '>i', "uint16_t": '>h', 'uint8_t': '>b'}
 
 
-def sym_format(value, ty_str, is_le=True):
+def sym_format(value: Any, ty_str: str, is_le: bool = True) -> Any:
     '''
         Formats the value using the die to determine how convert to a string
         Args:
@@ -59,18 +61,18 @@ def sym_format(value, ty_str, is_le=True):
 
 class DWARFReader(object):
     # Useful DWARF Info http://dwarfstd.org/doc/Debugging%20using%20DWARF-2012.pdf
-    def __init__(self, filename):
-        self._elffile = ELFFile(filename)
-        self._dwarf = self._elffile.get_dwarf_info()
+    def __init__(self, filename: IO[bytes]) -> None:
+        self._elffile: Any = ELFFile(filename)
+        self._dwarf: Any = self._elffile.get_dwarf_info()
         self._build_offset_lut()
 
-    def _build_offset_lut(self):
+    def _build_offset_lut(self) -> None:
         '''
             Builds a LUTs for for DIE objects using the offset
         '''
-        self.offset_lut = {}
-        self.function_lut = {}
-        self.typedef_lut = {}
+        self.offset_lut: Dict[int, Any] = {}
+        self.function_lut: Dict[bytes, Any] = {}
+        self.typedef_lut: Dict[bytes, Any] = {}
         for cu in self._dwarf.iter_CUs():
             for die in cu.iter_DIEs():
                 if die.offset in self.offset_lut:
@@ -84,7 +86,7 @@ class DWARFReader(object):
                     if 'DW_AT_name' in die.attributes:
                         self.typedef_lut[die.attributes['DW_AT_name'].value] = die
 
-    def get_referenced_die(self, attr_str, die):
+    def get_referenced_die(self, attr_str: str, die: Any) -> Optional[Any]:
         try:
             attr = die.attributes[attr_str]
             offset = attr.value + die.cu.cu_offset
@@ -92,7 +94,7 @@ class DWARFReader(object):
         except KeyError:
             return None
 
-    def get_type_size(self, die):
+    def get_type_size(self, die: Any) -> int:
         if 'DW_AT_byte_size' in die.attributes:
             return die.attributes['DW_AT_byte_size'].value
         elif 'DW_AT_type' in die.attributes:
@@ -101,7 +103,7 @@ class DWARFReader(object):
         else:
             return -1
 
-    def get_type_str(self, die, str_list=None):
+    def get_type_str(self, die: Any, str_list: Optional[List[str]] = None) -> str:
         '''
             Returns a C type declaration for the type of the die passed in
         '''
@@ -153,25 +155,25 @@ class DWARFReader(object):
         #     print type_die
         #     IPython.embed()
 
-    def get_parameter_dies(self, funct_die):
+    def get_parameter_dies(self, funct_die: Any) -> List[Any]:
         params = []
         for child in funct_die.iter_children():
             if child.tag == 'DW_TAG_formal_parameter':
                 params.append(child)
         return params
 
-    def get_ret_type_str(self, funct_die):
+    def get_ret_type_str(self, funct_die: Any) -> str:
         if 'DW_AT_type' in funct_die.attributes:
             ret_type = self.get_type_str(funct_die)
         else:
             ret_type = 'void'
         return ret_type
 
-    def get_function_parameters(self, funct_die):
+    def get_function_parameters(self, funct_die: Any) -> str:
         '''
             Returns a C type declaration for the function infor passed in
 
-            args: 
+            args:
                 funct_die:  A Die for a function
         '''
         if funct_die.tag != 'DW_TAG_subprogram':
@@ -187,27 +189,27 @@ class DWARFReader(object):
         ret_type = self.get_ret_type_str(funct_die)
         return "%s %s(%s);" % (ret_type, name, ", ".join(params))
 
-    def get_function_die(self, f_name):
+    def get_function_die(self, f_name: bytes) -> Any:
         return self.function_lut[f_name]
 
-    def get_return_type_die(self, func_die):
+    def get_return_type_die(self, func_die: Any) -> None:
         return
 
-    def get_function_prototype(self, f_name):
+    def get_function_prototype(self, f_name: bytes) -> str:
         f_die = self.function_lut[f_name]
         return self.get_function_parameters(f_die)
 
-    def get_param_name(self, param_die):
+    def get_param_name(self, param_die: Any) -> Any:
         return param_die.attributes['DW_AT_name'].value
 
-    def get_typedef_desc_from_str(self, typedef_str):
+    def get_typedef_desc_from_str(self, typedef_str: bytes) -> Tuple[str, Optional[int]]:
         '''
             Prints definition of the typedef name
         '''
         tydef_die = self.typedef_lut[typedef_str]
         return self.get_typedef_desc_from_die(tydef_die)
 
-    def get_enum_str(self, enum_die):
+    def get_enum_str(self, enum_die: Any) -> str:
         member_strs = []
         for child in enum_die.iter_children():
             if child.tag == 'DW_TAG_enumerator':
@@ -216,7 +218,7 @@ class DWARFReader(object):
                 member_strs.append("%s=%s;" % (child_name, hex(value)))
         return "enum {%s}; " % (" ".join(member_strs))
 
-    def get_typedef_desc_from_die(self, tydef_die):
+    def get_typedef_desc_from_die(self, tydef_die: Any) -> Tuple[str, Optional[int]]:
         # print '='*80
         # print typedef_str
         # print tydef_die
@@ -254,7 +256,7 @@ class DWARFReader(object):
         return ret_str, size
 
 
-def main(stream=None):
+def main(stream: Optional[Any] = None) -> None:
     # parse the command-line arguments and invoke ReadElf
     argparser = argparse.ArgumentParser(
         usage='usage: %(prog)s [options] <elf-file>',

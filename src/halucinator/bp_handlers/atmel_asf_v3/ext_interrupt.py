@@ -1,20 +1,26 @@
 # Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Type
 
 from ...peripheral_models.interrupts import Interrupts
 from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 import logging
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 
 
 
 class EXT_Int(BPHandler, AvatarPeripheral):
 
-    def __init__(self, impl=Interrupts):
-        self.callbacks = {}
+    def __init__(self, impl: Type[Interrupts] = Interrupts):
+        self.callbacks: Dict[Any, Any] = {}
         self.model = impl
         self.org_lr = None
         self.current_channel = 0
@@ -28,10 +34,10 @@ class EXT_Int(BPHandler, AvatarPeripheral):
         self.read_handler[0:self.size] = self.hw_read
         self.write_handler[0:self.size] = self.hw_write
 
-    def get_mmio_info(self):
+    def get_mmio_info(self) -> Tuple[str, int, int, str]:
         return self.name, self.address, self.size, 'rw-'
 
-    def hw_read(self, offset, size, pc, **kwargs):
+    def hw_read(self, offset: int, size: int, pc: int, **kwargs: Any) -> int:
         value = 0
         if offset == 0x10:  # Set interrupt
             for channel, isr_name in list(self.channel_map.items()):
@@ -42,7 +48,7 @@ class EXT_Int(BPHandler, AvatarPeripheral):
                  (self.address + offset, size, value, hex(pc)))
         return value
 
-    def hw_write(self, offset, size, value, pc, **kwargs):
+    def hw_write(self, offset: int, size: int, value: int, pc: int, **kwargs: Any) -> bool:
         log.info("Write to addr, 0x%08x size: %i value: 0x%0x pc:%s" %
                  (self.address + offset, size, value, hex(pc)))
         if offset == 8:  # Clear interrupt
@@ -52,7 +58,7 @@ class EXT_Int(BPHandler, AvatarPeripheral):
                     self.model.clear_active(isr_name)
         return True
 
-    def register_handler(self, qemu, addr, func_name, channel_map=None):
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, channel_map: Dict[int, str] = None) -> HandlerFunction:
         # Can be called for each function registered with the class
         if channel_map is not None:
             log.info("Setting Channel map: %s" % str(channel_map))
@@ -65,7 +71,6 @@ class EXT_Int(BPHandler, AvatarPeripheral):
     #     return False, None
 
     @bp_handler(['extint_register_callback'])
-    def register_callback(self, qemu, bp_addr):
+    def register_callback(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Callback Set %s" % hex(qemu.regs.r0))
         return False, None  # Just let it run,
-

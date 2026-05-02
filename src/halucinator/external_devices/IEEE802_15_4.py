@@ -1,6 +1,8 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+
+from __future__ import annotations
 
 import binascii
 from .ioserver import IOServer
@@ -8,26 +10,31 @@ from .trigger_interrupt import SendInterrupt
 import logging
 import time
 import socket
+from typing import List, Mapping, Optional, Sequence, Union
 log = logging.getLogger(__name__)
 
 
 class IEEE802_15_4(object):
-    def __init__(self, ioservers=[]):
+    def __init__(self, ioservers: Sequence[IOServer] = []) -> None:
         '''
             args:
             ioserver:  list of ioservers to bridge together
         '''
-        self.ioservers = []
-        self.host_socket = None
+        self.ioservers: List[IOServer] = []
+        self.host_socket: Optional[socket.socket] = None
         for server in ioservers:
             self.add_server(server)
 
-    def add_server(self, ioserver):
+    def add_server(self, ioserver: IOServer) -> None:
         self.ioservers.append(ioserver)
         ioserver.register_topic('Peripheral.IEEE802_15_4.tx_frame',
                                 self.received_frame)
 
-    def received_frame(self, from_server, msg):
+    def received_frame(
+        self,
+        from_server: Optional[IOServer],
+        msg: Mapping[str, Union[int, str, bytes]],
+    ) -> None:
         for server in self.ioservers:
             if server != from_server:
                 log.info('Forwarding, msg')
@@ -36,12 +43,12 @@ class IEEE802_15_4(object):
             frame = msg['frame']
             self.host_socket.send(frame)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         for server in self.ioservers:
             server.shutdown()
 
 
-def main():
+def main() -> None:
     from argparse import ArgumentParser
     p = ArgumentParser()
     p.add_argument('-r', '--rx_ports', nargs='+', default=[5556, 5558],

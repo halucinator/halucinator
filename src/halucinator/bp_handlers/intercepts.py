@@ -5,11 +5,12 @@
 Defines the peripheral model decorators and the methods for
 working with breakpoints
 """
+from __future__ import annotations
 
 import sys
 from functools import wraps
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 import importlib
 import logging
 from .. import hal_log as hal_log_conf
@@ -25,10 +26,10 @@ hal_stats.stats["used_intercepts"] = set()
 hal_stats.stats["bypassed_funcs"] = set()
 
 # LUT to map bp to addr
-__bp_addr_lut = {}
+__bp_addr_lut: Dict[int, int] = {}
 
 
-def tx_map(per_model_funct):
+def tx_map(per_model_funct: Callable[..., None]) -> Callable:
     """
     Decorator that maps this function to the peripheral model that supports
     it. It registers the intercept and calls the
@@ -40,11 +41,11 @@ def tx_map(per_model_funct):
     """
     print("In: intercept_tx_map", per_model_funct)
 
-    def intercept_decorator(func):
+    def intercept_decorator(func: Callable[..., Tuple[bool, int, Any]]) -> Callable:
         print("In: intercept_decorator", func)
 
         @wraps(func)
-        def intercept_wrapper(self, target, bp_addr):
+        def intercept_wrapper(self: Any, target: Any, bp_addr: int) -> Tuple[bool, int]:
             bypass, ret_value, msg = func(self, target, bp_addr)
             log.debug("Values: %s", msg)
             per_model_funct(*msg)
@@ -55,7 +56,9 @@ def tx_map(per_model_funct):
     return intercept_decorator
 
 
-def rx_map(per_model_funct):
+def rx_map(
+    per_model_funct: Callable[[], Sequence[Any]]
+) -> Callable[[Callable[..., Tuple[bool, int]]], Callable]:
     """
     Decorator that maps this function to the peripheral model that supports
     it. It registers the intercept and calls the
@@ -67,11 +70,13 @@ def rx_map(per_model_funct):
     """
     print("In: intercept_rx_map", per_model_funct)
 
-    def intercept_decorator(func):
+    def intercept_decorator(
+        func: Callable[..., Tuple[bool, int]]
+    ) -> Callable:
         print("In: intercept_decorator", func)
 
         @wraps(func)
-        def intercept_wrapper(self, target, bp_addr):
+        def intercept_wrapper(self: Any, target: Any, bp_addr: int) -> Tuple[bool, int]:
             models_inputs = per_model_funct()
             return func(self, target, bp_addr, *models_inputs)
 
@@ -89,9 +94,11 @@ class BPHandlerInfo:
     handler: Callable
     run_once: bool = False
 
-    def __init__(self, addr=None, cls=None, desc="", handler=None, run_once=False,
+    def __init__(self, addr: Optional[int] = None, cls: Any = None, desc: str = "",
+                 handler: Optional[Callable] = None, run_once: bool = False,
                  # Alternative keyword names used by debugger.py
-                 address=None, bp_class=None, filename=None, bp_handler=None):
+                 address: Optional[int] = None, bp_class: Any = None,
+                 filename: Optional[str] = None, bp_handler: Optional[Callable] = None) -> None:
         self.addr = addr if addr is not None else address
         self.cls = cls if cls is not None else bp_class
         self.desc = desc if filename is None else filename
@@ -99,17 +106,17 @@ class BPHandlerInfo:
         self.run_once = run_once
 
     @property
-    def bp_class(self):
+    def bp_class(self) -> Any:
         """Alias for cls."""
         return self.cls
 
     @property
-    def address(self):
+    def address(self) -> Optional[int]:
         """Alias for addr."""
         return self.addr
 
     @property
-    def filename(self):
+    def filename(self) -> str:
         """Alias for desc (stores the config filename when set via filename= kwarg)."""
         return self.desc
 
@@ -127,11 +134,11 @@ def get_bp_handler_debug(cls_str: str, **class_args: Any) -> Any:
     return cls_obj(**class_args) if class_args else cls_obj()
 
 
-initalized_classes = {}
-bp2handler_lut = {}
-addr2bp_lut: dict = {}      # addr → bp_id (reverse of __bp_addr_lut, public)
-debugging_bps: dict = {}    # addr → bp_id for debugger-added breakpoints
-watchpoint_bps: dict = {}   # bp_id → addr for debugger-added watchpoints
+initalized_classes: Dict[Any, Any] = {}
+bp2handler_lut: Dict[int, BPHandlerInfo] = {}
+addr2bp_lut: Dict[int, int] = {}      # addr → bp_id (reverse of __bp_addr_lut, public)
+debugging_bps: Dict[int, int] = {}    # addr → bp_id for debugger-added breakpoints
+watchpoint_bps: Dict[int, int] = {}   # bp_id → addr for debugger-added watchpoints
 
 
 def check_hal_bp(pc: int) -> bool:
@@ -143,7 +150,7 @@ def check_hal_bp(pc: int) -> bool:
     return False
 
 
-def get_bp_handler(intercept):
+def get_bp_handler(intercept: Any) -> Any:
     """
     gets the bp_handler class from the config file class name.
     Instantiates it if has not been instantiated before if
@@ -171,7 +178,7 @@ def get_bp_handler(intercept):
     return bp_class
 
 
-def register_bp_handler(qemu, intercept):
+def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
     """
     Registers a BP handler for specific address
 
@@ -262,7 +269,7 @@ def register_bp_handler(qemu, intercept):
     return breakpoint_num
 
 
-def interceptor(avatar, message):  # pylint: disable=unused-argument
+def interceptor(avatar: Any, message: Any) -> None:  # pylint: disable=unused-argument
     """
     Callback for Avatar2 break point watchman.  It then dispatches to
     correct handler
@@ -302,7 +309,7 @@ def interceptor(avatar, message):  # pylint: disable=unused-argument
     target.cont()
 
 
-def remove_bp_handler(target, bp_id: int) -> bool:
+def remove_bp_handler(target: Any, bp_id: int) -> bool:
     """
     Remove a registered breakpoint handler by bp_id.
     Returns True if removed, False if bp_id was not found.

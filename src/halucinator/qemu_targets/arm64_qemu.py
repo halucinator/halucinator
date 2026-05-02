@@ -2,11 +2,16 @@
 # (NTESS). Under the terms of Contract DE-NA0003525 with NTESS,
 # the U.S. Government retains certain rights in this software.
 
+from __future__ import annotations
+
+from typing import Any, List, Optional, Tuple, Union
+
 from .arm_qemu import ARMQemuTarget
+
 
 class ARM64QemuTarget(ARMQemuTarget):
 
-    def hal_alloc(self, size):
+    def hal_alloc(self, size: int) -> Any:
 
         if size % 8:
             size += 8 - (size % 8) # keep aligned on 8 byte boundary
@@ -26,7 +31,7 @@ class ARM64QemuTarget(ARMQemuTarget):
             self.alloced_memory.add(alloced_block)
         return alloced_block
 
-    def get_arg(self, idx):
+    def get_arg(self, idx: int) -> Any:
         '''
             Gets the value for a function argument (zero indexed)
 
@@ -42,8 +47,8 @@ class ARM64QemuTarget(ARMQemuTarget):
         else:
             raise ValueError("Invalid arg index")
 
-    def set_arg(self, idx, value):
-        """Set a single function argument by index (zero-indexed, registers r0–r3 then stack)."""
+    def set_arg(self, idx: int, value: int) -> None:
+        """Set a single function argument by index (zero-indexed, registers r0-r3 then stack)."""
         if idx < 0:
             raise ValueError(f"Argument index must be non-negative, got {idx}")
         if idx < 4:
@@ -52,7 +57,7 @@ class ARM64QemuTarget(ARMQemuTarget):
             sp = self.read_register("sp")
             self.write_memory(sp + (idx - 4) * 4, 4, value)
 
-    def set_args(self, args):
+    def set_args(self, args: Any) -> int:
         '''
             Sets the value for a function argument (zero indexed)
 
@@ -72,20 +77,27 @@ class ARM64QemuTarget(ARMQemuTarget):
         self.write_register('sp', sp)
         return sp
 
-    def push_lr(self):
+    def push_lr(self) -> None:
         sp = self.read_register('sp')
         sp -= 8
         self.write_memory(sp, 8,self.read_register('lr'))
         self.write_register('sp', sp)
-    def execute_return(self, ret_value):
+
+    def execute_return(self, ret_value: int) -> None:
 
         if ret_value != None:
             # Puts ret value in r0
             self.regs.x0 = ret_value
         self.regs.pc = self.regs.x30
 
-    def call(self, callee, args=None, bp_handler_cls=None, ret_bp_handler=None,
-            debug=False):
+    def call(
+        self,
+        callee: Union[int, str],
+        args: Optional[List[Any]] = None,
+        bp_handler_cls: Union[str, Any] = None,
+        ret_bp_handler: Optional[str] = None,
+        debug: bool = False,
+    ) -> Tuple[bool, Optional[Any]]:
         '''
             Calls a function in the binary and returning to ret_bp_handler.
             Using this without side effects requires conforming to calling
@@ -170,7 +182,7 @@ class ARM64QemuTarget(ARMQemuTarget):
         return False, None
 
 
-    def write_branch(self, addr, branch_target, options=None):
+    def write_branch(self, addr: int, branch_target: int, options: Optional[Any] = None) -> None:
         '''
             Places an absolute branch at address addr to
             branch_target

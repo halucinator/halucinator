@@ -1,12 +1,18 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
+
+from typing import TYPE_CHECKING, DefaultDict, Type
 
 from ...peripheral_models.ieee802_15_4 import IEEE802_15_4
 from ..intercepts import tx_map, rx_map
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 import struct
 import binascii
 import os
@@ -25,19 +31,19 @@ IRQ_TRX_END = 1 << 3
 
 
 class RF233Radio(BPHandler):
-    def __init__(self, model=IEEE802_15_4):
+    def __init__(self, model: Type[IEEE802_15_4] = IEEE802_15_4):
         BPHandler.__init__(self)
         self.model = model
-        self.regs = defaultdict(int)
+        self.regs: DefaultDict[int, int] = defaultdict(int)
         self.model.rx_frame_isr = 20
         self.last_rx_time = time.time()
         self.buffered_frame = 0
 
-    def get_id(self, qemu):
+    def get_id(self, qemu: "HalBackend") -> str:
         return 'SAMR21Radio'
 
     @bp_handler(['rf233_send', 'trx_frame_write'])
-    def send(self, qemu, bp_addr):
+    def send(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # int rf233_send(const void *data, unsigned short len);
         log.debug("Send")
         frame = qemu.read_memory(
@@ -48,7 +54,7 @@ class RF233Radio(BPHandler):
         return True, 0
 
     @bp_handler(['trx_frame_read'])
-    def read_len(self, qemu, bp_addr):
+    def read_len(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # Actually just gets the length of the frame
         # int rf233_read(void *buf, unsigned short bufsize);
         log.debug("trx_frame_read")
@@ -63,7 +69,7 @@ class RF233Radio(BPHandler):
         return True, None
 
     @bp_handler(['trx_sram_read'])
-    def sram_read(self, qemu, bp_addr):
+    def sram_read(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.debug("Sram Read Called")
         if self.model.has_frame() is not None:
             frame = self.model.get_first_frame()
@@ -76,26 +82,26 @@ class RF233Radio(BPHandler):
         return True, None
 
     @bp_handler(['rf233_on'])
-    def on(self, qemu, bp_addr):
+    def on(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # int rf233_on(void);
         log.debug("rf233_on")
         self.model.rx_isr_enabled = True
         return True, 0
 
     @bp_handler(['rf_get_channel'])  # used
-    def get_channel(self, qemu, bp_addr):
+    def get_channel(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # int rf_get_channel(void);
         log.debug("rf_get_channel")
         return True, 0
 
     @bp_handler(['rf_set_channel'])  # used
-    def set_channel(self, qemu, bp_addr):
+    def set_channel(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # int rf_set_channel(uint8_t ch);
         log.debug("rf_set_channel")
         return True, 0
 
     @bp_handler(['SetIEEEAddr'])
-    def SetIEEEAddr(self, qemu, bp_addr):
+    def SetIEEEAddr(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # void SetIEEEAddr(uint8_t *ieee_addr);
         addr = qemu.regs.r0
         # TODO Check endian of address
@@ -104,7 +110,7 @@ class RF233Radio(BPHandler):
         return True, None
 
     @bp_handler(['trx_reg_read'])  # used
-    def trx_reg_read(self, qemu, bp_addr):
+    def trx_reg_read(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         reg = qemu.regs.r0
         log.debug("trx_reg_read")
         if reg == RF233_REG_IRQ_STATUS:
@@ -123,7 +129,7 @@ class RF233Radio(BPHandler):
         return True, ret_val
 
     @bp_handler(['trx_spi_init'])  # used
-    def trx_spi_init(self, qemu, bp_addr):
+    def trx_spi_init(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # Sets up the EXTI callback
         log.debug("trx_spi_init")
         # Set Thumb bit
@@ -135,7 +141,7 @@ class RF233Radio(BPHandler):
         return False, None
 
     @bp_handler(['trx_reg_write'])  # used
-    def trx_reg_write(self, qemu, bp_addr):
+    def trx_reg_write(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         self.regs[qemu.regs.r0] = qemu.regs.r1
         log.debug("trx_reg_write")
         return True, None

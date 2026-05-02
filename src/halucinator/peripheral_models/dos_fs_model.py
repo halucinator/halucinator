@@ -2,15 +2,17 @@
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
 '''dos_fs_model'''
+from __future__ import annotations
 
 import logging
 import os
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 
-def translate_flags( flags):
+def translate_flags(flags: int) -> int:
     '''VxWorks defines their own flag values,
     so we need to translate them to POSIX'''
     bit_flags = {0x0001: os.O_WRONLY, 0x0002: os.O_RDWR, 0x0200: os.O_CREAT}
@@ -21,7 +23,7 @@ def translate_flags( flags):
     return new_flags
 
 
-def is_mkdir( mode):
+def is_mkdir(mode: int) -> int:
     '''The VxWorks flag FSTAT_DIR indicates to create a directory'''
     return mode & 0x4000
 
@@ -44,31 +46,31 @@ class DosFsModel(object):
     st_attrib = 1
 
     @classmethod
-    def get_filename(cls, fd):
+    def get_filename(cls, fd: int) -> Optional[str]:
         ''' Returns full path of fd '''
         if fd in cls.fd_table:
             return cls.fd_table[fd]
         return None
 
     @classmethod
-    def read(cls,fd, size):
+    def read(cls, fd: int, size: int) -> bytes:
         '''read'''
         return os.read(fd, size)
 
     @classmethod
-    def write(cls,fd, buf):
+    def write(cls, fd: int, buf: bytes) -> None:
         '''write'''
         os.write(fd, buf)
 
 
     @classmethod
-    def close(cls,fd):
+    def close(cls, fd: int) -> None:
         '''close'''
         os.close( fd )
 
 
     @classmethod
-    def creat_or_open(cls, name, flags, mode):
+    def creat_or_open(cls, name: str, flags: int, mode: int) -> Tuple[bool, int]:
         '''
            Opens a file, or creates it of not present
            name: Filename
@@ -112,7 +114,7 @@ class DosFsModel(object):
         return True, 0xffffffff
 
     @classmethod
-    def delete(cls,drv,path,drive):
+    def delete(cls, drv: Any, path: str, drive: Optional[str]) -> int:
         '''delete'''
         if drive is None:
             log.debug("NO DRIVER INITALIZED")
@@ -135,17 +137,17 @@ class DosFsModel(object):
         return 0xffffffff
 
     @classmethod
-    def fio_move(cls,fd, new_path):
+    def fio_move(cls, fd: int, new_path: str) -> None:
         '''fio_move'''
         os.rename(cls.fd_table[fd], cls.localDir + new_path)
 
     @classmethod
-    def fio_time_set(cls,fd, atime, modtime):
+    def fio_time_set(cls, fd: int, atime: int, modtime: int) -> None:
         '''fio_time_set'''
         os.utime(cls.fd_table[fd], (atime, modtime))
 
     @classmethod
-    def fio_read(cls,fd):
+    def fio_read(cls, fd: int) -> int:
         '''fio_read'''
         cur = os.lseek(fd, 0,os.SEEK_CUR)
         end = os.stat(fd).st_size - 1
@@ -153,17 +155,17 @@ class DosFsModel(object):
         return rem
 
     @classmethod
-    def fio_seek(cls,fd, arg):
+    def fio_seek(cls, fd: int, arg: int) -> None:
         '''fio_seek'''
         os.lseek(fd, arg, os.SEEK_CUR)
 
     @classmethod
-    def fio_where(cls,fd):
+    def fio_where(cls, fd: int) -> int:
         '''fio_where'''
         return os.lseek(fd, 0,  os.SEEK_CUR)
 
     @classmethod
-    def fio_read_dir(cls, fd, init):
+    def fio_read_dir(cls, fd: int, init: bool) -> Optional[bytes]:
         '''fio_read_dir'''
         if init:
             cls.readdir[fd] = os.listdir(cls.fd_table[fd])
@@ -186,7 +188,7 @@ class DosFsModel(object):
         return None
 
     @classmethod
-    def fio_fstat_get(cls,fd):
+    def fio_fstat_get(cls, fd: int) -> Dict[str, Any]:
         '''fio_fstat_get'''
         #TODO:   Do value checking size checking to make sure
         # we don't try to smash incorrect sizes
@@ -209,7 +211,7 @@ class DosFsModel(object):
         return ret
 
     @classmethod
-    def fio_rename(cls,fd,new_name):
+    def fio_rename(cls, fd: int, new_name: str) -> None:
         '''fio_rename'''
         oldname = cls.fd_table[fd]
         lst = oldname.split("/")

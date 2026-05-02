@@ -3,10 +3,17 @@
 # the U.S. Government retains certain rights in this software.
 
 """Scheduler module for VxWorks"""
+from __future__ import annotations
+
 import logging
 import os
 from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +31,7 @@ class BColors(Enum):
     BOLD = "\033[1m"
 
 
-def print_task(local_log, task):
+def print_task(local_log: logging.Logger, task: Tuple[Any, ...]) -> str:
     """prints a task, assuming it went through the taskInitialize for intialization and logging"""
     (
         p_tcb,
@@ -61,7 +68,7 @@ class Scheduler(BPHandler):
 
     # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, tcb, kernel_id=0):
+    def __init__(self, tcb: int, kernel_id: int = 0) -> None:
         """
         VxWorks Scheduler Functions instrumentation
 
@@ -69,13 +76,13 @@ class Scheduler(BPHandler):
         - class
           class_args: {tcb: (address of TCB)}
         """
-        self.last_task = None
-        self.tcb = tcb
-        self.kernel_id = kernel_id
-        self.tasks = {}
-        self.task_name_counter = 0
-        self.task_filename = os.path.abspath("tmp/HALucinator/task_switch_lines.yaml")
-        self.qemu_filename = os.path.abspath("tmp/HALucinator/qemu_asm.log")
+        self.last_task: Optional[str] = None
+        self.tcb: int = tcb
+        self.kernel_id: int = kernel_id
+        self.tasks: Dict[str, Tuple[Any, ...]] = {}
+        self.task_name_counter: int = 0
+        self.task_filename: str = os.path.abspath("tmp/HALucinator/task_switch_lines.yaml")
+        self.qemu_filename: str = os.path.abspath("tmp/HALucinator/qemu_asm.log")
         self.tasks[hex(self.kernel_id)] = (
             self.kernel_id,
             "kernelTask",
@@ -93,31 +100,31 @@ class Scheduler(BPHandler):
         with open(self.task_filename, "w") as task_file:
             task_file.write("task_positions:\n")
 
-        self.task_switchcount = 0
-        self.resume_count = 0
+        self.task_switchcount: int = 0
+        self.resume_count: int = 0
 
     @bp_handler(["reschedule"])
-    def reschedule(self, qemu, bp_addr):  # pylint: disable=unused-argument,no-self-use
+    def reschedule(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """reschedule"""
         log.debug("reschedule")
         return False, None
 
     @bp_handler(["windResume"])
-    def wind_resume(self, qemu, bp_addr):  # pylint: disable=unused-argument,no-self-use
+    def wind_resume(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """wind_resume"""
         log.debug("wind_resume")
         return False, None
 
     @bp_handler(["workQDoWork"])
     def work_q_do_work(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,no-self-use
+        self, qemu: "HalBackend", bp_addr: int
+    ) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """work_q_do_work"""
         log.debug("work_q_do_work")
         return False, None
 
     @bp_handler(["taskDestroy"])
-    def task_destroy(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def task_destroy(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_destroy"""
         tid_ptr = qemu.read_memory(self.tcb, 4, 1)
         log.debug(BColors.FAIL)
@@ -130,7 +137,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch"])
-    def task_switch(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def task_switch(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch"""
         c_tcb = qemu.read_memory(self.tcb, 4, 1)
         tcb = qemu.read_memory(c_tcb, 4, 0x21)
@@ -159,7 +166,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch_v7"])
-    def task_switch_v7(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def task_switch_v7(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch for arm v7"""
         c_tcb = qemu.read_memory(self.tcb, 4, 1)
         tcb = qemu.read_memory(c_tcb, 4, 0x21)
@@ -190,8 +197,8 @@ class Scheduler(BPHandler):
         ["task_initialize"]
     )  # don't confuse with taskInit, this has 2 extra params
     def log_task_initialize(
-        self, qemu, bp_addr
-    ):  # pylint: disable=unused-argument,too-many-locals
+        self, qemu: "HalBackend", bp_addr: int
+    ) -> Tuple[bool, int]:  # pylint: disable=unused-argument,too-many-locals
         """
         Intercepted function with parameters
         STATUS taskInit
@@ -272,7 +279,7 @@ class Scheduler(BPHandler):
         return False, 0
 
     @bp_handler(["task_switch_in"])
-    def task_switch_in(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def task_switch_in(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch_in"""
         p_tcb = qemu.read_memory(self.tcb, 4, 1)
         # tcb = qemu.read_memory(p_tcb, 4, WIND_TCB_LEN)
@@ -291,7 +298,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch_out"])
-    def task_switch_out(self, qemu, bp_addr):  # pylint: disable=unused-argument
+    def task_switch_out(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """
         BP handler used to log switching out of task
         """

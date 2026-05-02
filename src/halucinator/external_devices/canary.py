@@ -3,8 +3,12 @@ This is the external device to handle the canary
 events after they are triggered by the canary peripheral
 """
 
+from __future__ import annotations
+
 import logging
 import sys
+from typing import Any, Mapping
+
 from halucinator.external_devices.ioserver import IOServer
 
 
@@ -27,7 +31,7 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: bold_red + pr_format + reset,
     }
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         log_fmt = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
@@ -44,11 +48,11 @@ class CanaryDevice:  # pylint: disable=too-few-public-methods
     events after they are triggered by the canary peripheral
     """
 
-    def __init__(self, ioserver):
-        self.ioserver = ioserver
-        topic = "Peripheral.CanaryModel.canary"
+    def __init__(self, ioserver: IOServer) -> None:
+        self.ioserver: IOServer = ioserver
+        topic: str = "Peripheral.CanaryModel.canary"
 
-        self.canary_log = logging.getLogger("Canary.Sensitive.Function")
+        self.canary_log: logging.Logger = logging.getLogger("Canary.Sensitive.Function")
 
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setLevel(logging.DEBUG)
@@ -59,8 +63,8 @@ class CanaryDevice:  # pylint: disable=too-few-public-methods
         ioserver.register_topic(topic, self.write_handler)
 
     def write_handler(
-        self, ioserver, msg
-    ):  # pylint: disable=unused-argument, no-self-use
+        self, ioserver: IOServer, msg: Mapping[str, Any]
+    ) -> None:  # pylint: disable=unused-argument, no-self-use
         """
         Prints out information about the canary and the
         function that triggered it

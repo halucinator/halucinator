@@ -1,6 +1,7 @@
 # Copyright 2019-2021 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
 # Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
 
 from halucinator.peripheral_models.peripheral import requires_tx_map, requires_rx_map, requires_interrupt_map
 from halucinator.peripheral_models import peripheral_server
@@ -12,6 +13,8 @@ import logging
 from os import sys, path
 from stat import S_ISDIR
 from errno import *
+from typing import Any, Dict, IO, Optional, Tuple, Union
+
 log = logging.getLogger(__name__)
 
 
@@ -27,7 +30,7 @@ class HostFSModel(object):
     current_dir = 1
     open_directories = {}
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialization of HostFSModel class
         """
 
@@ -38,7 +41,7 @@ class HostFSModel(object):
         except OSError:
             pass
 
-    def is_valid_path(self, path):
+    def is_valid_path(self, path: str) -> bool:
         """Helper function to verify if a file/folder is within the VFS folder or not.
 
         :param path: Relative or absolute file/folder path to check
@@ -49,7 +52,7 @@ class HostFSModel(object):
         common_prefix = os.path.commonpath([abs_path, common_prefix_verify])
         return (common_prefix == common_prefix_verify)
 
-    def is_valid_mount(self, mp):
+    def is_valid_mount(self, mp: str) -> bool:
         """Helper function to verify if a file/folder is within the VFS folder or not.
 
         :param path: Relative or absolute file/folder path to check
@@ -64,7 +67,7 @@ class HostFSModel(object):
         return False
 
     @classmethod
-    def mount(self, mount_path, fs_type):
+    def mount(self, mount_path: str, fs_type: int) -> int:
         """Mounts a specified FS type to mount_path
 
         :param mount_path: VFS mount path for filesystem
@@ -104,7 +107,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def open(self, f_path, flags):
+    def open(self, f_path: str, flags: int) -> Tuple[int, int]:
         """Opens a specified file path from VFS, with a specific open mode
 
         :param f_path: VFS file path
@@ -152,7 +155,7 @@ class HostFSModel(object):
         return (0, (self.current_fd - 1))
 
     @classmethod
-    def read(self, f_id, f_size):
+    def read(self, f_id: int, f_size: int) -> Tuple[int, bytes]:
         """Reads from a VFS file handle, with a specified size
 
         :param f_id: VFS file handle
@@ -173,7 +176,7 @@ class HostFSModel(object):
             return 0, bytes([])
 
     @classmethod
-    def write(self, f_id, f_data):
+    def write(self, f_id: int, f_data: bytes) -> int:
         """Writes to a VFS file handle, with specified data
 
         :param f_id: VFS file handle
@@ -192,7 +195,7 @@ class HostFSModel(object):
             return 0
 
     @classmethod
-    def statvfs(self, f_path):
+    def statvfs(self, f_path: str) -> os.statvfs_result:
         """Stats VFS mount information.
 
         :param f_path: VFS mount path
@@ -204,7 +207,7 @@ class HostFSModel(object):
         return os.statvfs("./vfs" + f_path)
 
     @classmethod
-    def stat(self, f_path):
+    def stat(self, f_path: str) -> Tuple[int, Optional[os.stat_result]]:
         """Stats a VFS file/directory
 
         :param f_path: VFS file/directory path
@@ -224,7 +227,7 @@ class HostFSModel(object):
             return -ENOENT, None
 
     @classmethod
-    def close(self, f_id):
+    def close(self, f_id: int) -> int:
         """Closes a VFS file handle
 
         :param f_id: VFS file handle
@@ -241,7 +244,7 @@ class HostFSModel(object):
         #wipe id to zero
 
     @classmethod
-    def seek(self, f_id, f_pos, f_whence):
+    def seek(self, f_id: int, f_pos: int, f_whence: int) -> int:
         """Seeks a VFS file handle
 
         :param f_id: VFS file handle
@@ -260,7 +263,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def unmount(self, mount_path, fs_type):
+    def unmount(self, mount_path: str, fs_type: int) -> int:
         """Unmounts a specified path
 
         :param mount_path: VFS mount path
@@ -278,7 +281,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def tell(self, f_id):
+    def tell(self, f_id: int) -> int:
         """Gets VFS file handle seek position
 
         :param f_id: VFS file handle
@@ -292,7 +295,7 @@ class HostFSModel(object):
         return self.open_files[f_id].tell()
 
     @classmethod
-    def sync(self, f_id):
+    def sync(self, f_id: int) -> int:
         """Syncs a VFS file handle (but actually it does nothing)
 
         :param f_id: VFS file handle
@@ -306,7 +309,7 @@ class HostFSModel(object):
         return 0 # self.open_files[f_id].flush()
 
     @classmethod
-    def closedir(self, d_id):
+    def closedir(self, d_id: int) -> int:
         """Closes a VFS directory handle
 
         :param d_id: VFS directory handle
@@ -320,7 +323,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def mkdir(self, d_path):
+    def mkdir(self, d_path: str) -> int:
         """Creates a VFS directory
 
         :param d_path: VFS directory path
@@ -343,7 +346,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def opendir(self, d_path):
+    def opendir(self, d_path: str) -> Tuple[int, int]:
         """Opens a VFS directory and returns a directory handle
 
         :param d_path: VFS directory path to open
@@ -366,7 +369,7 @@ class HostFSModel(object):
         return (0, (self.current_dir - 1))
 
     @classmethod
-    def readdir(self, d_id):
+    def readdir(self, d_id: int) -> Tuple[int, Optional[os.stat_result], str]:
         """Reads next information from a VFS directory handle
 
         :param d_id: VFS directory handle
@@ -389,7 +392,7 @@ class HostFSModel(object):
             return -ENOENT, None, ""
 
     @classmethod
-    def unlink(self, f_path):
+    def unlink(self, f_path: str) -> int:
         """Unlinks a VFS file/directory
 
         :param f_path: VFS file/directory path to unlink
@@ -416,7 +419,7 @@ class HostFSModel(object):
         return 0
 
     @classmethod
-    def rename(self, src, dst):
+    def rename(self, src: str, dst: str) -> int:
         """Renames a VFS file/directory. If the destination already exists
            and is valid (and contains no children, if destination is a directory),
            it will be clobbered and replaced by source file.
@@ -451,7 +454,7 @@ class HostFSModel(object):
             return -ENOTBLK
         return 0
     @classmethod
-    def truncate(self, f_id, length):
+    def truncate(self, f_id: int, length: int) -> int:
         """Truncates a VFS file handle to a specified length.
 
         :param f_id: VFS file handle

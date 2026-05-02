@@ -1,20 +1,26 @@
-# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS). 
-# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains 
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
 # certain rights in this software.
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Type
 
 from ...peripheral_models.uart import UARTPublisher
-from ..bp_handler import BPHandler, bp_handler
+from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import logging
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 
 
 class MbedUART(BPHandler):
 
-    def __init__(self, impl=UARTPublisher):
+    def __init__(self, impl: Type[UARTPublisher] = UARTPublisher):
         self.model = impl
 
     @bp_handler(['_ZN4mbed6Stream4getcEv'])
-    def getc(self, qemu, bp_addr):
+    def getc(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         param0 = qemu.regs.r0
         param1 = qemu.regs.r1
         # TODO: param0 is the 'this'pointer, use it get hw address of UART
@@ -24,7 +30,7 @@ class MbedUART(BPHandler):
         return intercept, ord(ret)
 
     @bp_handler(['_ZN4mbed6Stream4putcEv', '_ZN4mbed6Serial5_putcEi'])
-    def putc(self, qemu, bp_addr):
+    def putc(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         param0 = qemu.regs.r0
         param1 = qemu.regs.r1
         log.info("Mbed Putc")
@@ -36,7 +42,7 @@ class MbedUART(BPHandler):
         return intercept, 1
 
     @bp_handler(['_ZN4mbed6Stream4putsEPKc'])
-    def puts(self, qemu, bp_addr):
+    def puts(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Mbed Puts")
         param0 = qemu.regs.r0
         param1 = qemu.regs.r1
