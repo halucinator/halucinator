@@ -14,7 +14,7 @@ from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.uart import UARTPublisher
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class ZephyrUART(BPHandler):
         self.last_write_dev: Optional[int] = None
 
     @bp_handler(['uart_mcux_init'])
-    def mcux_init(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def mcux_init(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware UART initialization breakpoint handler
 
         :param qemu: Firmware Emulator
@@ -56,7 +56,7 @@ class ZephyrUART(BPHandler):
         return True, 0
 
     @bp_handler(['UART_GetStatusFlags'])
-    def get_statusflags(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def get_statusflags(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware handler for retrieving UART device driver status flags
 
         :param qemu: Firmware Emulator
@@ -74,7 +74,7 @@ class ZephyrUART(BPHandler):
         return True, 0x80
 
     @bp_handler(['console_getline'])
-    def handle_rx_charptr(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def handle_rx_charptr(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware handler for reading in multi-character UART input
         Reads frame out of emulated device, saves frame to memory, and returns
         memory address of frame
@@ -118,7 +118,7 @@ class ZephyrUART(BPHandler):
         return True, 0
 
     @bp_handler(['uart_mcux_poll_out'])
-    def handle_tx(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def handle_tx(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware handler for transmitting UART output
 
         :param qemu: Firmware Emulator
@@ -139,7 +139,7 @@ class ZephyrUART(BPHandler):
         return True, 0
 
     @bp_handler(['uart_mcux_poll_in'])
-    def handle_rx(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def handle_rx(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware handler for reading in single-character UART input
         Reads character out of emulated device, saves character to register
 
@@ -169,7 +169,7 @@ class ZephyrUART(BPHandler):
         return True, 0xFFFFFFFF
 
     @bp_handler(['uart_mcux_fifo_read'])
-    def handle_rx_multiple(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def handle_rx_multiple(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         """Firmware handler for reading in a set amount of characters from UART input
         Reads characters out of emulated device, saves characters to register
 
@@ -197,4 +197,3 @@ class ZephyrUART(BPHandler):
 
         # Return number of characters read
         return True, len(data)
-

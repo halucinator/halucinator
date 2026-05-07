@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
@@ -41,14 +41,14 @@ class ParameterTest(BPHandler):
         self.passed: bool = True
 
     @bp_handler(['write_int'])
-    def write_int(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def write_int(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         i = qemu.get_arg(0)
         self.states[self.state].append(i)
         log.info("Write Int: %i"% i)
         return True, None
 
     @bp_handler(['run_test'])
-    def run_test(self, qemu: HALQemuTarget, addr: int) -> Any:
+    def run_test(self, qemu: "HalBackend", addr: int) -> Any:
         '''
             This will call memory copy the first time
         '''
@@ -60,7 +60,7 @@ class ParameterTest(BPHandler):
 
 
     @bp_handler(['call_five'])
-    def call_five(self, qemu: HALQemuTarget, addr: int) -> Any:
+    def call_five(self, qemu: "HalBackend", addr: int) -> Any:
         '''
             call_five
         '''
@@ -74,7 +74,7 @@ class ParameterTest(BPHandler):
         
 
     @bp_handler(['call_ten'])
-    def call_ten(self, qemu: HALQemuTarget, addr: int) -> Any:
+    def call_ten(self, qemu: "HalBackend", addr: int) -> Any:
         '''
             call_ten
         '''
@@ -87,7 +87,7 @@ class ParameterTest(BPHandler):
         return qemu.call('ten_parameters',range(1,11), self, 'end_ten')
 
     @bp_handler(['end_ten'])
-    def end_ten(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def end_ten(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         log.info("Running Ten End")
         if self.ten_sp != qemu.regs.sp:
             log.error("Call Ten Corrupted SP: In %#x, Out %#x"%(self.ten_sp, qemu.regs.sp))
@@ -98,7 +98,7 @@ class ParameterTest(BPHandler):
         return True, None
 
     @bp_handler(['exit'])
-    def end_test(self, qemu: HALQemuTarget, addr: int) -> None:
+    def end_test(self, qemu: "HalBackend", addr: int) -> None:
         '''
             Make sure we executed everyting like we expected
         '''
@@ -122,6 +122,3 @@ class ParameterTest(BPHandler):
             print("RESULT: FAILED")
             sys.exit(-1)
             
-
-
-

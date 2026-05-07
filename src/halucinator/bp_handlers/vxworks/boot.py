@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class Boot(BPHandler):
         super().__init__()
         self.bootline: Optional[str] = None
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, bootline: Optional[str] = None) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, bootline: Optional[str] = None) -> HandlerFunction:
         '''register the handler with halucinator, terminate boot string if needed'''
         if func_name == 'bootStringToStruct':
             if bootline is not None:
@@ -33,7 +33,7 @@ class Boot(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(['bootStringToStruct'])
-    def usr_boot_string_to_struct(self, qemu: HALQemuTarget, handler: int) -> Tuple[bool, None]:
+    def usr_boot_string_to_struct(self, qemu: "HalBackend", handler: int) -> Tuple[bool, None]:
         '''the actual bp_handler for boot string. Write the reg_arg to memory'''
         log.debug("bootStringToStruct")
         log.debug("Setting boot string to: %s" % self.bootline)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from halucinator import hal_log as hal_log_conf
 log = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class HalMemConfig(object):
 
         if self.file != None:
             self.get_full_path()
-        
+
     def get_full_path(self) -> None:
         '''
             This make the file used by a memory relative to the config file
@@ -55,7 +55,7 @@ class HalMemConfig(object):
 
     def overlaps(self, other_mem: HalMemConfig) -> bool:
         '''
-            Checks to see if this memory description overlaps with 
+            Checks to see if this memory description overlaps with
             another
 
             :param (HalMemConfig) other_mem:

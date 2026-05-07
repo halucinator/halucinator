@@ -100,8 +100,8 @@ def main() -> None:
     hub.shutdown()
     # io_server.join()
 
-# Backwards-compatible alias (original GT spelling)
-ViruatalEthHub = VirtualEthHub
-
 if __name__ == '__main__':
     main()
+
+# Backwards-compatible typo alias
+ViruatalEthHub = VirtualEthHub

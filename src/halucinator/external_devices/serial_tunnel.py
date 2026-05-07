@@ -8,7 +8,7 @@ from __future__ import annotations
 import binascii
 import logging
 import sys
-from typing import IO, Any, List, Mapping, Optional, Union
+from typing import Any, Mapping, Optional
 
 import serial  # pylint: disable=import-error
 

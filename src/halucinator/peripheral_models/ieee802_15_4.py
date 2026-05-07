@@ -6,10 +6,9 @@ from __future__ import annotations
 import binascii
 import logging
 import time
-from collections import deque, defaultdict
+from collections import defaultdict, deque
+from dataclasses import asdict, dataclass
 from typing import Any, Deque, Dict, Optional, Tuple, Union
-
-from typing import TypedDict
 
 from . import peripheral_server
 # from peripheral_server import PeripheralServer, peripheral_model
@@ -21,19 +20,15 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
 
-class IEEE802_15_4Message(TypedDict):
-    frame: bytes
-
-
 # Register the pub/sub calls and methods that need mapped
 @peripheral_server.peripheral_model
 class IEEE802_15_4(object):
 
-    IRQ_NAME = '802_15_4_RX_Frame'
+    IRQ_NAME: str = '802_15_4_RX_Frame'
     frame_queue: Deque[bytes] = deque()
-    calc_crc = True
+    calc_crc: bool = True
     rx_frame_isr: Optional[int] = None
-    rx_isr_enabled = False
+    rx_isr_enabled: bool = False
     frame_time: Deque[float] = deque()  # Used to record reception time
 
     @classmethod
@@ -73,23 +68,28 @@ class IEEE802_15_4(object):
             Interrupts.trigger_interrupt(cls.rx_frame_isr,  cls.IRQ_NAME)
 
     @classmethod
-    def get_first_frame_and_time(
-        cls,
-    ) -> Tuple[Optional[bytes], Optional[float]]:
-        frame = None
-        rx_time = None
+    def get_first_frame(
+        cls, get_time: bool = False
+    ) -> Union[Optional[bytes], Tuple[Optional[bytes], Optional[float]]]:
+        frame: Optional[bytes] = None
+        rx_time: Optional[float] = None
         log.info("Checking for frame")
-        if cls.frame_queue > 0:
+        if len(cls.frame_queue) > 0:
             log.info("Returning frame")
             frame = cls.frame_queue.popleft()
             rx_time = cls.frame_time.popleft()
 
-        return frame, rx_time
+        if get_time:
+            return frame, rx_time
+        else:
+            return frame
 
     @classmethod
-    def get_first_frame(cls) -> Optional[bytes]:
-        frame, rx_time = cls.get_first_frame_and_time()
-        return frame
+    def get_first_frame_and_time(
+        cls,
+    ) -> Tuple[Optional[bytes], Optional[float]]:
+        """Return (frame, rx_time) or (None, None) if queue is empty."""
+        return cls.get_first_frame(get_time=True)
 
     @classmethod
     def has_frame(cls) -> bool:
@@ -104,3 +104,12 @@ class IEEE802_15_4(object):
         if queue:
             return len(queue), len(queue[0])
         return 0, 0
+
+
+@dataclass
+class IEEE802_15_4Message:
+    """Typed message for Peripheral.IEEE802_15_4 topics."""
+    frame: bytes
+
+    def __getitem__(self, key: str) -> Any:
+        return asdict(self)[key]

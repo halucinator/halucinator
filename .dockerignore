@@ -3,3 +3,4 @@ Dockerfile
 **/tmp/*
 deps/build-qemu*
 deps/avatar2/.git/
+deps/avatar-qemu/.git/

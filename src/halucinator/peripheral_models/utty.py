@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Deque, Dict, List, Optional, Union
 
 from . import peripheral_server
 from .interrupts import Interrupts
@@ -23,8 +23,8 @@ class UTTYInterface:
 
     def __init__(self, interface_id: Union[int, str], enabled: bool = True, irq_num: Optional[int] = None) -> None:
         self.interface_id: Union[int, str] = interface_id
-        self.rx_queue: deque[Any] = deque()
-        self.tx_queue: deque[Any] = deque()
+        self.rx_queue: Deque[Any] = deque()
+        self.tx_queue: Deque[Any] = deque()
         self.irq_num: Optional[int] = irq_num
         self.enabled: bool = enabled
         self.irq_enabled: bool = True
@@ -167,8 +167,8 @@ class UTTYModel:
     The peripheral server peripheral model for tty device
     """
 
-    interfaces = {}
-    unattached_interfaces = {}
+    interfaces: Dict[Union[int, str], UTTYInterface] = {}
+    unattached_interfaces: Dict[Union[int, str], UTTYInterface] = {}
 
     @classmethod
     def add_interface(cls, interface_id: Union[int, str], enabled: bool = True, irq_num: Optional[int] = None) -> None:

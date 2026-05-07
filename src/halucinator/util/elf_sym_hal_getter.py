@@ -17,7 +17,7 @@ except ImportError:
 from halucinator.util import hexyaml
 
 
-def load_binary(filename: str) -> cle.loader.Loader:
+def load_binary(filename: str) -> "cle.loader.Loader":
     '''
         Loads binary using angr's cle loader
     '''
@@ -27,7 +27,7 @@ def load_binary(filename: str) -> cle.loader.Loader:
     return loader
 
 
-def build_addr_to_sym_lookup(binary: str) -> Dict[int, cle.Symbol]:
+def build_addr_to_sym_lookup(binary: str) -> Dict[int, "cle.Symbol"]:
     '''
         Builds a look up table that maps an address to a function
         Lut has every address of a function in it and value is a symbol

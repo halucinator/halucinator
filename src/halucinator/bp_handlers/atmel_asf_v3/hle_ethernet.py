@@ -13,7 +13,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 import struct
 import binascii
 import os
@@ -75,14 +75,14 @@ class Ksz8851HLE(BPHandler):
         log.info("Frame : %s" % binascii.hexlify(frame[:20]))
         return ty in (SUPPORTED_TYPES)
 
-    def get_id(self, qemu: HALQemuTarget) -> str:
+    def get_id(self, qemu: "HalBackend") -> str:
         return 'ksz8851'
 
     @bp_handler(['sys_get_ms'])
-    def sys_get_ms(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def sys_get_ms(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         return True, 0
 
-    def call_populate_queues(self, qemu: HALQemuTarget) -> None:
+    def call_populate_queues(self, qemu: "HalBackend") -> None:
         '''
         This will call the ksz8851snl_rx_populate_queue
         returning to ethernetif_input
@@ -94,7 +94,7 @@ class Ksz8851HLE(BPHandler):
         qemu.regs.pc = qemu.avatar.callables['ksz8851snl_rx_populate_queue'] | 1
 
     @bp_handler(['ethernetif_input'])
-    def ethernetif_input(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def ethernetif_input(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # 1. See if there are frames
         now = time.time()
         log.info("In ETHERNET_INPUT: %f" % (now - self.last_exec_time))
@@ -159,7 +159,7 @@ class Ksz8851HLE(BPHandler):
         return True, None
 
     @bp_handler(['ksz8851snl_low_level_output'])
-    def low_level_output(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def low_level_output(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info('In low level output')
         pbuf_free = qemu.avatar.callables['pbuf_free']
         pbuf_ptr = qemu.regs.r1
@@ -183,6 +183,6 @@ class Ksz8851HLE(BPHandler):
         return True, 0
 
     @bp_handler(['ksz8851snl_init'])
-    def return_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def return_ok(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Init Called")
         return True, 0

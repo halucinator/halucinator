@@ -12,7 +12,7 @@ from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.timer_model import TimerModel
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -33,20 +33,20 @@ class SysClock(BPHandler):
         self.model: Type[TimerModel] = TimerModel
 
     @bp_handler(['sysClkEnable'])
-    def sys_clk_enable(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def sys_clk_enable(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:
         '''sys_clk_enable'''
         self.model.start_timer(self.name, self.irq_num, self.rate, self.delay)
         return False, 0
 
     @bp_handler(['sysClkRateSet'])
-    def sys_clock_rate_set(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def sys_clock_rate_set(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''sys_clock_rate_set'''
         ticks_persec = qemu.get_arg(0)
         self.rate = (1.0 / ticks_persec) * self.scale
         return False, None
 
     @bp_handler(['sysClkDisable'])
-    def sys_clk_disable(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def sys_clk_disable(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''sys_clk_disable'''
         self.model.stop_timer(self.name)
         return False, None

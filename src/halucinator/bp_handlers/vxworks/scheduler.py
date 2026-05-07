@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -104,27 +104,27 @@ class Scheduler(BPHandler):
         self.resume_count: int = 0
 
     @bp_handler(["reschedule"])
-    def reschedule(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
+    def reschedule(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """reschedule"""
         log.debug("reschedule")
         return False, None
 
     @bp_handler(["windResume"])
-    def wind_resume(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
+    def wind_resume(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """wind_resume"""
         log.debug("wind_resume")
         return False, None
 
     @bp_handler(["workQDoWork"])
     def work_q_do_work(
-        self, qemu: HALQemuTarget, bp_addr: int
+        self, qemu: "HalBackend", bp_addr: int
     ) -> Tuple[bool, None]:  # pylint: disable=unused-argument,no-self-use
         """work_q_do_work"""
         log.debug("work_q_do_work")
         return False, None
 
     @bp_handler(["taskDestroy"])
-    def task_destroy(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_destroy(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_destroy"""
         tid_ptr = qemu.read_memory(self.tcb, 4, 1)
         log.debug(BColors.FAIL)
@@ -137,7 +137,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch"])
-    def task_switch(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_switch(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch"""
         c_tcb = qemu.read_memory(self.tcb, 4, 1)
         tcb = qemu.read_memory(c_tcb, 4, 0x21)
@@ -166,7 +166,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch_v7"])
-    def task_switch_v7(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_switch_v7(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch for arm v7"""
         c_tcb = qemu.read_memory(self.tcb, 4, 1)
         tcb = qemu.read_memory(c_tcb, 4, 0x21)
@@ -197,7 +197,7 @@ class Scheduler(BPHandler):
         ["task_initialize"]
     )  # don't confuse with taskInit, this has 2 extra params
     def log_task_initialize(
-        self, qemu: HALQemuTarget, bp_addr: int
+        self, qemu: "HalBackend", bp_addr: int
     ) -> Tuple[bool, int]:  # pylint: disable=unused-argument,too-many-locals
         """
         Intercepted function with parameters
@@ -279,7 +279,7 @@ class Scheduler(BPHandler):
         return False, 0
 
     @bp_handler(["task_switch_in"])
-    def task_switch_in(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_switch_in(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """task_switch_in"""
         p_tcb = qemu.read_memory(self.tcb, 4, 1)
         # tcb = qemu.read_memory(p_tcb, 4, WIND_TCB_LEN)
@@ -298,7 +298,7 @@ class Scheduler(BPHandler):
         return False, None
 
     @bp_handler(["task_switch_out"])
-    def task_switch_out(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_switch_out(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """
         BP handler used to log switching out of task
         """

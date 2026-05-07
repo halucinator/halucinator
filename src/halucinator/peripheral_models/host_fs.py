@@ -410,8 +410,8 @@ class HostFSModel(object):
             return -ENOENT
         try:
             os.unlink("./vfs" + f_path)
-        except IsADirectoryError:
-            dir_path = "./vfs" + f_path
+        except (IsADirectoryError, PermissionError):
+            dir_path = os.path.realpath("./vfs" + f_path)
             try:
                 os.rmdir(dir_path)
             except OSError:

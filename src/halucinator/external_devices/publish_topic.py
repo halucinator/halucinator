@@ -8,13 +8,13 @@ import zmq
 from ..peripheral_models.peripheral_server import encode_zmq_msg, decode_zmq_msg
 from .ioserver import IOServer
 import logging
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Mapping, Optional
 
 log = logging.getLogger(__name__)
 
 
 class GenericPrintServer(object):
-   
+
     def __init__(self, ioserver: IOServer, subscribe_topic: Optional[str] = None) -> None:
         self.ioserver: IOServer = ioserver
         self.prev_print: Optional[str] = None
@@ -49,7 +49,7 @@ if __name__ == '__main__':
 
     import halucinator.hal_log as hal_log
     hal_log.setLogConfig()
-    
+
     io_server = IOServer(args.rx_port, args.tx_port)
     gen_server = GenericPrintServer(io_server, args.rx_topic)
 
@@ -66,7 +66,7 @@ if __name__ == '__main__':
             elif data == '':
                 break
             #d = {'id':args.id, 'data': data}
-            
+
             gen_server.send_data(args.tx_topic, args.tx_id, data)
     except KeyboardInterrupt:
         pass

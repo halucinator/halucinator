@@ -13,7 +13,7 @@ from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 import time
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 from collections import defaultdict
 
 import logging
@@ -62,7 +62,7 @@ class Timers(BPHandler, AvatarPeripheral):
                  (self.address + offset, size, value, hex(pc)))
         return True
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, irq_rates: Optional[Dict[str, int]] = None) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, irq_rates: Optional[Dict[str, int]] = None) -> HandlerFunction:
         '''
             irq_rate(dict): {Name: rate (in seconds)}
         '''
@@ -71,7 +71,7 @@ class Timers(BPHandler, AvatarPeripheral):
         return BPHandler.register_handler(self, qemu, addr, func_name)
 
     @bp_handler(['tc_init'])
-    def enable(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def enable(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Initializing %s, %s" %
                  (hex(qemu.regs.r0), hex(qemu.regs.r1)))
         for irq_name, irq_rate in list(self.irq_rates.items()):
@@ -80,7 +80,7 @@ class Timers(BPHandler, AvatarPeripheral):
         return False, None  # Just let it run
 
     @bp_handler(['_tc_interrupt_handler'])
-    def isr_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def isr_handler(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         idx = qemu.regs.r0
         tc_instances_ptr = 0x000024E0
         tc_instances = 0x200021AC

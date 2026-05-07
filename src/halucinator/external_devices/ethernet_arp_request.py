@@ -34,14 +34,15 @@ class ARPSender(object):
         self.ioserver.register_topic('Peripheral.EthernetModel.tx_frame',
                                       self.received_frame)
 
-        self.host_eth: Optional[HostEthernetServer] = None
         if host_interface is not None:
-            self.host_eth = HostEthernetServer(host_interface, False)
+            self.host_eth: Optional[HostEthernetServer] = HostEthernetServer(host_interface, False)
+        else:
+            self.host_eth = None
 
     def send_request(self, interface_id: str) -> None:
         src_mac = '00:11:22:aa:bb:cc'
         eth_frame = scapy.Ether(dst='ff:ff:ff:ff:ff:ff', src=src_mac, type=0x806)
-        arp = scapy.ARP(hwtype=0x1, ptype=0x800, hwlen=6, plen=4, op='who-has', 
+        arp = scapy.ARP(hwtype=0x1, ptype=0x800, hwlen=6, plen=4, op='who-has',
                     hwsrc=src_mac, psrc='192.168.128.120', hwdst='00:00:00:00:00:00',
                     pdst='192.168.128.100')
         eth_frame.add_payload(arp)
@@ -79,7 +80,7 @@ if __name__ == '__main__':
 
     import halucinator.hal_log as hal_log
     hal_log.setLogConfig()
-    
+
     log.setLevel(logging.DEBUG)
 
     io_server = IOServer(args.rx_port, args.tx_port)

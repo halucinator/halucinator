@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Deque, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from .arm_qemu import ARMQemuTarget
 
@@ -46,6 +46,16 @@ class ARM64QemuTarget(ARMQemuTarget):
             return self.read_memory(stack_addr, 8, 1)
         else:
             raise ValueError("Invalid arg index")
+
+    def set_arg(self, idx: int, value: int) -> None:
+        """Set a single function argument by index (zero-indexed, registers r0-r3 then stack)."""
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 4:
+            self.write_register(f"r{idx}", value)
+        else:
+            sp = self.read_register("sp")
+            self.write_memory(sp + (idx - 4) * 4, 4, value)
 
     def set_args(self, args: Any) -> int:
         '''

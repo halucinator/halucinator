@@ -10,7 +10,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import struct
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 import logging
 log = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class MbedTimer(BPHandler):
         pass
 
     @bp_handler(['wait'])
-    def wait(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wait(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("MBed Wait")
         param0 = qemu.regs.r0  # a floating point value
         value = struct.pack("<I", param0)

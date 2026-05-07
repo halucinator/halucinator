@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class Tasks(BPHandler):
         self.task_spawn_file: str = 'taskSpawn.log'
         self.task_name_counter: int = 0
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str,
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str,
                          task_spawn_file: Optional[str] = None) -> HandlerFunction:
         '''register_handler'''
         if task_spawn_file is not None:
@@ -53,7 +53,7 @@ class Tasks(BPHandler):
         return super().register_handler(qemu, addr, func_name)
 
     @bp_handler(['log_taskSpawn'])
-    def log_task_spawn(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:
+    def log_task_spawn(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:
         '''
             Intercepted function with parameters
             int taskSpawn
@@ -138,6 +138,3 @@ class Tasks(BPHandler):
 #     The taskSpawn( ) routine is built from taskActivate( ) and taskInit( ). Tasks created by taskSpawn( ) do not require explicit task activation.
 #     RETURNS
 #     OK, or ERROR if the task cannot be activated.
-
-
-

@@ -13,7 +13,7 @@ from halucinator.bp_handlers import BPHandler, bp_handler
 from halucinator.peripheral_models.interrupts import Interrupts as InterruptModel
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class Interrupts(BPHandler):
             pass
 
     @bp_handler(['IntLvlVecChk'])
-    def int_lvl_vec_chk(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def int_lvl_vec_chk(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         '''
             This is called by IntEnter
         '''
@@ -55,7 +55,7 @@ class Interrupts(BPHandler):
         return True, 0
 
     @bp_handler(['intConnect'])
-    def int_connect(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:
+    def int_connect(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:
         '''connect a C routine to a hardware interrupt'''
         caller = qemu.avatar.config.get_symbol_name(qemu.regs.lr)
         caller = caller if caller is not None else hex(qemu.regs.lr)
@@ -73,12 +73,12 @@ class Interrupts(BPHandler):
         return False, None
 
     @bp_handler(['intExit'])
-    def int_exit(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_exit(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_exit'''
         return False, None
 
     @bp_handler(['intEnable'])
-    def int_enable(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_enable(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_enable'''
         irq_num = qemu.get_arg(0)
         log.debug("int_enable: %#x ", irq_num)
@@ -86,7 +86,7 @@ class Interrupts(BPHandler):
         return False, None
 
     @bp_handler(['intDisable'])
-    def int_disable(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_disable(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_disable'''
         irq_num = qemu.get_arg(0)
         log.debug("int_disable: %#x ", irq_num)
@@ -94,7 +94,7 @@ class Interrupts(BPHandler):
         return False, None
 
     @bp_handler(['intLockLevelSet'])
-    def int_lock_level_set(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_lock_level_set(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_lock_level_set'''
         # Sets lock level that is used when intLock is called
         func_name = qemu.avatar.config.get_symbol_name(addr)
@@ -102,7 +102,7 @@ class Interrupts(BPHandler):
         return False, None
 
     @bp_handler(['intLockLevelGet'])
-    def int_lock_level_get(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_lock_level_get(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_lock_level_get'''
         # Gets current lock level
         func_name = qemu.avatar.config.get_symbol_name(addr)
@@ -111,7 +111,7 @@ class Interrupts(BPHandler):
 
 
     @bp_handler(['intLock'])
-    def int_lock(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_lock(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_lock'''
         #Disable global interrupts globally
         # On arm this is disabling the CPU's interrupts so don't
@@ -121,7 +121,7 @@ class Interrupts(BPHandler):
         return False, None
 
     @bp_handler(['intUnlock'])
-    def int_unlock(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def int_unlock(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''int_unlock'''
         #Re-enable global interrupts
         func_name = qemu.avatar.config.get_symbol_name(addr)

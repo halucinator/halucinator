@@ -12,7 +12,7 @@ def get_sp_and_entry(binary_filename: str) -> Tuple[int, int]:
     '''
     Gets the initial stack pointer and entry point from the filename
     It assumes the passed file is loaded/aliased to address 0x00000000
-    Args: 
+    Args:
         binary_filename(string):   path to file to open, assumes binary format
 
     Returns:

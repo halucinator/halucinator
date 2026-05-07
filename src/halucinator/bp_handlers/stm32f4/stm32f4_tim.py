@@ -13,7 +13,7 @@ from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 import time
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 from collections import defaultdict
 
 import logging
@@ -35,7 +35,7 @@ class STM32_TIM(BPHandler):
         self.name = 'STM32_TIM'
 
     @bp_handler(['HAL_TIM_Base_Init'])
-    def tim_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def tim_init(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -49,7 +49,7 @@ class STM32_TIM(BPHandler):
         return False, None
 
     @bp_handler(['HAL_TIM_Base_DeInit'])
-    def deinit(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def deinit(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -58,7 +58,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIM_ConfigClockSource'])
-    def config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -67,7 +67,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIMEx_MasterConfigSynchronization'])
-    def sync(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def sync(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         log.info("STM32_TIM sync, base: %#08x" % (hex(tim_base)))
@@ -75,7 +75,7 @@ class STM32_TIM(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_TIM_Base_Start_IT'])
-    def start(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def start(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
 
@@ -84,7 +84,7 @@ class STM32_TIM(BPHandler):
         return True, None  # Just let it run
 
     @bp_handler(['HAL_TIM_IRQHandler'])
-    def isr_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def isr_handler(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         log.info("TICK: Timer %#08x" % tim_base)
@@ -96,21 +96,21 @@ class STM32_TIM(BPHandler):
         return False, None
 
     @bp_handler(['HAL_TIM_Base_Stop_IT'])
-    def stop(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def stop(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         tim_obj = qemu.regs.r0
         tim_base = qemu.read_memory(tim_obj, 4, 1)
         self.model.stop_timer(hex(tim_base))
         return True, 0
 
     @bp_handler(['HAL_Delay'])
-    def sleep(self, qemu: HALQemuTarget, bp_handler: int) -> HandlerReturn:
+    def sleep(self, qemu: "HalBackend", bp_handler: int) -> HandlerReturn:
         amt = qemu.regs.r0 / 1000.0
         log.debug("sleeping for %f" % amt)
         # time.sleep(amt)
         return True, 0
 
     @bp_handler(['HAL_SYSTICK_Config'])
-    def systick_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systick_config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         #rate = qemu.regs.r0
         rate = 5
         systick_irq = 15

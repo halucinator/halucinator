@@ -11,7 +11,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 import struct
 import binascii
 import os
@@ -36,7 +36,7 @@ class SD_Card(BPHandler):
     # HAL_StatusTypeDef HAL_SD_InitCard(SD_HandleTypeDef *hsd)
     # HAL_StatusTypeDef HAL_SD_DeInit(SD_HandleTypeDef
     @bp_handler(['HAL_SD_Init', 'HAL_SD_InitCard', 'HAL_SD_DeInit'])
-    def return_hal_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def return_hal_ok(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         hw_id = self.get_hw_instance(qemu)
         SDCardModel.set_config(hw_id, None, 0x200)
         return True, 0
@@ -45,7 +45,7 @@ class SD_Card(BPHandler):
     # HAL_StatusTypeDef HAL_SD_ReadBlocks_IT(SD_HandleTypeDef *hsd, uint8_t *pData, uint32_t BlockAdd, uint32_t NumberOfBlocks)
     # HAL_StatusTypeDef HAL_SD_ReadBlocks_DMA(SD_HandleTypeDef *hsd, uint8_t *pData, uint32_t BlockAdd, uint32_t NumberOfBlocks)
     @bp_handler(['HAL_SD_ReadBlocks', 'HAL_SD_ReadBlocks_IT', 'HAL_SD_ReadBlocks_DMA'])
-    def read_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def read_blocks(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         hw_id = self.get_hw_instance(qemu)
         pdata = qemu.regs.r1
         block_addr = qemu.regs.r2
@@ -73,7 +73,7 @@ class SD_Card(BPHandler):
     # HAL_StatusTypeDef HAL_SD_WriteBlocks_IT(SD_HandleTypeDef *hsd, uint8_t *pData, uint32_t BlockAdd, uint32_t NumberOfBlocks)
     # HAL_StatusTypeDef HAL_SD_WriteBlocks_DMA(SD_HandleTypeDef *hsd, uint8_t *pData, uint32_t BlockAdd, uint32_t NumberOfBlocks)
     @bp_handler(['HAL_SD_WriteBlocks', 'HAL_SD_WriteBlocks_IT', 'HAL_SD_WriteBlocks_DMA'])
-    def write_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_blocks(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         hw_id = self.get_hw_instance(qemu)
         pdata = qemu.regs.r1
         block_addr = qemu.regs.r2
@@ -93,19 +93,19 @@ class SD_Card(BPHandler):
 
     # HAL_StatusTypeDef HAL_SD_Erase(SD_HandleTypeDef *hsd, uint32_t BlockStartAdd, uint32_t BlockEndAdd)
     @bp_handler(['HAL_SD_Erase'])
-    def erase_blocks(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def erase_blocks(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         print("SD_CARD Erase block")
         return True, 0
 
     # HAL_StatusTypeDef HAL_SD_GetCardCID(SD_HandleTypeDef *hsd, HAL_SD_CardCIDTypeDef *pCID)
     @bp_handler(['HAL_SD_Erase'])
-    def get_card_CID(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_card_CID(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         print("SD_CARD CID")
         return True, 0
 
     # HAL_StatusTypeDef HAL_SD_GetCardCSD(SD_HandleTypeDef *hsd, HAL_SD_CardCSDTypeDef *pCSD)
     @bp_handler(['HAL_SD_GetCardCSD'])
-    def get_card_CSD(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_card_CSD(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         pCSD = qemu.regs.r1
         #qemu.write_memory(DMARxFrameInfos_Addr, 1, FrameInfo, len(FrameInfo), raw=True)
         # Below is recorded value
@@ -117,7 +117,7 @@ class SD_Card(BPHandler):
 
     # HAL_StatusTypeDef HAL_SD_GetCardStatus(SD_HandleTypeDef *hsd, HAL_SD_CardStatusTypeDef *pStatus)
     @bp_handler(['HAL_SD_GetCardStatus'])
-    def get_card_status(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_card_status(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         print("SD_CARD Get Card Status")
         #pStatus = qemu.regs.r1
         # struct.pack("<")
@@ -125,7 +125,7 @@ class SD_Card(BPHandler):
 
     # HAL_StatusTypeDef HAL_SD_GetCardInfo(SD_HandleTypeDef *hsd, HAL_SD_CardInfoTypeDef *pCardInfo)
     @bp_handler(['HAL_SD_GetCardInfo'])
-    def get_card_info(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_card_info(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         pCardInfo = qemu.regs.r1
         # Data recorded from actual execution
         card_type = 1
@@ -146,13 +146,13 @@ class SD_Card(BPHandler):
 
     # HAL_StatusTypeDef HAL_SD_ConfigWideBusOperation(SD_HandleTypeDef *hsd, uint32_t WideMode)
     @bp_handler(['HAL_SD_ConfigWideBusOperation'])
-    def config_wide_bus(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def config_wide_bus(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         print("SD_CARD config bus operation")
         return True, 0
 
     # HAL_SD_CardStateTypeDef HAL_SD_GetCardState(SD_HandleTypeDef *hsd)
     @bp_handler(['HAL_SD_GetCardState'])
-    def get_card_state(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def get_card_state(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
 
         # HAL_SD_CARD_READY                  = 0x00000001U,  /*!< Card state is ready                     */
         # HAL_SD_CARD_IDENTIFICATION         = 0x00000002U,  /*!< Card is in identification state         */

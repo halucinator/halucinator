@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 from struct import unpack
-from typing import Any, Dict, List, NewType, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, NewType, Optional, Tuple, Union
 
 import yaml
 
@@ -23,6 +23,9 @@ from halucinator.config.target_archs import HALUCINATOR_TARGETS
 from halucinator.config.elf_program import ELFProgram
 from halucinator.config.memory_config import HalMemConfig
 from halucinator.config.symbols_config import HalSymbolConfig
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 
 # Openable is a NewType to distinguish file paths from other strings.
 Openable = NewType("Openable", str)
@@ -124,21 +127,11 @@ class HalInterceptConfig:
         return valid
 
     def __repr__(self) -> str:
-        if self.bp_addr is None:
-            return "(%s){symbol: %s, addr: None, class: %s, function:%s}" % (
-                self.config_file,
-                self.symbol,
-                self.cls,
-                self.function,
-            )
-        else:
-            return "(%s){symbol: %s, addr: %#x, class: %s, function:%s}" % (
-                self.config_file,
-                self.symbol,
-                self.bp_addr,
-                self.cls,
-                self.function,
-            )
+        addr_str = hex(self.bp_addr) if isinstance(self.bp_addr, int) else str(self.bp_addr)
+        return (
+            f"({self.config_file})"
+            "{" f"symbol: {self.symbol}, addr: {addr_str}, class: {self.cls}, function:{self.function}" "}"
+        )
 
 
 class HALMachineConfig:
@@ -170,13 +163,14 @@ class HALMachineConfig:
         self.gdb_arch = gdb_arch
         self.vector_base = vector_base
         self.config_file = config_file
-        self._using_default_machine = True if config_file is None else False
+        self.using_default_machine: bool = config_file is None
+        self._using_default_machine: bool = self.using_default_machine  # private alias
 
         if self.arch not in HALUCINATOR_TARGETS:
             hal_log.critical(
                 "Arch %s not supported.  Supported Archs: %s",
                 self.arch,
-                HALUCINATOR_TARGETS.keys,
+                list(HALUCINATOR_TARGETS.keys()),
             )
 
     def get_avatar_arch(self) -> Any:
@@ -187,9 +181,20 @@ class HALMachineConfig:
 
     def get_qemu_target(self) -> Any:
         """
-        Returns the QEMU Target
+        Returns the QEMU Target class (legacy avatar2 path).
         """
-        return HALUCINATOR_TARGETS[self.arch]["qemu_target"]
+        resolver = HALUCINATOR_TARGETS[self.arch]["qemu_target"]
+        return resolver() if callable(resolver) else resolver
+
+    def get_backend(self, emulator: str = "avatar2") -> "HalBackend":
+        """
+        Return a HalBackend for this machine config.
+
+        emulator: "avatar2" (default), "qemu", or "unicorn".
+        Defaults to "avatar2" so existing code is unaffected.
+        """
+        from halucinator.backends import get_backend
+        return get_backend(backend_type=emulator, arch=self.arch)
 
     def get_qemu_path(self) -> Optional[str]:
         """
@@ -231,14 +236,14 @@ class HalucinatorConfig:
 
     def __init__(self) -> None:
 
-        self.machine = HALMachineConfig()
+        self.machine: HALMachineConfig = HALMachineConfig()
         self.options: Dict[str, Any] = {}
         self.memories: Dict[str, HalMemConfig] = {}
         self.intercepts: List[HalInterceptConfig] = []
         self.watchpoints: List[Any] = []
         self.symbols: List[HalSymbolConfig] = []
         self.callables: List[Any] = []
-        self.elf_program = None
+        self.elf_program: Optional[ELFProgram] = None
 
     def add_yaml(self, yaml_filename: str) -> None:
         """
@@ -248,14 +253,9 @@ class HalucinatorConfig:
         with open(yaml_filename, "rb") as infile:
             part_config = yaml.load(infile, Loader=yaml.FullLoader)
 
-            # if empty file, don't crash, rather log and continue
-            if part_config is None:
-                log.warning(
-                    "%s is empty or could not be loaded correctly, skipping",
-                    yaml_filename,
-                )
+            if not part_config:
+                log.warning("Empty or null YAML file: %s", yaml_filename)
                 return
-
             if "machine" in part_config:
                 self._parse_machine(part_config["machine"], yaml_filename)
             if "memories" in part_config:
@@ -271,27 +271,6 @@ class HalucinatorConfig:
                 self.options.update(part_config["options"])
             if "elf_program" in part_config:
                 self._parse_elf_program(part_config["elf_program"], yaml_filename)
-
-    def reload_yaml_intercepts(self, yaml_filename: str) -> bool:
-        """
-        Reloads configuration data from a yaml file.
-        This function will delete any existing intercepts associated with yaml_filename
-        before re-reading and adding all intercepts defined in yaml_filename to
-        self.intercepts.
-        """
-        self.intercepts = [
-            i for i in self.intercepts if i.config_file != yaml_filename
-        ]
-
-        with open(yaml_filename, "rb") as infile:
-            part_config = yaml.load(infile, Loader=yaml.FullLoader)
-            if "intercepts" in part_config:
-                self._parse_intercepts(part_config["intercepts"], yaml_filename)
-
-        if not self.prepare_and_validate():
-            log.error("Config invalid")
-            return False
-        return True
 
     def add_csv_symbols(self, csv_file: str) -> None:
         """
@@ -314,7 +293,7 @@ class HalucinatorConfig:
         """
         prev_machine = self.machine
         self.machine = HALMachineConfig(filename, **machine_dict)
-        if not prev_machine._using_default_machine:
+        if not prev_machine.using_default_machine:
             hal_log.warning(
                 "Overwriting previous machine %s with %s", prev_machine, self.machine
             )
@@ -417,29 +396,30 @@ class HalucinatorConfig:
                 return sym.name
         return hex(addr)
 
+    def reload_yaml_intercepts(self, yaml_filename: str) -> List[HalInterceptConfig]:
+        """
+        Clears existing intercepts and reloads them from yaml_filename.
+        Returns the new intercept list.
+        """
+        self.intercepts = []
+        with open(yaml_filename, "rb") as infile:
+            part_config = yaml.load(infile, Loader=yaml.FullLoader)
+        if part_config and "intercepts" in part_config:
+            self._parse_intercepts(part_config["intercepts"], yaml_filename)
+        return self.intercepts
+
     def get_symbol_offset(self, addr: int) -> Optional[Tuple[str, int]]:
         """
-        Gets nearest earlier symbol and offset for address
-
-        :param addr:  Address to look up
-        :returns: Tuple of (symbol_name, offset) or None
+        Returns (symbol_name, offset) for the symbol containing addr, or None.
         """
-        nearest = None
         for sym in self.symbols:
-            if addr >= sym.addr:
-                offs = addr - sym.addr
-                if nearest is None or nearest[1] > offs:
-                    nearest = (sym.name, offs)
-        return nearest
+            if addr >= sym.addr and addr < (sym.addr + (sym.size or 0)):
+                return (sym.name, addr - sym.addr)
+        return None
 
     def get_symbol_list(self) -> List[Tuple[str, int]]:
-        """
-        Gets all symbol names as a list of (name, address) pairs.
-        """
-        s_names = []
-        for sym in self.symbols:
-            s_names.append((sym.name, sym.addr))
-        return s_names
+        """Returns list of (name, addr) tuples for all symbols."""
+        return [(sym.name, sym.addr) for sym in self.symbols]
 
     def memory_by_name(self, name: str) -> Optional[HalMemConfig]:
         """

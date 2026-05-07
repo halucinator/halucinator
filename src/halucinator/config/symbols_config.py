@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-class HalSymbolConfig:
+class HalSymbolConfig(object):
     '''
         Description of a symbol for halucinators config
     '''

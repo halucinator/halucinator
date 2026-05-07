@@ -10,7 +10,7 @@ import os
 import struct
 import yaml
 from collections import deque
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from avatar2 import Avatar, QemuTarget
 from capstone import *
@@ -167,13 +167,13 @@ class PowerPCQemuTarget(QemuTarget):
             :param idx:    Arg Index to write
             :param value:  Value for argument
         '''
-        
+
         if idx < 8:
             self.write_register((f"r{idx+3}"), value)
         else:
-            raise NotImplementedError("Writing individual stack args not " 
+            raise NotImplementedError("Writing individual stack args not "
             "implemented")
-        
+
 
     def set_args(self, args: List[int]) -> int:
         '''
@@ -225,7 +225,7 @@ class PowerPCQemuTarget(QemuTarget):
 
     def get_irq_base_addr(self) -> int:
         raise NotImplementedError
-        
+
     def irq_set_qmp(self, irq_num: int = 1) -> None:
         '''
             Set interrupt using qmp.
@@ -243,16 +243,16 @@ class PowerPCQemuTarget(QemuTarget):
             :param irq_num:  The irq number to trigger
         '''
         raise NotImplementedError
-        
+
     def irq_set_bp(self, irq_num: int = 1) -> None:
         raise NotImplementedError
-        
+
     def irq_clear_bp(self, irq_num: int) -> None:
         raise NotImplementedError
-        
+
     def irq_pulse(self, irq_num: int = 1, cpu: int = 0) -> None:
         raise NotImplementedError
-        
+
     def get_symbol_name(self, addr: int) -> str:
         """
         Get the symbol for an address
@@ -390,7 +390,7 @@ class PowerPCQemuTarget(QemuTarget):
         raise NotImplementedError
         # Need to determine if PPC can do PC relative load
         instrs = []
-        instrs.append(self.assemble("l pc, 0 (pc),")) # 
+        instrs.append(self.assemble("l pc, 0 (pc),")) #
         instrs.append(struct.pack('>I', branch_target))  # Address of callee
         instructions = b''.join(instrs)
         self.write_memory(addr, 1, instructions, len(instructions), raw=True)
@@ -502,4 +502,3 @@ class PowerPCQemuTarget(QemuTarget):
 
         os.chdir(cwd)
         return True, None
-

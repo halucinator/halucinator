@@ -5,27 +5,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict, deque
+from dataclasses import asdict as _asdict, dataclass
 from typing import Any, DefaultDict, Deque, Dict
-
-from typing_extensions import TypedDict
 
 from . import peripheral_server
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.DEBUG)
-
-
-# Note: UARTWriteMessage uses 'bytes' for chars while UARTReadMessage uses
-# 'str'. This really ought to be 'bytes', and these two TypedDicts should be
-# unified.
-class UARTWriteMessage(TypedDict):
-    id: int
-    chars: bytes
-
-
-class UARTReadMessage(TypedDict):
-    id: int
-    chars: str
 
 
 # Register the pub/sub calls and methods that need mapped
@@ -111,3 +97,21 @@ class UARTPublisher(object):
         uart_id = msg['id']
         data = msg['chars']
         cls.rx_buffers[uart_id].extend(data)
+
+
+@dataclass
+class UARTWriteMessage:
+    """Typed message for Peripheral.UARTPublisher.write topics."""
+    id: int
+    chars: bytes
+
+    def __getitem__(self, key: str) -> Any:
+        return _asdict(self)[key]
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, dict):
+            return self.id == other.get('id') and self.chars == other.get('chars')
+        return isinstance(other, UARTWriteMessage) and self.id == other.id and self.chars == other.chars
+
+    def __hash__(self) -> int:
+        return hash((self.id, self.chars))

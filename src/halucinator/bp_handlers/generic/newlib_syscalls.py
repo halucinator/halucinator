@@ -8,7 +8,7 @@ from halucinator.bp_handlers import BPHandler, bp_handler
 from halucinator import hal_log
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log: logging.Logger = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
@@ -19,7 +19,7 @@ class NewLibSysCalls(BPHandler):
     '''
 
     @bp_handler(['_write'])
-    def _write(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def _write(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:
         '''
             Just print data to the screen and return
         '''

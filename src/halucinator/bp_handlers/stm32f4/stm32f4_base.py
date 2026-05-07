@@ -13,7 +13,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import time
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 from collections import defaultdict
 
 import logging
@@ -38,32 +38,32 @@ class STM32F4_Base(BPHandler):
         self.name = 'STM32_TIM'
 
     @bp_handler(['HAL_Init'])
-    def init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def init(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("### STM32 HAL INIT ###")
         return False, None
 
     @bp_handler(['SystemInit'])
-    def systeminit(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systeminit(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("### SystemInit ###")
         return False, None
 
     @bp_handler(['SystemClock_Config'])
-    def systemclock_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systemclock_config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("SystemClock_Config called")
         return True, 0
 
     @bp_handler(['HAL_RCC_OscConfig'])
-    def rcc_osc_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def rcc_osc_config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("HAL_RCC_OscConfig called")
         return True, 0
 
     @bp_handler(['HAL_RCC_ClockConfig'])
-    def rcc_clock_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def rcc_clock_config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("HAL_RCC_ClockConfig called")
         return True, 0
 
     @bp_handler(['HAL_SYSTICK_Config'])
-    def systick_config(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systick_config(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         #rate = qemu.regs.r0
         rate = 5
         systick_irq = 15
@@ -72,13 +72,13 @@ class STM32F4_Base(BPHandler):
         return True, 0
 
     @bp_handler(['HAL_SYSTICK_CLKSourceConfig'])
-    def systick_clksourceconfig(selfself, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def systick_clksourceconfig(selfself, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         src = qemu.regs.r0
         log.info("Setting SysTick source to %#08x" % src)
         return False, None
 
     @bp_handler(['HAL_InitTick'])
-    def init_tick(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def init_tick(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         systick_rate = 10
         systick_irq = 12
         log.info("Starting SysTick on IRQ %d, rate %d" %
@@ -88,7 +88,7 @@ class STM32F4_Base(BPHandler):
         return True, 0
 
     @bp_handler(['Error_Handler'])
-    def error_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def error_handler(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         self.model.stop_timer("SysTick")
         self.model.stop_timer("0x40000400")
         import ipdb

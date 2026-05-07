@@ -12,11 +12,11 @@ from collections import deque
 import binascii
 import logging
 import struct
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from avatar2 import QemuTarget
 
-from halucinator import hal_config, hal_log
+from halucinator import hal_log
 from halucinator.bp_handlers import intercepts
 
 log = logging.getLogger(__name__)
@@ -91,6 +91,47 @@ class ARMQemuTarget(QemuTarget):
         ret_str = self.read_memory(addr, 1, max_len, raw=True)
         ret_str = ret_str.decode("latin-1")
         return ret_str.split("\x00")[0]
+
+    def read_memory_word(self, addr: int) -> int:
+        """
+        Returns the word at the given address
+
+        :param addr:  The address to dereference
+        :returns:     The value at that address (as a 4-byte int)
+        """
+        value = self.read_memory(addr, 4, 1)
+        assert isinstance(value, int)
+        return value
+
+    def read_memory_bytes(self, addr: int, size: int) -> bytes:
+        """
+        Returns bytes at the given address
+
+        :param addr:  The address to read from
+        :param size:  Number of bytes to read
+        :returns:     The bytes read
+        """
+        return self.read_memory(addr, 1, size, raw=True)
+
+    def write_memory_word(self, addr: int, value: int) -> bool:
+        """
+        Writes the given value to the given address as a 4-byte word
+
+        :param addr:  The address to write to
+        :param value: The value to write (as a 4-byte int)
+        :returns:     True on success
+        """
+        return self.write_memory(addr, 4, value, 1)
+
+    def write_memory_bytes(self, addr: int, value: bytes) -> bool:
+        """
+        Writes the given bytes to the given address
+
+        :param addr:  The address to write to
+        :param value: The bytes to write
+        :returns:     True on success
+        """
+        return self.write_memory(addr, 1, value, len(value), raw=True)
 
     def dictify(self, ignore: Optional[List[str]] = None) -> Any:
         """
@@ -172,51 +213,6 @@ class ARMQemuTarget(QemuTarget):
         else:
             self.free_scratch_memory(merged_block)
 
-    def get_registers(self) -> Set[str]:
-        """
-        Returns the set of available register names
-        """
-        return self.regs._get_names()
-
-    def read_memory_word(self, addr: int) -> int:
-        """
-        Returns the word at the given address
-
-        :param addr:  The address to dereference
-        :returns:     The value at that address (as a 4-byte int)
-        """
-        return self.read_memory(addr, 4, 1)
-
-    def read_memory_bytes(self, addr: int, size: int) -> bytes:
-        """
-        Returns bytes at the given address
-
-        :param addr:  The address to read from
-        :param size:  Number of bytes to read
-        :returns:     The bytes read
-        """
-        return self.read_memory(addr, 1, size, raw=True)
-
-    def write_memory_word(self, addr: int, value: int) -> bool:
-        """
-        Writes the given value to the given address as a 4-byte word
-
-        :param addr:  The address to write to
-        :param value: The value to write (as a 4-byte int)
-        :returns:     True on success
-        """
-        return self.write_memory(addr, 4, value)
-
-    def write_memory_bytes(self, addr: int, value: bytes) -> bool:
-        """
-        Writes the given bytes to the given address
-
-        :param addr:  The address to write to
-        :param value: The bytes to write
-        :returns:     True on success
-        """
-        return self.write_memory(addr, 1, value, len(value), raw=True)
-
     def get_arg(self, idx: int) -> int:
         """
         Gets the value for a function argument (zero indexed)
@@ -232,22 +228,6 @@ class ARMQemuTarget(QemuTarget):
             stack_addr = sp + (idx - 4) * 4
             return self.read_memory(stack_addr, 4, 1)
         raise ValueError("Invalid arg index")
-
-    def set_arg(self, idx: int, value: int) -> None:
-        """
-        Sets the value for a single function argument (zero indexed)
-
-        :param idx      The argument index to set
-        :param value    Value to set the argument to
-        """
-        if 0 <= idx < 4:
-            self.write_register(f"r{idx}", value)
-        elif idx >= 4:
-            sp = self.read_register("sp")
-            stack_addr = sp + (idx - 4) * 4
-            self.write_memory(stack_addr, 4, value)
-        else:
-            raise ValueError(f"Invalid arg index: {idx}")
 
     def set_args(self, args: List[int]) -> int:
         """
@@ -472,6 +452,7 @@ class ARMQemuTarget(QemuTarget):
             "addr": addr,
             "watchpoint": watchpoint,
         }
+        from halucinator import hal_config
         intercept_config = hal_config.HalInterceptConfig(__file__, **config)
         return intercepts.register_bp_handler(self, intercept_config)
 

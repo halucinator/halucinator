@@ -8,16 +8,14 @@ working with breakpoints
 from __future__ import annotations
 
 import sys
-import time
-from dataclasses import dataclass
 from functools import wraps
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 import importlib
 import logging
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
-
 from .. import hal_log as hal_log_conf
 from .. import hal_stats
-from ..hal_config import HalInterceptConfig
+from ..hal_config import HalInterceptConfig  # re-exported for convenience
 
 log = logging.getLogger(__name__)
 
@@ -27,37 +25,11 @@ hal_log = hal_log_conf.getHalLogger()
 hal_stats.stats["used_intercepts"] = set()
 hal_stats.stats["bypassed_funcs"] = set()
 
-# The following indicates whether a debugging session is active
-debug_session = False
-
-# This variable is used to resolve a race condition, specifically ensuring that
-#  the debugger can identify the HAL breakpoint before the return gets executed
-emulation_detected = False
-
-# When True, intercept handler resumes execution after running (transparent
-# HAL emulation, default for non-debugged runs and 'continue through HAL').
-# When False (set by debugger step/next/etc.), the intercept handler signals
-# emulation_complete=True and lets the debugger transition to stopped state.
-pass_breakpoint = True
-
-# Set by intercept handler when it finishes; debugger.monitor_emulating polls
-# this flag to know when the HAL handler is done so it can fire HAL_BP callback.
-emulation_complete = False
-
 # LUT to map bp to addr
-__bp_addr_lut = {}
+__bp_addr_lut: Dict[int, int] = {}
 
 
-@dataclass
-class BPHandlerInfo:
-    address: int
-    bp_class: Any
-    filename: str
-    bp_handler: Any
-    run_once: bool
-
-
-def tx_map(per_model_funct: Callable[[Any], None]) -> Callable:
+def tx_map(per_model_funct: Callable[..., None]) -> Callable:
     """
     Decorator that maps this function to the peripheral model that supports
     it. It registers the intercept and calls the
@@ -113,17 +85,67 @@ def rx_map(
     return intercept_decorator
 
 
+@dataclass
+class BPHandlerInfo:
+    """Structured record stored in bp2handler_lut for each registered breakpoint."""
+    addr: int
+    cls: Any          # handler class instance
+    desc: str
+    handler: Callable
+    run_once: bool = False
+
+    def __init__(self, addr: Optional[int] = None, cls: Any = None, desc: str = "",
+                 handler: Optional[Callable] = None, run_once: bool = False,
+                 # Alternative keyword names used by debugger.py
+                 address: Optional[int] = None, bp_class: Any = None,
+                 filename: Optional[str] = None, bp_handler: Optional[Callable] = None) -> None:
+        self.addr = addr if addr is not None else address
+        self.cls = cls if cls is not None else bp_class
+        self.desc = desc if filename is None else filename
+        self.handler = handler if handler is not None else bp_handler
+        self.run_once = run_once
+
+    @property
+    def bp_class(self) -> Any:
+        """Alias for cls."""
+        return self.cls
+
+    @property
+    def address(self) -> Optional[int]:
+        """Alias for addr."""
+        return self.addr
+
+    @property
+    def filename(self) -> str:
+        """Alias for desc (stores the config filename when set via filename= kwarg)."""
+        return self.desc
+
+
+def get_bp_handler_debug(cls_str: str, **class_args: Any) -> Any:
+    """
+    Instantiate a bp_handler class by dotted string name, forwarding class_args.
+    Used by the debugger to create handlers dynamically.
+    """
+    split_str = cls_str.split(".")
+    module_str = ".".join(split_str[:-1])
+    class_str = split_str[-1]
+    module = importlib.import_module(module_str)
+    cls_obj = getattr(module, class_str)
+    return cls_obj(**class_args) if class_args else cls_obj()
+
+
 initalized_classes: Dict[Any, Any] = {}
 bp2handler_lut: Dict[int, BPHandlerInfo] = {}
-debugging_bps: Dict[int, int] = {}
-watchpoint_bps: Dict[int, int] = {}
-addr2bp_lut: Dict[int, int] = {}
+addr2bp_lut: Dict[int, int] = {}      # addr → bp_id (reverse of __bp_addr_lut, public)
+debugging_bps: Dict[int, int] = {}    # addr → bp_id for debugger-added breakpoints
+watchpoint_bps: Dict[int, int] = {}   # bp_id → addr for debugger-added watchpoints
 
 
 def check_hal_bp(pc: int) -> bool:
-    """Check if pc is at a HAL intercept address."""
-    for info in bp2handler_lut.values():
-        if info.address == pc:
+    """Return True if pc is the address of any registered halucinator breakpoint."""
+    for entry in bp2handler_lut.values():
+        addr = entry.addr if isinstance(entry, BPHandlerInfo) else (entry[0] if entry else None)
+        if addr == pc:
             return True
     return False
 
@@ -154,62 +176,6 @@ def get_bp_handler(intercept: Any) -> Any:
             bp_class = cls_obj()
         initalized_classes[cls_obj] = bp_class
     return bp_class
-
-
-def get_bp_handler_debug(cls: str, **class_args: Any) -> Any:
-    """
-    Gets or creates a bp_handler class from a class path string.
-    Intended for use in debug/shell sessions.
-
-    :param cls: Full class path string (e.g. 'halucinator.bp_handlers.generic.debug.IPythonShell')
-    :param class_args: Keyword arguments to pass to the class constructor
-    """
-    split_str = cls.split(".")
-    module_str = ".".join(split_str[:-1])
-    class_str = split_str[-1]
-
-    log.debug(
-        "Finding handler %s in module %s with arguments %s",
-        class_str,
-        module_str,
-        class_args,
-    )
-
-    module = importlib.import_module(module_str)
-    cls_obj = getattr(module, class_str)
-
-    if cls_obj in initalized_classes:
-        return initalized_classes[cls_obj]
-
-    bp_class = cls_obj(**class_args)
-    initalized_classes[cls_obj] = bp_class
-    return bp_class
-
-
-def remove_bp_handler(qemu: Any, bp: int) -> bool:
-    """
-    Removes a breakpoint handler
-
-    :param qemu:  Avatar qemu target
-    :param bp:    The breakpoint number to remove
-    :returns:     True on success, False otherwise
-    """
-    if bp not in bp2handler_lut:
-        return False
-
-    bp_info = bp2handler_lut[bp]
-    if bp_info.address in addr2bp_lut:
-        del addr2bp_lut[bp_info.address]
-    if bp in __bp_addr_lut:
-        del __bp_addr_lut[bp]
-    del bp2handler_lut[bp]
-
-    if bp in hal_stats.stats:
-        hal_stats.stats[bp]["active"] = False
-        hal_stats.stats[bp]["removed"] = True
-
-    success = qemu.remove_breakpoint(bp)
-    return success if success is not None else False
 
 
 def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
@@ -280,13 +246,6 @@ def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
     else:
         breakpoint_num = qemu.set_breakpoint(intercept.bp_addr, temporary=bp_temp)
 
-    # Check for duplicate address and remove old handler if present
-    if addr2bp_lut.get(intercept.bp_addr) is not None:
-        log.warning(
-            "Multiple intercepts defined for address: %s", hex(intercept.bp_addr)
-        )
-        remove_bp_handler(qemu, addr2bp_lut[intercept.bp_addr])
-
     hal_stats.stats[breakpoint_num] = {
         "function": intercept.function,
         "desc": str(intercept),
@@ -298,14 +257,14 @@ def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
     }
 
     __bp_addr_lut[breakpoint_num] = intercept.bp_addr
+    addr2bp_lut[intercept.bp_addr] = breakpoint_num
     bp2handler_lut[breakpoint_num] = BPHandlerInfo(
-        address=intercept.bp_addr,
-        bp_class=bp_cls,
-        filename=getattr(intercept, 'config_file', ''),
-        bp_handler=handler,
+        addr=intercept.bp_addr,
+        cls=bp_cls,
+        desc=intercept.config_file if intercept.config_file is not None else str(intercept),
+        handler=handler,
         run_once=bp_temp,
     )
-    addr2bp_lut[intercept.bp_addr] = breakpoint_num
     log.info("BP is %i", breakpoint_num)
     return breakpoint_num
 
@@ -315,67 +274,58 @@ def interceptor(avatar: Any, message: Any) -> None:  # pylint: disable=unused-ar
     Callback for Avatar2 break point watchman.  It then dispatches to
     correct handler
     """
+    # HERE
     if message.__class__.__name__ == "WatchpointHitMessage":
         breakpoint_num = int(message.watchpoint_number)
     else:
         breakpoint_num = int(message.breakpoint_number)
     target = message.origin
-    pc = target.regs.pc & 0xFFFFFFFE  # Clear Thumb bit
 
-    if breakpoint_num not in bp2handler_lut:
-        # No HAL handler — this is a user-set debug breakpoint.
-        # The Debugger's monitor_running will detect the stopped target,
-        # match the PC against debugging_bps, and fire DEBUG_BP callback.
-        log.debug("BP %i is a debug breakpoint (no HAL handler)", breakpoint_num)
-        return
+    prog_counter = target.regs.pc & 0xFFFFFFFE  # Clear Thumb bit; this is passed as bp_addr to handlers
 
-    bp_info = bp2handler_lut[breakpoint_num]
-
-    if bp_info.run_once:
-        hal_stats.stats[breakpoint_num]["active"] = False
-        hal_stats.stats[breakpoint_num]["ran_once"] = True
-        del bp2handler_lut[breakpoint_num]
-
-    hal_stats.stats[breakpoint_num]["count"] += 1
-    hal_stats.write_on_update(
-        "used_intercepts", hal_stats.stats[breakpoint_num]["function"]
-    )
-
-    log.debug(
-        "Breakpoint Number %s encountered at address %s. running method %s",
-        breakpoint_num,
-        pc,
-        bp_info.bp_handler,
-    )
     try:
-        intercept_result, ret_value = bp_info.bp_handler(
-            bp_info.bp_class, target, pc
+        bp_info = bp2handler_lut[breakpoint_num]
+        cls, method = bp_info.cls, bp_info.handler
+        hal_stats.stats[breakpoint_num]["count"] += 1
+        hal_stats.write_on_update(
+            "used_intercepts", hal_stats.stats[breakpoint_num]["function"]
         )
+    except KeyError:
+        log.info("BP Has no handler")
+        return
+    # print method
+    try:
+        intercept, ret_value = method(cls, target, prog_counter)
 
-        if intercept_result:
+        if intercept:
             hal_stats.write_on_update(
                 "bypassed_funcs", hal_stats.stats[breakpoint_num]["function"]
             )
     except Exception as err:
-        log.exception("Error executing handler %s", repr(bp_info.bp_handler))
+        log.exception("Error executing handler %s", repr(method))
         raise err
-
-    global emulation_detected, emulation_complete
-    if intercept_result:
-        if debug_session:
-            while not emulation_detected:
-                time.sleep(0.0001)
+    if intercept:
         target.execute_return(ret_value)
-        emulation_detected = False
-
-    # Always resume execution after a HAL intercept. The HAL intercept system
-    # is designed to be transparent — handler runs, returns a value, execution
-    # continues. This means stepping into a HAL function won't pause inside it;
-    # the user will land after the call. That's a known limitation when
-    # debugging halucinator-emulated firmware (HAL functions are stubbed out
-    # at runtime, so there's nothing to step through).
-    #
-    # Set emulation_complete in case monitor_emulating caught a brief stopped
-    # state — without this it loops forever.
-    emulation_complete = True
     target.cont()
+
+
+def remove_bp_handler(target: Any, bp_id: int) -> bool:
+    """
+    Remove a registered breakpoint handler by bp_id.
+    Returns True if removed, False if bp_id was not found.
+    """
+    if bp_id not in bp2handler_lut:
+        return False
+    entry = bp2handler_lut.pop(bp_id)
+    # Remove from private lut (if registered via register_bp_handler)
+    __bp_addr_lut.pop(bp_id, None)
+    # Remove from public addr2bp_lut using the entry's address
+    addr = entry.addr if isinstance(entry, BPHandlerInfo) else None
+    if addr is not None:
+        addr2bp_lut.pop(addr, None)
+    # Update stats to mark as removed rather than deleting the entry
+    if bp_id in hal_stats.stats:
+        hal_stats.stats[bp_id]["active"] = False
+        hal_stats.stats[bp_id]["removed"] = True
+    target.remove_breakpoint(bp_id)
+    return True

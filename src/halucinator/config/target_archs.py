@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
 from avatar2.archs.mips import MIPS_BE
+
 import halucinator
 
 
@@ -17,21 +18,19 @@ _QEMU_DEFAULT_LOC = os.path.join(
 )
 
 
-def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
-    """Lazily import qemu_targets to avoid circular import."""
-    from halucinator.qemu_targets import (
-        ARMQemuTarget,
-        ARMv7mQemuTarget,
-        ARM64QemuTarget,
-        MIPSQemuTarget,
-        PowerPCQemuTarget,
-        PowerPC64QemuTarget,
-    )
+# qemu_targets imports are deferred to break the circular import cycle:
+#   qemu_targets -> bp_handlers -> hal_config -> target_archs -> qemu_targets
+def _qemu_target(name: str) -> Any:
+    from halucinator import qemu_targets
+    return getattr(qemu_targets, name)
 
+
+def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
+    """Return the raw targets dict. Separated for testability."""
     return {
         "cortex-m3": {
             "avatar_arch": ARM_CORTEX_M3,
-            "qemu_target": ARMv7mQemuTarget,
+            "qemu_target": lambda: _qemu_target("ARMv7mQemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_ARM",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "arm-softmmu/qemu-system-arm"
@@ -39,7 +38,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "arm": {
             "avatar_arch": ARM,
-            "qemu_target": ARMQemuTarget,
+            "qemu_target": lambda: _qemu_target("ARMQemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_ARM",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "arm-softmmu/qemu-system-arm"
@@ -47,7 +46,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "arm64": {
             "avatar_arch": ARM64,
-            "qemu_target": ARM64QemuTarget,
+            "qemu_target": lambda: _qemu_target("ARM64QemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_ARM64",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "aarch64-softmmu/qemu-system-aarch64"
@@ -55,7 +54,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "mips": {
             "avatar_arch": MIPS_BE,
-            "qemu_target": MIPSQemuTarget,
+            "qemu_target": lambda: _qemu_target("MIPSQemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_MIPS",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "mips-softmmu/qemu-system-mips"
@@ -63,7 +62,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "powerpc": {
             "avatar_arch": PPC32,
-            "qemu_target": PowerPCQemuTarget,
+            "qemu_target": lambda: _qemu_target("PowerPCQemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_PPC",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "ppc-softmmu/qemu-system-ppc"
@@ -71,7 +70,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "powerpc:MPC8XX": {
             "avatar_arch": PPC_MPC8544DS,
-            "qemu_target": PowerPCQemuTarget,
+            "qemu_target": lambda: _qemu_target("PowerPCQemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_PPC",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "ppc-softmmu/qemu-system-ppc"
@@ -79,7 +78,7 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
         },
         "ppc64": {
             "avatar_arch": PPC64,
-            "qemu_target": PowerPC64QemuTarget,
+            "qemu_target": lambda: _qemu_target("PowerPC64QemuTarget"),
             "qemu_env_var": "HALUCINATOR_QEMU_PPC64",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "ppc64-softmmu/qemu-system-ppc64"
@@ -88,42 +87,60 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
     }
 
 
-# Lazy proxy: populated on first access
-class _LazyTargets(dict):  # type: ignore[type-arg]
-    _loaded: bool = False
+class _LazyTargets:
+    """Dict-like wrapper that defers loading qemu_targets until first access."""
+
+    def __init__(self) -> None:
+        self._data: Optional[Dict[str, Dict[str, Any]]] = None
+        self._loaded: bool = False
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:
+            self._data = _get_halucinator_targets()
             self._loaded = True
-            self.update(_get_halucinator_targets())
 
     def __getitem__(self, key: str) -> Any:
         self._ensure_loaded()
-        return super().__getitem__(key)
+        return self._data[key]
 
     def __contains__(self, key: object) -> bool:
         self._ensure_loaded()
-        return super().__contains__(key)
+        return key in self._data
 
     def __iter__(self) -> Iterator[str]:
         self._ensure_loaded()
-        return super().__iter__()
+        return iter(self._data)
 
     def keys(self) -> Any:
         self._ensure_loaded()
-        return super().keys()
+        return self._data.keys()
 
     def values(self) -> Any:
         self._ensure_loaded()
-        return super().values()
+        return self._data.values()
 
     def items(self) -> Any:
         self._ensure_loaded()
-        return super().items()
+        return self._data.items()
 
     def get(self, key: str, default: Optional[Any] = None) -> Any:
         self._ensure_loaded()
-        return super().get(key, default)
+        return self._data.get(key, default)
 
 
+## To add a target to HALUCINATOR register it here — backed by _LazyTargets
+## so qemu_targets classes are only imported when actually needed.
 HALUCINATOR_TARGETS = _LazyTargets()
+
+
+def get_backend_for_arch(arch: str, emulator: str = "avatar2") -> Any:
+    """
+    Return a (partially-constructed) HalBackend for *arch* using *emulator*.
+
+    emulator:
+        "avatar2"  — Avatar2Backend wrapping the arch-specific QemuTarget
+        "qemu"     — direct QEMUBackend (arch-agnostic for now)
+        "unicorn"  — UnicornBackend
+    """
+    from halucinator.backends import get_backend
+    return get_backend(backend_type=emulator, arch=arch)

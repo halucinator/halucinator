@@ -48,18 +48,20 @@ class TimerModel(object):
 class TimerIRQ(Thread):
     def __init__(self, event: Event, irq_name: str, irq_num: int, rate: float, delay: int = 0) -> None:
         Thread.__init__(self)
-        self.stopped = event
-        self.name = irq_name
-        self.irq_num = irq_num
-        self.rate = rate
-        self.delay = delay
+        self.stopped: Event = event
+        self.name: str = irq_name
+        self.irq_num: int = irq_num
+        self.rate: float = rate
+        self.delay: int = delay
 
     def run(self) -> None:
         if self.delay:
             #delay for self.delay seconds before triggering
             time.sleep(self.delay)
             self.delay = 0
+        Interrupts.enabled[self.irq_num] = True
         while not self.stopped.wait(self.rate):
-            log.info("Sending IRQ: %s" % self.irq_num)
-            Interrupts.set_active(self.name)
-            Interrupts.trigger_interrupt(self.irq_num)
+            log.info("Sending IRQ: %s" % hex(self.irq_num))
+            Interrupts.Active_Interrupts[self.name] = True
+            Interrupts.set_active_qmp(self.irq_num)
+            # call a function

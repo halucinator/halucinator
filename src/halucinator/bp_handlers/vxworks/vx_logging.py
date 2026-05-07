@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class VxLogging(BPHandler):
             raise TypeError('Unsupported format string type: %s' % arg_type)
 
     @bp_handler(['_applog'])
-    def app_log(self, qemu: HALQemuTarget, addr: int) -> None:
+    def app_log(self, qemu: "HalBackend", addr: int) -> None:
         '''app_log'''
         #TODO:  Figure out var args passing
         # prototype is (uint, char*, uint, char*, ...)
@@ -81,7 +81,7 @@ class VxLogging(BPHandler):
         log.info("AppLog: %#x, %s, %x, %s"%(app_log_id,logger_str, flags, fmt_str))
 
     @bp_handler(['logMsg'])
-    def log_msg(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, None]:
+    def log_msg(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
         '''log_msg'''
         #TODO Implement this
         self.log_msg_ptr = qemu.get_arg(0)

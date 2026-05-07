@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ class Libc6(BPHandler):
     """This class holds generic libc functionality, such as printf and puts"""
 
     @bp_handler(["puts"])
-    def puts(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:  # pylint: disable=no-self-use,unused-argument
+    def puts(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:  # pylint: disable=no-self-use,unused-argument
         """int puts(const char *str)"""
         log.debug("puts 0x%08x", addr)
         print_string = qemu.read_string(qemu.get_arg(0))
@@ -25,7 +25,7 @@ class Libc6(BPHandler):
         return True, 1
 
     @bp_handler(["printf"])
-    def printf(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=no-self-use,unused-argument
+    def printf(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=no-self-use,unused-argument
         """int printf(const char *format, ...)
         handles most formats, but we don't do anything special
         for length or for the n. The n should never have been created"""
@@ -78,7 +78,7 @@ class Libc6(BPHandler):
 
     @bp_handler(["exit"])
     def halucinator_exit(
-        self, qemu: HALQemuTarget, addr: int
+        self, qemu: "HalBackend", addr: int
     ) -> Tuple[bool, None]:  # pylint: disable=no-self-use,unused-argument
         """
         Exits Halucinator when exit is called returning the

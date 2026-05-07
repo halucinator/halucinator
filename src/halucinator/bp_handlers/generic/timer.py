@@ -14,7 +14,7 @@ import time
 import logging
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 # log.setLevel(logging.DEBUG)
 # sys.path.insert(0,path.dirname(path.dirname(path.abspath(__file__))))
@@ -34,7 +34,7 @@ class Timer(BPHandler):
         self.start_time: Dict[int, float] = {}
         self.scale: Dict[int, int] = {}
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, scale: int = 1) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, scale: int = 1) -> HandlerFunction:
         '''
 
         '''
@@ -44,7 +44,7 @@ class Timer(BPHandler):
         return cast(HandlerFunction, Timer.get_value)
 
     @bp_handler
-    def get_value(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def get_value(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:
         '''
             Gets the current timer value
         '''

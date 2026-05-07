@@ -47,7 +47,7 @@ class SDCardModel(object):
     @classmethod
     def read_block(cls, sd_id: int, block_num: int) -> bytes:
         '''
-            Reads data from the file, and returns the data if possible 
+            Reads data from the file, and returns the data if possible
             return None
         '''
         data = None
@@ -62,7 +62,7 @@ class SDCardModel(object):
     @requires_tx_map
     def write_block(cls, sd_id: int, block_num: int, data: bytes) -> bool:
         '''
-            Writes the data to a file, and returns True if no errors else 
+            Writes the data to a file, and returns True if no errors else
             return False
         '''
         filename = cls.get_filename(sd_id)

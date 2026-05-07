@@ -15,7 +15,7 @@ import logging
 from ... import hal_log
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
@@ -38,7 +38,7 @@ class ArgumentLogger(BPHandler):
             self.fd = open(filename, 'wt')
         self.loggers: Dict[int, ArgumentLogger.Logger] = {}
 
-    def register_handler(self, target: HALQemuTarget, addr: int, func_name: str,
+    def register_handler(self, target: "HalBackend", addr: int, func_name: str,
                          num_args: int = 0,
                          log_ret_addr: bool = True, intercept: bool = False,
                          ret_value: Optional[int] = None,
@@ -60,7 +60,7 @@ class ArgumentLogger(BPHandler):
         return cast(HandlerFunction, ArgumentLogger.log_handler)
 
     class Logger():
-        def __init__(self, target: HALQemuTarget, func_name: str, num_args: int,
+        def __init__(self, target: "HalBackend", func_name: str, num_args: int,
                      log_caller: bool, intercept: bool, ret_value: Optional[int], silent: bool):
             self.func_name = func_name
             self.num_args = num_args
@@ -81,13 +81,10 @@ class ArgumentLogger(BPHandler):
                 hal_log.info("Return addr: %#x" % self.target.get_ret_addr())
 
     @bp_handler  # bp_handler no args, can intercept any function
-    def log_handler(self, target: HALQemuTarget, addr: int) -> HandlerReturn:
+    def log_handler(self, target: "HalBackend", addr: int) -> HandlerReturn:
         logger = self.loggers[addr]
         if not logger.silent:
             logger.log()
         if logger.intercept:
             return True, logger.ret_value
         return False, None
-
-
-

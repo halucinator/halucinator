@@ -22,7 +22,7 @@ class GPIO(object):
     @peripheral_server.tx_msg
     def write_pin(cls, gpio_id: str, value: int) -> Dict[str, Any]:
         '''
-            Creates the message that peripheral_server.tx_msg will send on this 
+            Creates the message that peripheral_server.tx_msg will send on this
             event
         '''
         GPIO.gpio_state[gpio_id] = value
@@ -34,7 +34,7 @@ class GPIO(object):
     @peripheral_server.tx_msg
     def toggle_pin(cls, gpio_id: str) -> Dict[str, Any]:
         '''
-            Creates the message that Peripheral.tx_msga will send on this 
+            Creates the message that Peripheral.tx_msga will send on this
             event
         '''
         if gpio_id not in GPIO.gpio_state:

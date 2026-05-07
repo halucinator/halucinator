@@ -7,9 +7,8 @@ import binascii
 import logging
 import time
 from collections import defaultdict, deque
-from typing import DefaultDict, Deque, Optional, Tuple, Union
-
-from typing import TypedDict
+from dataclasses import asdict, dataclass
+from typing import Any, DefaultDict, Deque, Dict, Optional, Tuple, Union
 
 from . import peripheral_server
 # from peripheral_server import PeripheralServer, peripheral_model
@@ -20,21 +19,17 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.DEBUG)
 
 
-class EthernetMessage(TypedDict):
-    interface_id: InterfaceId
-    frame: bytes
-
-
 class EthernetInterface:
 
     def __init__(self, interface_id: InterfaceId, enabled: bool = True,
                  calc_crc: bool = True, irq_num: Optional[int] = None) -> None:
-        self.interface_id = interface_id
-        self.rx_queue = deque()
-        self.frame_times = deque()
-        self.calc_crc = calc_crc
-        self.irq_num = irq_num
-        self.enabled = enabled
+        self.interface_id: InterfaceId = interface_id
+        self.rx_queue: Deque[bytes] = deque()
+        self.frame_times: Deque[float] = deque()
+        self.calc_crc: bool = calc_crc
+        self.irq_num: Optional[int] = irq_num
+        self.enabled: bool = enabled
+        self.irq_enabled: bool = True
 
     def enable(self) -> None:
         self.enabled = True
@@ -74,9 +69,9 @@ class EthernetInterface:
             return
 
     def get_frame(self, get_time: bool = False) -> Union[Optional[bytes], Tuple[Optional[bytes], Optional[float]]]:
-        frame = None
-        rx_time = None
-        
+        frame: Optional[bytes] = None
+        rx_time: Optional[float] = None
+
         if self.rx_queue:
             frame = self.rx_queue.popleft()
             rx_time = self.frame_times.popleft()
@@ -95,18 +90,19 @@ class EthernetInterface:
             return len(self.rx_queue), len(self.rx_queue[0])
         return 0, 0
 
+
 # Register the pub/sub calls and methods that need mapped
 @peripheral_server.peripheral_model
 class EthernetModel(object):
 
-    frame_queues: DefaultDict[InterfaceId, Deque[bytes]] = defaultdict(deque)
-    calc_crc = True
+    interfaces: Dict[InterfaceId, EthernetInterface] = dict()
+    frame_queues: DefaultDict[InterfaceId, Deque[bytes]] = defaultdict(deque)   # interface_id -> deque of frames
+    frame_times: DefaultDict[InterfaceId, Deque[float]] = defaultdict(deque)    # interface_id -> deque of timestamps
+    calc_crc: bool = True
     rx_frame_isr: Optional[int] = None
-    rx_isr_enabled = False
-    frame_times: DefaultDict[InterfaceId, Deque[float]] = defaultdict(
-        deque
-    )  # Used to record reception time
-    interfaces = dict()
+    rx_isr_enabled: bool = False
+
+    IRQ_SOURCE: str = "Ethernet_RX_Frame"
 
     @classmethod
     def add_interface(cls, interface_id: InterfaceId, enabled: bool = True, calc_crc: bool = True, irq_num: Optional[int] = None) -> None:
@@ -125,24 +121,26 @@ class EthernetModel(object):
         cls.interfaces[interface_id] = interface
 
     @classmethod
-    def enable_rx_isr(cls, interface_id: InterfaceId) -> None:
-        cls.rx_isr_enabled = True
-        if cls.frame_queues[interface_id] and cls.rx_frame_isr is not None:
-            Interrupts.trigger_interrupt(cls.rx_frame_isr, "Ethernet_RX_Frame")
-
-    @classmethod
     def enable_rx_isr_bp(cls, interface_id: InterfaceId) -> None:
         if interface_id in cls.interfaces:
             cls.interfaces[interface_id].enable_irq_bp()
 
     @classmethod
-    def disable_rx_isr(self, interface_id: InterfaceId) -> None:
-        EthernetModel.rx_isr_enabled = False
-
-    @classmethod
     def disable_rx_isr_bp(cls, interface_id: InterfaceId) -> None:
         if interface_id in cls.interfaces:
             cls.interfaces[interface_id].disable_irq()
+
+    @classmethod
+    def enable_rx_isr(cls, interface_id: InterfaceId) -> None:
+        """Enable interrupt-driven rx notification; fire IRQ if frames already queued."""
+        cls.rx_isr_enabled = True
+        if cls.rx_frame_isr is not None and cls.frame_queues[interface_id]:
+            Interrupts.trigger_interrupt(cls.rx_frame_isr, source=cls.IRQ_SOURCE)
+
+    @classmethod
+    def disable_rx_isr(cls, interface_id: InterfaceId) -> None:
+        """Disable interrupt-driven rx notification."""
+        cls.rx_isr_enabled = False
 
     @classmethod
     def enable(cls, interface_id: InterfaceId) -> None:
@@ -158,73 +156,81 @@ class EthernetModel(object):
 
     @classmethod
     @peripheral_server.tx_msg
-    def tx_frame(cls, interface_id: InterfaceId, frame: bytes) -> EthernetMessage:
-        """
+    def tx_frame(cls, interface_id: InterfaceId, frame: bytes) -> Dict[str, Any]:
+        '''
             Creates the message that Peripheral.tx_msga will send on this
             event
-        """
+        '''
+        # TODO append CRC if needed for the interface
         print("Sending Frame (%i): " % len(frame), binascii.hexlify(frame))
         # print ""
-        msg: EthernetMessage = {"interface_id": interface_id, "frame": frame}
+        msg: Dict[str, Any] = {'interface_id': interface_id, 'frame': frame}
         return msg
 
     @classmethod
     @peripheral_server.reg_rx_handler
-    def rx_frame(cls, msg: EthernetMessage) -> None:
-        """
+    def rx_frame(cls, msg: Dict[str, Any]) -> None:
+        '''
             Processes reception of this type of message from
             PeripheralServer.rx_msg
-        """
-        interface_id = msg["interface_id"]
+        '''
+        interface_id: InterfaceId = msg['interface_id']
         log.info("Adding Frame to: %s" % interface_id)
-        frame = msg["frame"]
+        frame: bytes = msg['frame']
+        rx_time = time.time()
         cls.frame_queues[interface_id].append(frame)
-        cls.frame_times[interface_id].append(time.time())
-        log.info("Adding Frame to: %s" % interface_id)
-        if cls.rx_frame_isr is not None and cls.rx_isr_enabled:
-            Interrupts.trigger_interrupt(cls.rx_frame_isr, "Ethernet_RX_Frame")
+        cls.frame_times[interface_id].append(rx_time)
+        if interface_id in cls.interfaces:
+            cls.interfaces[interface_id].buffer_frame_qmp(frame)
+        if cls.rx_isr_enabled and cls.rx_frame_isr is not None:
+            Interrupts.trigger_interrupt(cls.rx_frame_isr, source=cls.IRQ_SOURCE)
 
     @classmethod
     def get_rx_frame(
         cls, interface_id: InterfaceId, get_time: bool = False
     ) -> Union[Optional[bytes], Tuple[Optional[bytes], Optional[float]]]:
-        frame = None
-        rx_time = None
-        log.info("Checking for: %s" % str(interface_id))
-        if cls.frame_queues[interface_id]:
-            log.info("Returning frame")
-            frame = cls.frame_queues[interface_id].popleft()
-            rx_time = cls.frame_times[interface_id].popleft()
-
-        if get_time:
-            return frame, rx_time
-        else:
-            return frame
+        log.info("Getting RX frame from: %s" % str(interface_id))
+        if not cls.frame_queues[interface_id]:
+            return (None, None) if get_time else None
+        frame = cls.frame_queues[interface_id].popleft()
+        rx_time = cls.frame_times[interface_id].popleft() if cls.frame_times[interface_id] else None
+        return (frame, rx_time) if get_time else frame
 
     @classmethod
     def get_rx_frame_only(cls, interface_id: InterfaceId) -> Optional[bytes]:
-        ret = cls.get_rx_frame(interface_id, False)
-        assert ret is None or isinstance(ret, bytes)
-        return ret
+        """Pop and return the oldest frame (no timestamp). Returns None if empty."""
+        if not cls.frame_queues[interface_id]:
+            return None
+        frame = cls.frame_queues[interface_id].popleft()
+        if cls.frame_times[interface_id]:
+            cls.frame_times[interface_id].popleft()
+        return frame
 
     @classmethod
     def get_rx_frame_and_time(
         cls, interface_id: InterfaceId
     ) -> Tuple[Optional[bytes], Optional[float]]:
-        ret = cls.get_rx_frame(interface_id, True)
-        assert isinstance(ret, tuple)
-        assert len(ret) == 2
-        assert ret[0] is None or isinstance(ret[0], bytes)
-        assert ret[1] is None or isinstance(ret[1], float)
-        return ret
+        """Return (frame, rx_time) tuple, or (None, None) if empty."""
+        if not cls.frame_queues[interface_id]:
+            return None, None
+        frame = cls.frame_queues[interface_id].popleft()
+        rx_time = cls.frame_times[interface_id].popleft() if cls.frame_times[interface_id] else None
+        return frame, rx_time
 
     @classmethod
     def get_frame_info(cls, interface_id: InterfaceId) -> Tuple[int, int]:
-        """
-            return number of frames and length of first frame
-        """
-        queue = cls.frame_queues[interface_id]
-        if queue:
-            return len(queue), len(queue[0])
+        """Return (num_frames, size_of_first_frame) or (0, 0) if empty."""
+        q = cls.frame_queues[interface_id]
+        if q:
+            return len(q), len(q[0])
         return 0, 0
 
+
+@dataclass
+class EthernetMessage:
+    """Typed message for Peripheral.EthernetModel topics."""
+    interface_id: str
+    frame: bytes
+
+    def __getitem__(self, key: str) -> Any:
+        return asdict(self)[key]

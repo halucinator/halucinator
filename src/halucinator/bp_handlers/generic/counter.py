@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Dict, cast
 from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 # sys.path.insert(0,path.dirname(path.dirname(path.abspath(__file__))))
 
@@ -32,7 +32,7 @@ class Counter(BPHandler):
         self.increment: Dict[int, int] = {}
         self.counts: Dict[int, int] = {}
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, increment: int = 1) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, increment: int = 1) -> HandlerFunction:
         '''
 
         '''
@@ -42,7 +42,7 @@ class Counter(BPHandler):
         return cast(HandlerFunction, Counter.get_value)
 
     @bp_handler
-    def get_value(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def get_value(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         '''
             Gets the counter value
         '''

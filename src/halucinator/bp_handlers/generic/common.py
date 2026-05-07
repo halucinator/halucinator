@@ -17,39 +17,10 @@ from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, Handl
 from halucinator import hal_log
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
-
-
-class SleepTime(BPHandler):
-    """
-    Break point handler that sleeps for a configured amount of time
-
-    Halucinator configuration usage:
-    - class: halucinator.bp_handlers.SleepTime
-      function: <func_name> (Can be anything)
-      registration_args: {sleep_time: 10}
-      addr: <addr>
-    """
-
-    def __init__(self) -> None:
-        self.sleep_times: Dict[int, int] = {}
-
-    def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, sleep_time: int = 10
-    ) -> HandlerFunction:  # pylint: disable=unused-argument
-        self.sleep_times[addr] = sleep_time
-        return cast(HandlerFunction, SleepTime.sleep_time)
-
-    @bp_handler
-    def sleep_time(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
-        """
-        Sleep for the configured amount of time and return 0
-        """
-        time.sleep(self.sleep_times[addr])
-        return False, 0
 
 
 class ReturnZero(BPHandler):
@@ -68,14 +39,14 @@ class ReturnZero(BPHandler):
         self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.silent[addr] = silent
         self.func_names[addr] = func_name
         return cast(HandlerFunction, ReturnZero.return_zero)
 
     @bp_handler
-    def return_zero(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
+    def return_zero(self, qemu: "HalBackend", addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """
@@ -101,7 +72,7 @@ class ReturnConstant(BPHandler):
         self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, ret_value: Optional[int] = None, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, ret_value: Optional[int] = None, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=unused-argument, too-many-arguments
         self.ret_values[addr] = ret_value
         self.silent[addr] = ret_value
@@ -109,7 +80,7 @@ class ReturnConstant(BPHandler):
         return cast(HandlerFunction, ReturnConstant.return_constant)
 
     @bp_handler
-    def return_constant(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
+    def return_constant(self, qemu: "HalBackend", addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return constant
         """
@@ -138,7 +109,7 @@ class Canary(BPHandler):
         self.model = canary.CanaryModel
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, canary_type: Optional[str] = None, msg: str = ""
+        self, qemu: "HalBackend", addr: int, func_name: str, canary_type: Optional[str] = None, msg: str = ""
     ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument
         self.func_names[addr] = func_name
         self.canary_type[addr] = canary_type
@@ -146,7 +117,7 @@ class Canary(BPHandler):
         return cast(HandlerFunction, Canary.handle_canary)
 
     @bp_handler
-    def handle_canary(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def handle_canary(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         """
         Call the peripheral model
         """
@@ -177,7 +148,7 @@ class PrintChar(BPHandler):
         self.intercept: Dict[int, bool] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False, intercept: bool = True
+        self, qemu: "HalBackend", addr: int, func_name: str, silent: bool = False, intercept: bool = True
     ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument
         """
         register the put_char method to handle all BP's
@@ -193,7 +164,7 @@ class PrintChar(BPHandler):
         return cast(HandlerFunction, PrintChar.put_char)
 
     @bp_handler
-    def put_char(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def put_char(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -229,7 +200,7 @@ class PrintString(BPHandler):
 
     def register_handler(
         self,
-        qemu: HALQemuTarget,
+        qemu: "HalBackend",
         addr: int,
         func_name: str,
         arg_num: int = 0,
@@ -252,7 +223,7 @@ class PrintString(BPHandler):
         return cast(HandlerFunction, PrintString.print_string)
 
     @bp_handler
-    def print_string(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def print_string(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -285,14 +256,14 @@ class SkipFunc(BPHandler):
         self.func_names: Dict[int, str] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.silent[addr] = silent
         self.func_names[addr] = func_name
         return cast(HandlerFunction, SkipFunc.skip)
 
     @bp_handler
-    def skip(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
+    def skip(self, qemu: "HalBackend", addr: int) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Just return
         """
@@ -318,7 +289,7 @@ class MovePC(BPHandler):
         self.move_pc_amount: Dict[int, int] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, move_by: int = 4, silent: bool = True
+        self, qemu: "HalBackend", addr: int, func_name: str, move_by: int = 4, silent: bool = True
     ) -> HandlerFunction:  # pylint: disable=unused-argument,too-many-arguments
         self.silent[addr] = silent
         self.func_names[addr] = func_name
@@ -326,7 +297,7 @@ class MovePC(BPHandler):
         return cast(HandlerFunction, MovePC.move_pc)
 
     @bp_handler
-    def move_pc(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def move_pc(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -365,7 +336,7 @@ class KillExit(BPHandler):
         self.exit_status: Dict[int, int] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, exit_code: int = 0, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, exit_code: int = 0, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=unused-argument,too-many-arguments
         self.silent[addr] = silent
         self.func_names[addr] = func_name
@@ -373,7 +344,7 @@ class KillExit(BPHandler):
         return cast(HandlerFunction, KillExit.kill_and_exit)
 
     @bp_handler
-    def kill_and_exit(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def kill_and_exit(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         """
         Just return
         """
@@ -401,7 +372,7 @@ class SetRegisters(BPHandler):
         self.changes: Dict[int, Dict[str, int]] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, registers: Dict[str, int] = {}, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, registers: Dict[str, int] = {}, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
         self.silent[addr] = silent
         log.debug(
@@ -414,7 +385,7 @@ class SetRegisters(BPHandler):
         return cast(HandlerFunction, SetRegisters.set_registers)
 
     @bp_handler
-    def set_registers(self, qemu: HALQemuTarget, addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
+    def set_registers(self, qemu: "HalBackend", addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """
@@ -442,7 +413,7 @@ class SetMemory(BPHandler):
         self.changes: Dict[int, Dict[int, int]] = {}
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str, addresses: Dict[int, int] = {}, silent: bool = False
+        self, qemu: "HalBackend", addr: int, func_name: str, addresses: Dict[int, int] = {}, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=too-many-arguments, unused-argument, dangerous-default-value
         self.silent[addr] = silent
         log.debug(
@@ -455,7 +426,7 @@ class SetMemory(BPHandler):
         return cast(HandlerFunction, SetMemory.set_memory)
 
     @bp_handler
-    def set_memory(self, qemu: HALQemuTarget, addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
+    def set_memory(self, qemu: "HalBackend", addr: int, *args: Any) -> HandlerReturn:  # pylint: disable=unused-argument
         """
         Intercept Execution and return 0
         """
@@ -464,4 +435,26 @@ class SetMemory(BPHandler):
             value = change[1]
             qemu.write_memory(address, 4, value)
             log.debug("set_memory: %s : %#x", address, value)
+        return False, 0
+
+
+class SleepTime(BPHandler):
+    """
+    Intercepts a sleep/delay function and optionally pauses Python-side
+    execution instead of letting the firmware spin.
+    """
+
+    def __init__(self) -> None:
+        self.sleep_times: Dict[int, int] = {}
+
+    def register_handler(
+        self, qemu: "HalBackend", addr: int, func_name: str, sleep_time: int = 0
+    ) -> HandlerFunction:
+        self.sleep_times[addr] = sleep_time
+        return self.sleep_time
+
+    @bp_handler(["sleep", "usleep", "msleep", "vTaskDelay"])
+    def sleep_time(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
+        duration = self.sleep_times.get(addr, 0)
+        time.sleep(duration)
         return False, 0

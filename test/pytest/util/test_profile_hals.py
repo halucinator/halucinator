@@ -23,6 +23,11 @@ def mock_gdb():
     m.avatar = mock.Mock()
     m.avatar.arch = mock.Mock()
     m.avatar.arch.registers = {"r0": 0, "r1": 0, "sp": 0, "lr": 0, "pc": 0}
+    # State_Recorder.get_state() now prefers the backend-agnostic
+    # list_registers() over avatar.arch.registers (HalBackend abstraction
+    # decoupled from avatar2). Return the same names so tests don't depend
+    # on which branch wins.
+    m.list_registers.return_value = ["r0", "r1", "sp", "lr", "pc"]
     m.read_memory.return_value = b"\x00" * 0x100
     m.read_register.return_value = 0
     return m

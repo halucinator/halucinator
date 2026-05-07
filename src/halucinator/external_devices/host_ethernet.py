@@ -21,8 +21,8 @@ __host_socket: Optional[socket.socket] = None
 
 
 def rx_from_emulator(emu_rx_port: int, interface: str) -> None:
-    ''' 
-        Receives 0mq messages from emu_rx_port    
+    '''
+        Receives 0mq messages from emu_rx_port
         args:
             emu_rx_port:  The port number on which to listen for messages from
                           the emulated software

@@ -9,7 +9,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import logging
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 
 
@@ -19,26 +19,26 @@ class MbedBoot(BPHandler):
         BPHandler.__init__(self)
 
     @bp_handler(['SystemInit'])
-    def SystemInit(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def SystemInit(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("MBED System")
         log.info("LR: %s" % hex(qemu.regs.lr))
         # Do nothing, at all
         return True, None
 
     @bp_handler(['mbed_sdk_init'])
-    def mbed_sdk_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def mbed_sdk_init(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("mbed_sdk_init")
         # ...you don't need to do that
         return True, None
 
     @bp_handler(['software_init_hook'])
-    def software_init_hook(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def software_init_hook(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("software_init_hook")
         # Nope.
         return True, 0
 
     @bp_handler(['software_init_hook_rtos'])
-    def software_init_hook_rtos(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def software_init_hook_rtos(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("software_init_hook_rtos")
         # Not even once
         return True, 0

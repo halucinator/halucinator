@@ -11,7 +11,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 from collections import defaultdict, deque
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 import struct
 import binascii
 import os
@@ -38,7 +38,7 @@ class STM32F4Wifi(BPHandler):
         self.model = model()
 
     @bp_handler(['wifi_init'])
-    def wifi_init(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_init(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
             Register the timers
         '''
@@ -52,7 +52,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['wifi_wakeup'])
-    def wifi_wakeup(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_wakeup(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
             Register the timers
         '''
@@ -61,12 +61,12 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['Receive_Data'])
-    def receive_data(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def receive_data(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Ignoring call to Receive_Data")
         return True, 0
 
     @bp_handler(['wifi_ap_start'])
-    def wifi_ap_start(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_ap_start(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
             This version only supports the TCP/IP layer, do nothing
         '''
@@ -75,7 +75,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['wifi_socket_server_open'])
-    def wifi_socket_server_open(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_socket_server_open(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
             Should call listen()
             Arg1: Port number
@@ -88,7 +88,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['wifi_socket_server_write'])
-    def wifi_socket_server_write(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_socket_server_write(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
             This version only supports the TCP/IP layer, do nothing
         '''
@@ -99,7 +99,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['Wifi_SysTick_Isr'])
-    def wifi_systick_isr(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_systick_isr(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         '''
         The SysTick ISR used by the Wifi stack
         '''
@@ -110,7 +110,7 @@ class STM32F4Wifi(BPHandler):
         return True, 0
 
     @bp_handler(['Wifi_TIM_Handler'])
-    def wifi_tim_handler(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def wifi_tim_handler(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         """
         The STM32 Wifi stack's event dispatch queue
         Should be called over and over by a timer

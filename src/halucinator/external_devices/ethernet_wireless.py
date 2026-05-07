@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from .ioserver import IOServer
 from .IEEE802_15_4 import IEEE802_15_4
-from .ethernet_virt_hub import VirtualEthHub as ViruatalEthHub, HostEthernetServer
+from .ethernet_virt_hub import ViruatalEthHub, HostEthernetServer
 
 import logging
 import time

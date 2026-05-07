@@ -10,7 +10,7 @@ import zmq
 from multiprocessing import Process
 from .ioserver import IOServer
 import logging
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 
 import os
 import socket
@@ -46,7 +46,7 @@ def rx_from_host(io_server: IOServer, msg_id: str) -> None:
             else:
                 char_byte = int.from_bytes(char, byteorder='little')
                 buffer.append(char_byte)
-                data: dict[str, Any] = {'interface_id': msg_id, 'char': buffer}
+                data: dict = {'interface_id': msg_id, 'char': buffer}
                 #to_emu_socket.send_string(msg)
                 print("Sent message to emulator ", buffer)
                 io_server.send_msg(topic,data)
@@ -65,7 +65,7 @@ def start(port: str, io_server: IOServer, msg_id: str = "COM1", baudrate: int = 
     global __run_server
     global __host_port
     __host_port = serial.Serial(port, baudrate)
-    
+
     log.debug("Starting Servers")
     rx_from_host(io_server, msg_id)
     try:

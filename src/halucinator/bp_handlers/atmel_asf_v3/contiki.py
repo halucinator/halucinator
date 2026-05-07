@@ -10,7 +10,7 @@ import logging
 import time
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 
 
@@ -22,20 +22,20 @@ class Contiki(BPHandler):
         self.start_time = time.time()
         self.ticks_per_second = 128
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, ticks_per_second: int = None) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, ticks_per_second: int = None) -> HandlerFunction:
         if ticks_per_second is not None:
             self.ticks_per_second = ticks_per_second
         return BPHandler.register_handler(self, qemu, addr, func_name)
 
     @bp_handler(['clock_time'])
-    def clock_time(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def clock_time(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         ticks = time.time() - self.start_time
         ticks = int(ticks * self.ticks_per_second)
         log.debug("#Ticks: %i" % ticks)
         return True, ticks
 
     @bp_handler(['clock_seconds'])
-    def clock_seconds(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def clock_seconds(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         secs = int(time.time() - self.start_time)
         log.debug("#Seconds: %i" % secs)
         return True, secs

@@ -10,7 +10,7 @@ from halucinator.peripheral_models.dos_fs_model import DosFsModel
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
@@ -29,7 +29,7 @@ class YafFsLib(BPHandler):
         self.model: Type[DosFsModel] = impl
         self.dd_dirent_offset: int = dd_dirent_offset
 
-    def fio_move(self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
+    def fio_move(self, qemu: "HalBackend", bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
         '''
             Move file
         '''
@@ -37,7 +37,7 @@ class YafFsLib(BPHandler):
         self.model.fio_move(fd, new_path)
         return True, 0
 
-    def fio_time_set(self, qemu: HALQemuTarget, bp_addr: int, fd: int, time_struct: int) -> Tuple[bool, int]:
+    def fio_time_set(self, qemu: "HalBackend", bp_addr: int, fd: int, time_struct: int) -> Tuple[bool, int]:
         '''
             Sets time on file
         '''
@@ -52,7 +52,7 @@ class YafFsLib(BPHandler):
         self.model.fio_time_set(fd,atime, modtime)
         return True, 0
 
-    def fio_attrib_set(self, qemu: HALQemuTarget, bp_addr: int, fd: int, st_attrib: int) -> None:
+    def fio_attrib_set(self, qemu: "HalBackend", bp_addr: int, fd: int, st_attrib: int) -> None:
         '''
             0x01   read-only
             0x02   hidden
@@ -63,7 +63,7 @@ class YafFsLib(BPHandler):
         '''
 
 
-    def fio_rename(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_new_name: int) -> Tuple[bool, int]:
+    def fio_rename(self, qemu: "HalBackend", bp_addr: int, fd: int, p_new_name: int) -> Tuple[bool, int]:
         '''
             Rename file
         '''
@@ -72,7 +72,7 @@ class YafFsLib(BPHandler):
         self.model.fio_rename(fd, new_name)
         return True,0
 
-    def fio_read(self, qemu: HALQemuTarget, bp_addr: int, fd: int, d_size: int) -> Tuple[bool, int]:
+    def fio_read(self, qemu: "HalBackend", bp_addr: int, fd: int, d_size: int) -> Tuple[bool, int]:
         '''
             Read d_size bytes from file
         '''
@@ -81,7 +81,7 @@ class YafFsLib(BPHandler):
         qemu.write_memory(d_size, 4,rem)
         return True, 0
 
-    def fio_read_dir(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_dir: int) -> Tuple[bool, Optional[int]]:
+    def fio_read_dir(self, qemu: "HalBackend", bp_addr: int, fd: int, p_dir: int) -> Tuple[bool, Optional[int]]:
         '''
             Read files in directory
         '''
@@ -111,14 +111,14 @@ class YafFsLib(BPHandler):
 
         return True, None
 
-    def fio_where(self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, Any]:
+    def fio_where(self, qemu: "HalBackend", bp_addr: int, fd: int, arg: int) -> Tuple[bool, Any]:
         '''
             fio_where
         '''
         log.debug("FIOWHERE")
         return True, self.model.fio_where(fd)
 
-    def fio_seek (self, qemu: HALQemuTarget, bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
+    def fio_seek (self, qemu: "HalBackend", bp_addr: int, fd: int, arg: int) -> Tuple[bool, int]:
         '''
             fio_seek
         '''
@@ -126,7 +126,7 @@ class YafFsLib(BPHandler):
         self.model.fio_seek(fd, arg)
         return True, 0
 
-    def fio_fstat_get(self, qemu: HALQemuTarget, bp_addr: int, fd: int, p_stat: int) -> Tuple[bool, int]:
+    def fio_fstat_get(self, qemu: "HalBackend", bp_addr: int, fd: int, p_stat: int) -> Tuple[bool, int]:
         '''
             fstat_get
         '''
@@ -161,7 +161,7 @@ class YafFsLib(BPHandler):
         return True, 0
 
     @bp_handler(['attrib'])
-    def attrib(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def attrib(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         '''
             STATUS attrib(
                 const char * fileName,	/* file or dir name on which to change flags */
@@ -184,7 +184,7 @@ class YafFsLib(BPHandler):
 
 
     @bp_handler(['delete'])
-    def delete(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, Any]:
+    def delete(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, Any]:
         '''
             delete break point handler
         '''
@@ -197,7 +197,7 @@ class YafFsLib(BPHandler):
         return True,self.model.delete(drv, path, drive)
 
     @bp_handler(['create'])
-    def create(self, qemu: HALQemuTarget, bp_addr: int) -> Any:
+    def create(self, qemu: "HalBackend", bp_addr: int) -> Any:
         '''
             create break point handler
         '''
@@ -213,7 +213,7 @@ class YafFsLib(BPHandler):
         return self.model.creat_or_open(name, flags, mode)
 
     @bp_handler(['open'])
-    def open(self, qemu: HALQemuTarget, bp_addr: int) -> Any:
+    def open(self, qemu: "HalBackend", bp_addr: int) -> Any:
         '''
             open break point handler
         '''
@@ -241,7 +241,7 @@ class YafFsLib(BPHandler):
         return self.model.creat_or_open(name,flags,mode)
 
     @bp_handler(['close'])
-    def close(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def close(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         '''
             close break point handler
         '''
@@ -260,7 +260,7 @@ class YafFsLib(BPHandler):
             return True,  0xffffffff
 
     @bp_handler(['read'])
-    def read(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def read(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         '''
             read break point handler
         '''
@@ -279,7 +279,7 @@ class YafFsLib(BPHandler):
         return True, len(data)
 
     @bp_handler(['write'])
-    def write(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:
+    def write(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:
         '''
             write break point handler
         '''
@@ -294,7 +294,7 @@ class YafFsLib(BPHandler):
         return True, len(buf)
 
     @bp_handler(['ioctl'])
-    def ioctl(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, Optional[int]]:
+    def ioctl(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, Optional[int]]:
         '''
             ioctl bp_handler
         '''
@@ -393,4 +393,3 @@ class YafFsLib(BPHandler):
         69: "FIOCOMMITPERIODSETFS", #0x45 /* set the file system's periodic  */
         70: "FIOFSTATFSGET64", #0x46 /* get file system status info commit interval in milliseconds */
     }
-

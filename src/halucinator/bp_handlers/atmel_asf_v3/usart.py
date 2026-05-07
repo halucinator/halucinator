@@ -11,7 +11,7 @@ from ..bp_handler import BPHandler, HandlerReturn, bp_handler
 import struct
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 import logging
 import binascii
 
@@ -24,11 +24,11 @@ class USART(BPHandler):
         self.model = impl
 
     @bp_handler(['usart_init', 'usart_enable'])
-    def return_ok(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def return_ok(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         return True, 0
 
     @bp_handler(['usart_write_buffer_wait'])
-    def write_buffer(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_buffer(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # enum status_code usart_write_buffer_wait(
                 #                                       struct usart_module *const module,
                 #                                       const uint8_t *tx_data,
@@ -43,7 +43,7 @@ class USART(BPHandler):
         return True, 0
 
     @bp_handler(['usart_write_wait'])
-    def write_single(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def write_single(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         # enum status_code usart_write_buffer_wait(
                 #                                       struct usart_module *const module,
                 #                                       const uint16_t *tx_data);
@@ -55,7 +55,7 @@ class USART(BPHandler):
         return True, 0
 
     @bp_handler(['usart_read_wait'])
-    def read_single(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def read_single(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         usart_ptr = qemu.regs.r0
         hw_addr = qemu.read_memory(usart_ptr, 4, 1)
         ret = self.model.read(hw_addr, 1, block=True)[0]

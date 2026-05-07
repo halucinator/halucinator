@@ -14,7 +14,7 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.constants import E_FLAGS
 import binascii
 import struct
-from typing import Any, Dict, List, Optional, Tuple, IO
+from typing import Any, Dict, IO, List, Optional, Tuple
 
 # Little endian format strings
 LE_FORMAT_STRS = {'uint32_t': '<I', "uint16_t": '<H', 'uint8_t': '<B',
@@ -173,7 +173,7 @@ class DWARFReader(object):
         '''
             Returns a C type declaration for the function infor passed in
 
-            args: 
+            args:
                 funct_die:  A Die for a function
         '''
         if funct_die.tag != 'DW_TAG_subprogram':

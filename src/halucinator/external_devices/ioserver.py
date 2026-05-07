@@ -85,8 +85,11 @@ class IOServer(Thread):
                 topic, data = decode_zmq_msg(msg)
                 if self.packet_log:
                     self.packet_log.write(
-                        "Sent, %i, %s, %s\n"
-                        % (time.time(), topic, binascii.hexlify(data["frame"]))
+                        "Sent, %i, %s, %s\n" % (
+                            time.time(),
+                            topic,
+                            binascii.hexlify(data["frame"]),
+                        )
                     )
                     self.packet_log.flush()
                 method = self.handlers[topic]
@@ -102,9 +105,7 @@ class IOServer(Thread):
         if self.packet_log:
             self.packet_log.close()
 
-    def send_msg(
-        self, topic: str, data: Mapping[str, Union[int, str, bytes]]
-    ) -> None:
+    def send_msg(self, topic: str, data: Mapping[str, Union[int, str, bytes]]) -> None:
         """
         Sends a zmq message using `topic`
         """
@@ -115,8 +116,11 @@ class IOServer(Thread):
             if "frame" in data:
 
                 self.packet_log.write(
-                    "Received, %i, %s, %s\n"
-                    % (time.time(), topic, binascii.hexlify(data["frame"]))
+                    "Received, %i, %s, %s\n" % (
+                        time.time(),
+                        topic,
+                        binascii.hexlify(data["frame"]),
+                    )
                 )
                 self.packet_log.flush()
 

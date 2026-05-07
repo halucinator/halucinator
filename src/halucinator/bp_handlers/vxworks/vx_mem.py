@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Tuple
 from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 class BColors:
@@ -23,7 +23,7 @@ class VxMem(BPHandler):
     '''VxMem'''
 
     @bp_handler(['vxMemProbe'])
-    def vx_mem_probe(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, int]:
+    def vx_mem_probe(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:
         '''vx_mem_probe'''
         adrs = qemu.get_arg(0)      #should be an address of where we are probing
         mode = qemu.get_arg(1)      #either a 0 (READ) or 1 (WRITE)

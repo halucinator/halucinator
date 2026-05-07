@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from halucinator.external_devices.ioserver import IOServer
 
@@ -91,7 +91,7 @@ if __name__ == "__main__":
         "-t", "--tx_port", default=5555, help="Port number to send IO messages via zmq"
     )
     p.add_argument(
-        "-i", "--id", default=0x20000AB0, type=lambda x: int(x, 0), help="Id to use when sending data (supports hex)"
+        "-i", "--id", default=0x20000AB0, type=int, help="Id to use when sending data"
     )
     p.add_argument(
         "-n", "--newline", default=False, action="store_true", help="Append Newline"

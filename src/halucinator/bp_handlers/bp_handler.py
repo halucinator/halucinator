@@ -8,17 +8,17 @@ Implements the BPHandlers class, bp_handle decorator, and other helpers for bp_h
 """
 
 import struct
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
-HandlerReturn = Tuple[bool, Optional[int]]
-# The commented-out version of this definition should be correct, but
-# we can't use it until the actual uses of @bp_handler are typed,
-# otherwise the function type being passed to it don't match.
+# Return type for bp_handler methods: (intercept: bool, return_value: Any)
+# intercept=True means skip the original function and use return_value
+HandlerReturn = Tuple[bool, Any]
+
+# Type alias for a bound method that implements a bp_handler callback
 HandlerFunction = Callable[..., HandlerReturn]
-# HandlerFunction = Callable[[Any, HALQemuTarget, int], HandlerReturn]
 HandlerDecorator = Callable[[HandlerFunction], HandlerFunction]
 
 
@@ -51,7 +51,7 @@ class BPHandler:  # pylint: disable=too-few-public-methods
     """
 
     def register_handler(
-        self, qemu: HALQemuTarget, addr: int, func_name: str
+        self, qemu: "HalBackend", addr: int, func_name: str
     ) -> HandlerFunction:  # pylint: disable=unused-argument
         """
         Determines what method should used to handle the break point address

@@ -10,11 +10,14 @@ import os
 import pickle  # existing code uses pickle for state serialization
 import sqlite3
 from collections import defaultdict, deque
-from typing import Any, DefaultDict, Deque, Dict, List, Optional, Tuple, Union
+from typing import Any, DefaultDict, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
 import yaml
 from avatar2 import Avatar, GDBTarget, ARM_CORTEX_M3, TargetStates
 from IPython import embed
+
+if TYPE_CHECKING:
+    from halucinator.backends.hal_backend import HalBackend
 
 
 class State_Recorder(object):
@@ -22,7 +25,7 @@ class State_Recorder(object):
     def __init__(
         self,
         db_name: Union[bytes, str],
-        gdb: GDBTarget,
+        gdb: Union[GDBTarget, "HalBackend"],
         memories: List[Tuple[int, int]],
         elf_file: str,
     ) -> None:
@@ -31,9 +34,9 @@ class State_Recorder(object):
 
         self.memories: List[Tuple[int, int]] = memories
         self.gdb: Any = gdb
-        self.break_points: Dict[int, Tuple[str, bool]] = {}
-        self.call_stack: Deque[Tuple[str, int]] = deque()
-        self.ret_addrs: DefaultDict[int, Deque[Tuple[str, int]]] = defaultdict(deque)
+        self.break_points: Dict[int, Tuple[Any, bool]] = {}
+        self.call_stack: Deque[Tuple[Any, int]] = deque()
+        self.ret_addrs: DefaultDict[int, Deque[Tuple[Any, int]]] = defaultdict(deque)
         self.elf_file: str = ""
         self.app_id: Optional[int] = None
 
@@ -43,13 +46,22 @@ class State_Recorder(object):
         self.get_app_id(elf_file, db)
         db.close()
 
-    def add_function(self, function: str) -> None:
-        # * on break point sets on first instruction, not first line of code from source
-        bp = self.gdb.set_breakpoint("*"+function)
+    def add_function(self, function: Union[str, int]) -> None:
+        # Accept either a symbol (legacy avatar2 path — set_breakpoint
+        # handles "*func") or a plain integer address (HalBackend path).
+        if isinstance(function, int):
+            bp = self.gdb.set_breakpoint(function)
+        else:
+            try:
+                bp = self.gdb.set_breakpoint("*" + function)
+            except TypeError:
+                # HalBackend.set_breakpoint requires an int; the caller
+                # should have resolved the symbol. Surface the error
+                # rather than silently dropping.
+                raise
         self.break_points[bp] = (function, True)
 
-    def set_exit_bp(self, function: str, entry_id: int) -> None:
-
+    def set_exit_bp(self, function: Union[str, int], entry_id: int) -> None:
         ret_addr = self.gdb.regs.lr
         ret_addr &= 0xFFFFFFFE  # Clearing Thumb bit, causes jTrace debugger issues
         if len(self.ret_addrs['ret_addr']) == 0:
@@ -72,7 +84,7 @@ class State_Recorder(object):
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, name TEXT, sha1 TEXT, bin BLOB)")
         cursor.execute('''CREATE TABLE IF NOT EXISTS states (id INTEGER PRIMARY KEY,
-                            app_id INTEGER, 
+                            app_id INTEGER,
                             function_name TEXT,
                             entry_id INTEGER,  memory BLOB, regs BLOB)''')
         # NOTE: Entry state records will have NULL entry_id's, Exits will reference
@@ -99,7 +111,7 @@ class State_Recorder(object):
         else:
             self.app_id = row[0]
 
-    def save_state_to_db(self, function: str, is_entry: bool) -> int:
+    def save_state_to_db(self, function: Union[str, int], is_entry: bool) -> int:
         '''
             Saves the processor's state to the database
             args:
@@ -111,7 +123,7 @@ class State_Recorder(object):
         regs = pickle.dumps(regs)
         c = db.cursor()
         if is_entry:
-            c.execute('''INSERT INTO states (app_id, function_name, 
+            c.execute('''INSERT INTO states (app_id, function_name,
                          memory, regs) VALUES(?,?,?,?)''', (self.app_id,
                                                             function, mem, regs))
         else:
@@ -121,7 +133,7 @@ class State_Recorder(object):
                 error_str = "Call stack is off: %s != %s" % (func, function)
                 raise ValueError(error_str)
 
-            c.execute('''INSERT INTO states (app_id, function_name, 
+            c.execute('''INSERT INTO states (app_id, function_name,
                          memory, regs, entry_id) VALUES (?,?,?,?,?)''', (self.app_id,
                                                                          function, mem, regs, entry_id))
         db.commit()
@@ -133,15 +145,28 @@ class State_Recorder(object):
 
     def get_state(self) -> Tuple[Dict[int, Any], Dict[str, Any]]:
         '''
-            Gets the processor state
+            Gets the processor state. Works on both avatar2 QemuTargets
+            (via self.gdb.avatar.arch.registers) and HalBackend
+            instances (via self.gdb.list_registers()).
         '''
         mems: Dict[int, Any] = {}
         for (start, size) in self.memories:
             mems[start] = self.gdb.read_memory(start, 1, size, raw=True)
 
+        # Prefer the backend-agnostic list_registers if available
+        # (HalBackend). Fall back to avatar2's arch.registers otherwise.
+        if hasattr(self.gdb, "list_registers"):
+            reg_names = self.gdb.list_registers()
+        else:
+            reg_names = self.gdb.avatar.arch.registers
+
         registers: Dict[str, Any] = {}
-        for reg in self.gdb.avatar.arch.registers:
-            registers[reg] = self.gdb.read_register(reg)
+        for reg in reg_names:
+            try:
+                registers[reg] = self.gdb.read_register(reg)
+            except (ValueError, AttributeError):
+                # Skip registers the backend doesn't expose
+                continue
         return mems, registers
 
     def handle_bp(self, bp: int) -> None:

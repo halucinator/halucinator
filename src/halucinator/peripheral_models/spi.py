@@ -5,21 +5,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict, deque
+from dataclasses import asdict, dataclass
 from itertools import repeat
 from typing import Any, DefaultDict, Deque, Dict
-
-from typing import TypedDict
 
 from . import peripheral_server
 
 log = logging.getLogger(__name__)
-
-
-# There I think isn't a client of the SPI bus at present... so we can
-# just treat it as bytes always. Yay.
-class SPIMessage(TypedDict):
-    id: int
-    chars: bytes
 
 
 class UARTModel(object):
@@ -62,13 +54,12 @@ class SPIPublisher(object):
 
     @classmethod
     @peripheral_server.tx_msg
-    def write(cls, spi_id: int, chars: bytes) -> Dict[str, Any]:
+    def write(cls, spi_id: int, chars: bytes) -> "SPIMessage":
         '''
            Publishes the data to sub/pub server
         '''
         log.debug("In: SPIPublisher.write")
-        msg = {'id': spi_id, 'chars': chars}
-        return msg
+        return SPIMessage(id=spi_id, chars=chars)
 
     @classmethod
     def read(cls, spi_id: int, count: int = 1, block: bool = False) -> str:
@@ -105,3 +96,21 @@ class SPIPublisher(object):
         spi_id = msg['id']
         data = msg['chars']
         cls.rx_buffers[spi_id].extend(data)
+
+
+@dataclass
+class SPIMessage:
+    """Typed message for Peripheral.SPIPublisher topics."""
+    id: int
+    chars: bytes
+
+    def __getitem__(self, key: str) -> Any:
+        return asdict(self)[key]
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, dict):
+            return self.id == other.get('id') and self.chars == other.get('chars')
+        return isinstance(other, SPIMessage) and self.id == other.id and self.chars == other.chars
+
+    def __hash__(self) -> int:
+        return hash((self.id, self.chars))

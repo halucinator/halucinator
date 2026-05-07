@@ -17,10 +17,10 @@ from ... import hal_log
 hal_log = hal_log.getHalLogger()
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 class FunctionCaller():
-    def __init__(self, qemu: HALQemuTarget, start_addr: int, size: int,
+    def __init__(self, qemu: "HalBackend", start_addr: int, size: int,
                  callee_addr: int, args: Sequence[int], callee_fname: Optional[str] = None):
         self.qemu = qemu
         self.args = args
@@ -28,7 +28,7 @@ class FunctionCaller():
         self.size =  size
         self.callee_addr = callee_addr
         self.callee_fname = callee_fname
-        self.return_addr: int = 0 # Subclass needs to set in init
+        self.return_addr: Optional[int] = None # Subclass needs to set in init
         self.regs: Dict[str, int] = {}
 
     def reg_size(self) -> int:
@@ -55,7 +55,7 @@ class FunctionCaller():
     def setup_stack_and_args(self) -> None:
         raise(NotImplementedError("Override with Arch Specific implementation"))
 
-    def get_return_addr(self) -> int:
+    def get_return_addr(self) -> Optional[int]:
         return self.return_addr
 
     def call(self) -> None:
@@ -67,11 +67,11 @@ class FunctionCaller():
         self.restore_state()
 
 class ARMFunctionCaller(FunctionCaller):
-    def __init__(self, qemu: HALQemuTarget, start_addr: int, size: int,
+    def __init__(self, qemu: "HalBackend", start_addr: int, size: int,
                  callee_addr: int, args: Sequence[int], callee_fname: Optional[str] = None):
         '''
             Setups ARM FunctionCaller with desending stack, memory looks like
-            
+
             +-------------+ highest addr
             | return addr |
             + ------------+
@@ -87,7 +87,7 @@ class ARMFunctionCaller(FunctionCaller):
         #Uses decending stack so set sp to top of memory
         self.initial_sp = self.start_addr + size - self.reg_size()
         #TODO fix so multiple return break points can be used
-        self.return_addr = self.start_addr + size & 0xFFFFFFFE 
+        self.return_addr = self.start_addr + size & 0xFFFFFFFE
 
     def setup_stack_and_args(self) -> None:
         for idx, arg in enumerate(self.args):
@@ -113,7 +113,6 @@ class FunctionCallerIntercept():
 
         self.function_caller: Dict[int, ARMFunctionCaller] = {}
         self.interactive: Dict[int, bool] = {}
-        self.qemu: Optional[HALQemuTarget] = None
 
     def find_memory_region(self) -> Tuple[int, int]:
         '''
@@ -129,7 +128,7 @@ class FunctionCallerIntercept():
         raise(ValueError("Memory Region named: %s required by %s"%
                          (self.MEMORY_REGION_NAME, self.__class__)))
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, function: str,
+    def register_handler(self, qemu: "HalBackend", addr: int, function: str,
                          callee: Union[str, int], args: Optional[Sequence[int]] = None,
                          interactive: bool = False,
                          stack_size: int = 161984,
@@ -137,7 +136,7 @@ class FunctionCallerIntercept():
                          watchpoint: str = "") -> HandlerFunction:
         '''
         This will be called by the intercept registration function.
-        **Note** only a single instance of the class is create, and this 
+        **Note** only a single instance of the class is create, and this
         function is called for each creation of an intercept in the halucinator
         config.  Thus, addr (of the breakpoint) is used as key to save
         associate values for given intercept.
@@ -150,9 +149,9 @@ class FunctionCallerIntercept():
                      call and after return
         '''
 
-        # The this function gets called twice, for each value entry in 
+        # The this function gets called twice, for each value entry in
         # intercept config  file.  Once to register the bp that will cause
-        # the function to be called, and again to register the bp that will 
+        # the function to be called, and again to register the bp that will
         # catch the return
         if is_return: #If is return just register the handler
             return cast(HandlerFunction, FunctionCallerIntercept.return_handler)
@@ -172,7 +171,7 @@ class FunctionCallerIntercept():
                 callee_addr = self.qemu.avatar.callables[callee]
                 callee_fname = callee
             except KeyError:
-                log.error("Callee(%s) invalid for %s, 0x%08x, check intercept config" 
+                log.error("Callee(%s) invalid for %s, 0x%08x, check intercept config"
                           %(callee, function, addr))
                 exit(-1)
         else:
@@ -190,7 +189,7 @@ class FunctionCallerIntercept():
             # Interactive set for both call and return
             self.interactive[addr] = interactive
             self.interactive[return_addr] = interactive
-            # Set break point on return address that will execute function 
+            # Set break point on return address that will execute function
             # clean up
             if watchpoint == "":
                 self.setup_return_bp(function, callee_addr, return_addr)
@@ -206,19 +205,19 @@ class FunctionCallerIntercept():
                 self.next_stack_addr = None
             return stack_addr
         raise(ValueError("Insufficient Memory for stacks " +\
-                          "increase size of %s memory regions" % 
+                          "increase size of %s memory regions" %
                           FunctionCallerIntercept.MEMORY_REGION_NAME))
 
     def setup_return_bp(self, function: str, callee_addr: int, return_addr: int, break_type: str = "BP", rw: str = "r") -> None:
         if break_type == "WP":
             config = {'cls': '.'.join([self.__class__.__module__, self.__class__.__name__]),
-                    'registration_args': 
+                    'registration_args':
                         {'callee': callee_addr, 'is_return': True},
                     'run_once': True,
                     'function': function +'-return', 'addr': return_addr, 'watchpoint': rw}
         else:
             config = {'cls': '.'.join([self.__class__.__module__, self.__class__.__name__]),
-                    'registration_args': 
+                    'registration_args':
                         {'callee': callee_addr, 'is_return': True},
                     'run_once': True,
                     'function': function +'-return', 'addr': return_addr}
@@ -228,7 +227,7 @@ class FunctionCallerIntercept():
         return
 
     @bp_handler
-    def initiate_call_handler(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def initiate_call_handler(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         '''
             Perform the function call
         '''
@@ -240,7 +239,7 @@ class FunctionCallerIntercept():
         return False, None # Don't change PC, or R0
 
     @bp_handler
-    def return_handler(self, qemu: HALQemuTarget, addr: int) -> HandlerReturn:
+    def return_handler(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
         '''
             Preform function clean up
         '''
@@ -248,7 +247,7 @@ class FunctionCallerIntercept():
         if self.interactive[addr]:
             hal_log.info("After call of %s" % caller.callee_fname)
             IPython.embed()
-        
+
         caller.restore_state()
 
         return False, None

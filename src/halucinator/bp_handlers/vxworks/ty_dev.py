@@ -14,7 +14,7 @@ from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
 from halucinator.peripheral_models.utty import UTTYModel
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class TYDev(BPHandler):
             for name, items in interfaces.items():
                 self.utty_model.add_interface(name, **items)
 
-    def get_utty_id(self, qemu: HALQemuTarget, p_ty_dev: int) -> str:  # pylint: disable=no-self-use
+    def get_utty_id(self, qemu: "HalBackend", p_ty_dev: int) -> str:  # pylint: disable=no-self-use
         """get_utty_id"""
         # Offset may change per device make class arg
         offset = 0xC
@@ -92,7 +92,7 @@ class TYDev(BPHandler):
         return driver
 
     @bp_handler(["tyISR"])
-    def ty_isr(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
+    def ty_isr(self, qemu: "HalBackend", bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """ty_isr"""
         log.debug("ty_isr")
         p_ty_dev = qemu.get_arg(0)
@@ -132,7 +132,7 @@ class TYDev(BPHandler):
         return qemu.call("semGive", [sema_val], self, "receive_done")
 
     @bp_handler(["isr_execute_read"])
-    def isr_execute_read(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
+    def isr_execute_read(self, qemu: "HalBackend", bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """isr_execute_read"""
         log.debug("isr_execute_read")
         # Get the last device's state that added to the state stack(last device that interrupted)
@@ -153,7 +153,7 @@ class TYDev(BPHandler):
 
     @bp_handler(["receive_done"])
     def receive_done(
-        self, qemu: HALQemuTarget, bp_addr: int
+        self, qemu: "HalBackend", bp_addr: int
     ) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
         """receive_done"""
         log.debug(
@@ -162,7 +162,7 @@ class TYDev(BPHandler):
         return True, None
 
     @bp_handler(["task_receive_done"])
-    def task_receive_done(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
+    def task_receive_done(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument
         """receive_done"""
         log.debug(
             "DONE With Task Receive ...................................................."
@@ -173,27 +173,27 @@ class TYDev(BPHandler):
         return True, None
 
     @bp_handler(["tyITx", "utyITx"])
-    def ty_it_x(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
+    def ty_it_x(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
         """ty_it_x"""
         log.debug("tyITx")
         return False, None
 
     @bp_handler(["utyIRd", "tyIRd"])
-    def ty_ir_d(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
+    def ty_ir_d(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
         """Tis should differ based on rx or tx interrupt"""
         log.debug("tyIRd")
         log.debug("pDEV: %s", hex(qemu.get_arg(0)))
         return False, None
 
     @bp_handler(["utyRead", "tyRead"])
-    def ty_read(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
+    def ty_read(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, None]:  # pylint: disable=unused-argument, no-self-use
         """This should differ based on rx or tx interrupt"""
         log.debug("tyRead")
         log.debug("pDEV: %s", hex(qemu.get_arg(0)))
         return False, None
 
     @bp_handler(["rxTask"])
-    def rx_task(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
+    def rx_task(self, qemu: "HalBackend", bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """
         RX_task:
         This is opperation is used for devices that read in serial data at the
@@ -228,7 +228,7 @@ class TYDev(BPHandler):
         return True, None
 
     @bp_handler(["task_execute_read"])
-    def execute_read(self, qemu: HALQemuTarget, bp_addr: int) -> Any:  # pylint: disable=unused-argument
+    def execute_read(self, qemu: "HalBackend", bp_addr: int) -> Any:  # pylint: disable=unused-argument
         """execute_read"""
         isr_state = self.state_stack.pop()
         if isr_state.read_limit > 1:
@@ -245,7 +245,7 @@ class TYDev(BPHandler):
         )
 
     @bp_handler(["utyWrite", "tyWrite"])
-    def ty_write(self, qemu: HALQemuTarget, bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def ty_write(self, qemu: "HalBackend", bp_addr: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """ty_write"""
         log.debug("In tyWrite")
         p_ty_dev = qemu.get_arg(0)
@@ -261,7 +261,7 @@ class TYDev(BPHandler):
         self.utty_model.tx_buf(dev_id, buf)
         return True, buf_size
 
-    def fio_n_read(self, qemu: HALQemuTarget, p_obj: int, arg: int) -> Tuple[bool, int]:
+    def fio_n_read(self, qemu: "HalBackend", p_obj: int, arg: int) -> Tuple[bool, int]:
         """fio_n_read"""
         p_ty_dev = p_obj
         dev_id = self.get_utty_id(qemu, p_ty_dev)
@@ -270,7 +270,7 @@ class TYDev(BPHandler):
         qemu.write_memory(arg, 2, buf_size)
         return True, 0
 
-    def fio_rflush(self, qemu: HALQemuTarget, p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def fio_rflush(self, qemu: "HalBackend", p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """fio_rflush"""
         log.debug("FIORFLUSH")
         p_ty_dev = p_obj
@@ -278,14 +278,14 @@ class TYDev(BPHandler):
         self.utty_model.flush(dev_id)
         return True, 0
 
-    def fio_setoptions(self, qemu: HALQemuTarget, p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def fio_setoptions(self, qemu: "HalBackend", p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         Implement Set Options
         """
         self.ioctl_options = arg
         return True, 0
 
-    def fio_getoptions(self, qemu: HALQemuTarget, p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
+    def fio_getoptions(self, qemu: "HalBackend", p_obj: int, arg: int) -> Tuple[bool, int]:  # pylint: disable=unused-argument
         """
         Implement Get Options
         """
@@ -293,7 +293,7 @@ class TYDev(BPHandler):
         return True, 0
 
     @bp_handler(["utyIoctl", "tyIoctl"])
-    def ty_ioctl(self, qemu: HALQemuTarget, addr: int) -> Tuple[bool, Optional[int]]:  # pylint: disable=unused-argument
+    def ty_ioctl(self, qemu: "HalBackend", addr: int) -> Tuple[bool, Optional[int]]:  # pylint: disable=unused-argument
         """
         tyIoctl bp_handler
         """
@@ -400,4 +400,3 @@ class TYDev(BPHandler):
         69: "FIOCOMMITPERIODSETFS",  # 0x45
         70: "FIOFSTATFSGET64",  # 0x46
     }
-

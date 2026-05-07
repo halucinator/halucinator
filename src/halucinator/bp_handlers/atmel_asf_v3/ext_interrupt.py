@@ -12,7 +12,7 @@ from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 import logging
 
 if TYPE_CHECKING:
-    from halucinator.qemu_targets.hal_qemu import HALQemuTarget
+    from halucinator.backends.hal_backend import HalBackend
 log = logging.getLogger(__name__)
 
 
@@ -58,7 +58,7 @@ class EXT_Int(BPHandler, AvatarPeripheral):
                     self.model.clear_active(isr_name)
         return True
 
-    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, channel_map: Dict[int, str] = None) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, channel_map: Dict[int, str] = None) -> HandlerFunction:
         # Can be called for each function registered with the class
         if channel_map is not None:
             log.info("Setting Channel map: %s" % str(channel_map))
@@ -71,7 +71,6 @@ class EXT_Int(BPHandler, AvatarPeripheral):
     #     return False, None
 
     @bp_handler(['extint_register_callback'])
-    def register_callback(self, qemu: HALQemuTarget, bp_addr: int) -> HandlerReturn:
+    def register_callback(self, qemu: "HalBackend", bp_addr: int) -> HandlerReturn:
         log.info("Callback Set %s" % hex(qemu.regs.r0))
         return False, None  # Just let it run,
-

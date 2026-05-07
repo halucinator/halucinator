@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Mapping, Union
+from typing import Any, Dict, Mapping
 
 from halucinator.external_devices.ioserver import IOServer
 

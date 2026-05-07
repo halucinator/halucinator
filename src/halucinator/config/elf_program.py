@@ -15,6 +15,7 @@ from halucinator import hal_log as hal_log_conf
 
 if TYPE_CHECKING:
     from halucinator.hal_config import HalucinatorConfig
+    from halucinator.backends.hal_backend import HalBackend
 
 
 log = logging.getLogger(__name__)
@@ -27,18 +28,18 @@ class ELFProgram(object):
 
         It must be run after memory sections are parsed
     '''
-    def __init__(self, config_filename: str, config: Dict[str, Any], hal_config: HalucinatorConfig) -> None:
+    def __init__(self, config_filename: str, config: Dict[str, Any], hal_config: "HalucinatorConfig") -> None:
         self.config_file: str = config_filename
         self.config: Dict[str, Any] = config
-        self.hal_config: HalucinatorConfig = hal_config
+        self.hal_config: "HalucinatorConfig" = hal_config
         self._parse_config(config)
-        
+
         if self.build is not None:
             self.run_build_cmd()
 
         self.add_symbols()
         # Just easier to add them manually
-        # self.add_memories_configs()  
+        # self.add_memories_configs()
 
     def _parse_config(self, config: Dict[str, Any]) -> List[str]:
         '''
@@ -54,9 +55,9 @@ class ELFProgram(object):
         self.elf_module_relative: Optional[str] = config['elf_module_relative'] if 'elf_module_relative' in config else None
         self._intercepts: List[Dict[str, Any]] = config['intercepts'] if 'intercepts' in config else []
         errs.extend(self._validate_intercepts())
-            
-        self.elf_filename = self.get_fullpath(self.elf_filename, 
-                                              self.config_file, 
+
+        self.elf_filename = self.get_fullpath(self.elf_filename,
+                                              self.config_file,
                                               self.elf_module_relative)
         self.exit_function: str = config['exit_function'] if 'exit_function' in config else 'exit'
         self.exit_to: Optional[int] = None  # set with machine entry_point if this is to execute first
@@ -79,8 +80,8 @@ class ELFProgram(object):
     def get_fullpath(self, file_str: str, config_path: str, module_str: Optional[str] = None) -> str:
         '''
             Gets the full path for a file.  If file_str is a full path
-            it just returns it, else if module_str is specified 
-            returns a full path relative to the module, else returns a 
+            it just returns it, else if module_str is specified
+            returns a full path relative to the module, else returns a
             full path relative to the config_path.
 
         '''
@@ -98,8 +99,8 @@ class ELFProgram(object):
 
     def run_build_cmd(self) -> None:
         '''
-            Runs the program build command 
-            :param path(str):  Path to execute command from. 
+            Runs the program build command
+            :param path(str):  Path to execute command from.
                                Either full path, make relative to config file
             :param cmd(str):  Command to execute
             :param halucinator_relative(bool): If path is prepended with path to halucinator module
@@ -110,7 +111,7 @@ class ELFProgram(object):
             path = self.get_fullpath('', self.build['dir'], self.build['module_relative'])
             log.info(f"Building program with: {path}/{self.build['cmd']}")
             try:
-                result = subprocess.run(self.build['cmd'], 
+                result = subprocess.run(self.build['cmd'],
                                         cwd=path,
                                         check=True)
             except subprocess.CalledProcessError:
@@ -127,7 +128,7 @@ class ELFProgram(object):
             elf = ELFFile(infile)
             for seg_num in range(elf.num_segments()):
                 seg = elf.get_segment(seg_num)
-                base_addr = seg.header.p_paddr 
+                base_addr = seg.header.p_paddr
                 size = seg.header.p_memsz
                 align = seg.header.p_align
                 mem_size = (math.ceil(size / align) * align)
@@ -151,8 +152,8 @@ class ELFProgram(object):
 
                 if not in_other_seg:
                     log.debug(f"Adding segment: {hex(base_addr)} size:{hex(mem_size)}")
-                    memories.append({'base_addr': base_addr, 
-                                     'size': mem_size, 
+                    memories.append({'base_addr': base_addr,
+                                     'size': mem_size,
                                      'permissions':seg.header.p_flags})
         for idx, mem in enumerate(memories):
             per = mem['permissions']
@@ -160,7 +161,7 @@ class ELFProgram(object):
                       'w' if per & 0x2 else '-' + \
                       'x' if per & 0x1 else '-'
             name = f"{self.name}_mem_{idx}"
-            mem_config = HalMemConfig(name, self.elf_filename, 
+            mem_config = HalMemConfig(name, self.elf_filename,
                          mem['base_addr'], mem['size'], per_str)
 
             for mem in self.hal_config.memories.values():
@@ -172,13 +173,13 @@ class ELFProgram(object):
             log.debug(f"Adding memory to machine {name}:{mem_config}")
             self.hal_config.memories[name] = mem_config
 
-    def set_intercepts(self, qemu_target: Any) -> bool:
+    def set_intercepts(self, qemu_target: "HalBackend") -> bool:
         '''
             Rewrites the program under test (put) to use the functions
             provided by this elf.
 
             :param hal_config(HalucinatorConfig):  Halucinator Config
-            :param qemu_target(avatar.QemuTarget): Avatar Qemu Target
+            :param qemu_target(HalBackend): Halucinator emulator backend
         '''
         log.debug("In Elf Program setting symbols")
         no_error = True
@@ -203,24 +204,24 @@ class ELFProgram(object):
 
         return no_error
 
-    def load_segments(self, qemu_target: Any) -> None:
+    def load_segments(self, qemu_target: "HalBackend") -> None:
         '''
             Load the elf segments to memory
 
-            :param qemu_target(avatar.QemuTarget): The QEMU target to load into
+            :param qemu_target(HalBackend): The emulator backend to load into
         '''
         with open (self.elf_filename, 'rb') as infile:
             elf = ELFFile(infile)
             for seg_num in range(elf.num_segments()):
                 seg = elf.get_segment(seg_num)
-                base_addr = seg.header.p_paddr 
+                base_addr = seg.header.p_paddr
                 if seg.header.p_type == 'PT_LOAD':
                     hal_log.debug(f"Loading segment {seg.header}")
                     qemu_target.write_memory(base_addr, 1, seg.data(), raw=True)
 
-    def initialize(self, qemu_target: Any) -> None:
+    def initialize(self, qemu_target: "HalBackend") -> None:
         '''
-            Initializes the elf program in the target after 
+            Initializes the elf program in the target after
             it is created.
 
             :param qemu_target:
@@ -263,9 +264,9 @@ class ELFProgram(object):
                 size = sym['st_size']
                 sym_name = self.get_sym_name(sym.name)
                 sym = HalSymbolConfig(self.elf_filename, name=sym_name, addr=addr, size=size)
-                
+
                 self.hal_config.symbols.append(sym)
-    
+
     def get_entry_addr(self) -> int:
         '''
             Gets the address of the entry point for the elf file

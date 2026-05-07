@@ -10,7 +10,7 @@ from .trigger_interrupt import SendInterrupt
 import logging
 import time
 import socket
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import List, Mapping, Optional, Sequence, Union
 log = logging.getLogger(__name__)
 
 
