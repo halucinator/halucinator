@@ -5,11 +5,12 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
-#include "hw/sysbus.h"
-#if __has_include("hw/core/qdev-properties.h")
-#include "hw/core/qdev-properties.h" /* QEMU 11+ */
+#if __has_include("hw/core/sysbus.h")
+#include "hw/core/sysbus.h"          /* QEMU 11+ */
+#include "hw/core/qdev-properties.h"
 #else
-#include "hw/qdev-properties.h"      /* QEMU 10.x */
+#include "hw/sysbus.h"               /* QEMU 10.x */
+#include "hw/qdev-properties.h"
 #endif
 
 #include "hw/avatar/remote_memory.h"
