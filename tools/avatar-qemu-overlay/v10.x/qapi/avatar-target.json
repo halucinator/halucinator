@@ -24,8 +24,7 @@
   'data': {
       'irq-rx-queue-name': 'str', 'irq-tx-queue-name': 'str',
       'rmem-rx-queue-name': 'str', 'rmem-tx-queue-name': 'str'
-  },
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+  }
 }
 
 ##
@@ -35,8 +34,7 @@
 #
 # avatar-qemu only
 ##
-{ 'command': 'avatar-armv7m-disable-irq',
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+{ 'command': 'avatar-armv7m-disable-irq'
 }
 
 ##
@@ -49,8 +47,7 @@
 # @num-irq: int IRQ number to inject
 ##
 { 'command': 'avatar-armv7m-inject-irq',
-  'data': {'num-cpu': 'int', 'num-irq': 'int' },
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+  'data': {'num-cpu': 'int', 'num-irq': 'int' }
 }
 
 ##
@@ -64,8 +61,7 @@
 #
 ##
 { 'command': 'avatar-armv7m-ignore-irq-return',
-  'data': {'num-irq': 'int' },
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+  'data': {'num-irq': 'int' }
 }
 
 
@@ -80,8 +76,7 @@
 #
 ##
 { 'command': 'avatar-armv7m-unignore-irq-return',
-  'data': {'num-irq': 'int' },
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+  'data': {'num-irq': 'int' }
 }
 
 ##
@@ -97,8 +92,7 @@
 #
 ##
 { 'command': 'avatar-armv7m-set-vector-table-base',
-  'data': {'num-cpu': 'int', 'base': 'int' },
-  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+  'data': {'num-cpu': 'int', 'base': 'int' }
 }
 
 
