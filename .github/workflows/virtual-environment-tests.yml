@@ -35,6 +35,20 @@ jobs:
       # (sufficient to exercise LibAflQemuBackend's live e2e); other
       # archs can be added once the test surface needs them.
       HALUCINATOR_QEMU_LIBAFL_ARM: "${{ github.workspace }}/deps/build-qemu-libafl/arm-softmmu/qemu-system-arm"
+      # Upstream-QEMU + avatar overlay output. build_qemu.sh --upstream-qemu
+      # clones a vanilla upstream QEMU at a pinned tag, applies the
+      # tools/avatar-qemu-overlay patches, and builds into
+      # deps/build-qemu-upstream/. Proves that any reasonably modern QEMU
+      # release can host halucinator with only the overlay (no permanent
+      # fork). ARM-only in CI for speed; other archs are a matter of
+      # extending the target list.
+      HALUCINATOR_QEMU_UPSTREAM_ARM: "${{ github.workspace }}/deps/build-qemu-upstream/arm-softmmu/qemu-system-arm"
+      # Pinned upstream QEMU tag used for the overlay-build CI step.
+      # Bumping this exercises the overlay against a newer mainline; if
+      # the patches/0001-avatar-mainline-hooks.patch needs refreshing
+      # against context shifts, the CI Build Upstream QEMU step is the
+      # signal.
+      HALUCINATOR_UPSTREAM_QEMU_REF: v6.2.0
 
     steps:
     - uses: actions/checkout@v5
@@ -123,6 +137,37 @@ jobs:
         source $(pwd)/virtualenvs/halucinator/bin/activate
         ./build_qemu.sh
 
+    - name: Get avatar-qemu-overlay content hash
+      id: overlay-ref
+      # Pure content hash of the overlay tree — bumps whenever any patch,
+      # avatar source, or apply script changes, plus when we bump the
+      # pinned upstream QEMU ref.
+      run: |
+        h=$(git ls-files -s tools/avatar-qemu-overlay/ | git hash-object --stdin)
+        echo "sha=$h-${{ env.HALUCINATOR_UPSTREAM_QEMU_REF }}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore upstream-QEMU + overlay build cache
+      id: cache-upstream-qemu
+      uses: actions/cache/restore@v5
+      with:
+        path: deps/build-qemu-upstream
+        key: upstream-qemu-overlay-v1-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+    - name: Build upstream QEMU + overlay ARM (cached)
+      # Proves the avatar-qemu-overlay applies cleanly to vanilla upstream
+      # QEMU at the pinned tag and produces a halucinator-compatible
+      # binary. ARM-only — same scope as the libafl build above.
+      if: steps.cache-upstream-qemu.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        set -x
+        rm -rf deps/build-qemu-upstream deps/qemu-upstream
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        ./build_qemu.sh --upstream-qemu "${{ env.HALUCINATOR_UPSTREAM_QEMU_REF }}" arm-softmmu
+        # Drop the upstream-qemu working clone after build — only the
+        # build output needs to be cached.
+        rm -rf deps/qemu-upstream
+
     - name: Build libafl-qemu-bridge ARM (cached)
       # Only ARM is built — that's enough to exercise LibAflQemuBackend's
       # live e2e tests. Extending to the other archs is a matter of
@@ -166,6 +211,17 @@ jobs:
           deps/build-qemu-libafl/arm-softmmu/qemu-system-arm -machine help \
             | grep -q configurable || {
             echo "FATAL: 'configurable' machine missing from libafl-qemu-bridge ARM"
+            exit 1
+          }
+        fi
+        # upstream-QEMU + overlay ARM build: same smoke checks
+        if [ -x deps/build-qemu-upstream/arm-softmmu/qemu-system-arm ]; then
+          echo "=== Testing deps/build-qemu-upstream/arm-softmmu/qemu-system-arm ==="
+          deps/build-qemu-upstream/arm-softmmu/qemu-system-arm --version
+          ldd deps/build-qemu-upstream/arm-softmmu/qemu-system-arm | grep "not found" && exit 1 || true
+          deps/build-qemu-upstream/arm-softmmu/qemu-system-arm -machine help \
+            | grep -q configurable || {
+            echo "FATAL: 'configurable' machine missing from upstream-QEMU + overlay ARM"
             exit 1
           }
         fi
@@ -313,3 +369,10 @@ jobs:
       with:
         path: deps/build-qemu-libafl
         key: libafl-qemu-build-v1-${{ matrix.os }}-${{ steps.libafl-qemu-ref.outputs.sha }}
+
+    - name: Save upstream-QEMU + overlay build cache
+      if: success() && steps.cache-upstream-qemu.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: deps/build-qemu-upstream
+        key: upstream-qemu-overlay-v1-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
