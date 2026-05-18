@@ -102,25 +102,45 @@ for p in "$VARIANT_DIR"/patches/*.patch; do
     # upstream churn between point releases without forking the patch.
     if ( cd "$QEMU_SRC" && git apply --check "$p" >/dev/null 2>&1 ); then
         ( cd "$QEMU_SRC" && git apply "$p" )
-    elif ( cd "$QEMU_SRC" && yes n 2>/dev/null | patch -p1 -N -F3 --dry-run -s -i "$p" >/dev/null 2>&1 ); then
-        echo "    (git apply rejected; falling back to patch -N -F3)"
-        # -N skips already-applied hunks (e.g. when upstream merges a
-        # patch from a later QEMU release back into a maintenance
-        # branch). GNU patch -N silently skips; Apple/BSD patch still
-        # prompts "Assume -R?" and defaults to yes on EOF, which would
-        # *uninstall* the upstream version of the hunk. Reading the
-        # patch via -i (not <stdin) frees stdin for `yes n` to answer
-        # "no, don't reverse" so the already-applied hunk stays put.
-        # Cosmetic .rej / .orig files are scrubbed below.
-        ( cd "$QEMU_SRC" && yes n 2>/dev/null | patch -p1 -N -F3 -s -i "$p" ) || true
-        find "$QEMU_SRC" \( -name '*.rej' -o -name '*.orig' \) -delete
     else
-        echo "[apply.sh] patch did not apply cleanly: $p" >&2
-        echo "[apply.sh] the upstream QEMU version may be too new (or" >&2
-        echo "[apply.sh] too old) for this variant — try a different" >&2
-        echo "[apply.sh] variant subdir, or refresh the patch." >&2
-        ( cd "$QEMU_SRC" && patch -p1 --dry-run -F3 < "$p" ) >&2 || true
-        exit 1
+        echo "    (git apply rejected; falling back to patch -N -F3)"
+        # `patch -N` skips hunks already merged upstream (matters when
+        # the same overlay covers multiple QEMU point/major releases —
+        # e.g. v10.0.3 + v11.0.0 where v11 picked up one of our hunks
+        # natively). Apple/BSD patch also prompts "Assume -R?" with
+        # default yes on EOF, which would silently *un-install* the
+        # upstream version of the hunk; `yes n |` answers no. Reading
+        # via `-i` frees stdin for that.
+        #
+        # patch exits 1 whenever any hunk is skipped — even when -N
+        # treats the skip as "already applied, fine". So we can't
+        # trust the exit code, and a leftover .rej file can be either
+        # a genuine rejection OR the saved copy of an
+        # already-applied-skipped hunk. We distinguish via patch's own
+        # stdout: "hunks FAILED" / "FAILED at" indicate a real miss,
+        # while "Ignoring previously applied" + .rej is just the
+        # already-applied case and the target file is already at the
+        # goal state.
+        log=$(mktemp)
+        ( cd "$QEMU_SRC" && yes n 2>/dev/null \
+            | patch -p1 -N -F3 -i "$p" 2>&1 ) > "$log" || true
+        if grep -qE 'hunks? FAILED|FAILED at' "$log"; then
+            echo "[apply.sh] patch did not apply cleanly: $p" >&2
+            cat "$log" >&2
+            find "$QEMU_SRC" -name '*.rej' -print -exec cat {} \; >&2
+            find "$QEMU_SRC" \( -name '*.rej' -o -name '*.orig' \) -delete
+            rm -f "$log"
+            echo "[apply.sh] the upstream QEMU version may be too new" >&2
+            echo "[apply.sh] (or too old) for this variant — try a" >&2
+            echo "[apply.sh] different variant subdir, or refresh." >&2
+            exit 1
+        fi
+        # No real failures — print a one-line summary of what got
+        # skipped so the log makes it obvious what's redundant.
+        grep -E 'Ignoring previously applied|previously reversed' "$log" \
+            | sed 's/^/    /' || true
+        find "$QEMU_SRC" \( -name '*.rej' -o -name '*.orig' \) -delete
+        rm -f "$log"
     fi
 done
 

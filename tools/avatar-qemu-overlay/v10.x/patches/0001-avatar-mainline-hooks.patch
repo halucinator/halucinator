@@ -141,6 +141,17 @@ diff --git a/qapi/qapi-schema.json b/qapi/qapi-schema.json
  { 'include': 'cxl.json' }
  { 'include': 'uefi.json' }
 +{ 'include': 'avatar-target.json' }
+diff --git a/target/arm/cpu-features.h b/target/arm/cpu-features.h
+--- a/target/arm/cpu-features.h
++++ b/target/arm/cpu-features.h
+@@ -20,6 +20,7 @@
+ #ifndef TARGET_ARM_FEATURES_H
+ #define TARGET_ARM_FEATURES_H
+ 
++#include "cpu.h"
+ #include "hw/registerfields.h"
+ #include "qemu/host-utils.h"
+ 
 diff --git a/target/arm/cpu.h b/target/arm/cpu.h
 --- a/target/arm/cpu.h
 +++ b/target/arm/cpu.h
