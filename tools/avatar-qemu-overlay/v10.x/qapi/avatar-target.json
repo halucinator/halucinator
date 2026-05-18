@@ -42,7 +42,7 @@
 ##
 # @avatar-armv7m-inject-irq:
 #
-# Inject interrupt to armv7m core (requires arv7m interrupt handling enabled)
+# Inject interrupt to armv7m core (requires armv7m irq handling)
 #
 # @num-cpu: int CPU number to interrupt
 #
