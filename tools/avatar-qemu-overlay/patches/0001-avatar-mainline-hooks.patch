@@ -1,0 +1,512 @@
+diff --git a/configure b/configure
+index 48c21775f3..6d01395035 100755
+--- a/configure
++++ b/configure
+@@ -366,6 +366,7 @@ ninja=""
+ gio="$default_feature"
+ skip_meson=no
+ slirp_smbd="$default_feature"
++avatar="yes"
+ 
+ # The following Meson options are handled manually (still they
+ # are included in the automatically generated help message)
+@@ -1185,6 +1186,10 @@ for opt do
+   ;;
+   --disable-slirp-smbd) slirp_smbd=no
+   ;;
++  --enable-avatar) avatar=yes
++  ;;
++  --disable-avatar) avatar=no
++  ;;
+   # backwards compatibility options
+   --enable-trace-backend=*) meson_option_parse "--enable-trace-backends=$optarg" "$optarg"
+   ;;
+@@ -1470,6 +1475,7 @@ cat << EOF
+   rng-none        dummy RNG, avoid using /dev/(u)random and getrandom()
+   gio             libgio support
+   slirp-smbd      use smbd (at path --smbd=*) in slirp networking
++  avatar          configurable machine and avatar2 support
+ 
+ NOTE: The object files are built at the place where configure is launched
+ EOF
+@@ -3812,6 +3818,10 @@ if test "$safe_stack" = "yes"; then
+   echo "CONFIG_SAFESTACK=y" >> $config_host_mak
+ fi
+ 
++if test "$avatar" = "yes"; then
++    echo "CONFIG_AVATAR=y" >> $config_host_mak
++fi
++
+ # If we're using a separate build tree, set it up now.
+ # DIRS are directories which we simply mkdir in the build tree;
+ # LINKS are things to symlink back into the source tree
+diff --git a/hw/Kconfig b/hw/Kconfig
+index ad20cce0a9..bf0904b9b7 100644
+--- a/hw/Kconfig
++++ b/hw/Kconfig
+@@ -63,6 +63,7 @@ source sparc/Kconfig
+ source sparc64/Kconfig
+ source tricore/Kconfig
+ source xtensa/Kconfig
++source avatar/Kconfig
+ 
+ # Symbols used by multiple targets
+ config TEST_DEVICES
+diff --git a/hw/core/machine.c b/hw/core/machine.c
+index 53a99abc56..c75d90ac69 100644
+--- a/hw/core/machine.c
++++ b/hw/core/machine.c
+@@ -265,6 +265,21 @@ static void machine_set_kernel(Object *obj, const char *value, Error **errp)
+     ms->kernel_filename = g_strdup(value);
+ }
+ 
++static char *machine_get_avatar_config(Object *obj, Error **errp)
++{
++    MachineState *ms = MACHINE(obj);
++
++    return g_strdup(ms->avatar_config);
++}
++
++static void machine_set_avatar_config(Object *obj, const char *value, Error **errp)
++{
++    MachineState *ms = MACHINE(obj);
++
++    g_free(ms->avatar_config);
++    ms->avatar_config = g_strdup(value);
++}
++
+ static char *machine_get_initrd(Object *obj, Error **errp)
+ {
+     MachineState *ms = MACHINE(obj);
+@@ -782,6 +797,16 @@ static void machine_class_init(ObjectClass *oc, void *data)
+     object_class_property_set_description(oc, "kernel",
+         "Linux kernel image file");
+ 
++    object_class_property_add_str(oc, "avatar-config",
++        machine_get_avatar_config, machine_set_avatar_config);
++    object_class_property_set_description(oc, "avatar-config",
++        "Avatar Config File");
++
++    object_class_property_add_str(oc, "config-filename",
++        machine_get_avatar_config, machine_set_avatar_config);
++    object_class_property_set_description(oc, "config-filename",
++        "Avatar Config File (alias for avatar-config)");
++
+     object_class_property_add_str(oc, "initrd",
+         machine_get_initrd, machine_set_initrd);
+     object_class_property_set_description(oc, "initrd",
+diff --git a/hw/intc/armv7m_nvic.c b/hw/intc/armv7m_nvic.c
+index 13df002ce4..a0a0f0adb1 100644
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -25,6 +25,10 @@
+ #include "qemu/log.h"
+ #include "qemu/module.h"
+ #include "trace.h"
++#ifdef CONFIG_AVATAR
++#include "hw/avatar/interrupts.h"
++#endif
++
+ 
+ /* IRQ number counting:
+  *
+@@ -795,6 +799,9 @@ void armv7m_nvic_acknowledge_irq(void *opaque)
+     assert(s->vectpending_prio < running);
+ 
+     trace_nvic_acknowledge_irq(pending, s->vectpending_prio);
++#ifdef CONFIG_AVATAR
++    avatar_armv7m_exception_enter(pending);
++#endif
+ 
+     vec->active = 1;
+     vec->pending = 0;
+@@ -1565,6 +1572,7 @@ static void nvic_writel(NVICState *s, uint32_t offset, uint32_t value,
+ {
+     ARMCPU *cpu = s->cpu;
+ 
++
+     switch (offset) {
+     case 0xc: /* CPPWR */
+         if (!arm_feature(&cpu->env, ARM_FEATURE_V8)) {
+@@ -2355,6 +2363,11 @@ static MemTxResult nvic_sysreg_write(void *opaque, hwaddr addr,
+     unsigned i, startvec, end;
+     unsigned setval = 0;
+ 
++#ifdef CONFIG_AVATAR
++    if (avatar_armv7m_nvic_forward_write(offset, value, size)) {
++        goto exit_ok;
++    }
++#endif
+     trace_nvic_sysreg_write(addr, value, size);
+ 
+     if (attrs.user && !nvic_user_access_ok(s, addr, attrs)) {
+diff --git a/hw/meson.build b/hw/meson.build
+index b3366c888e..0fdeba4a2f 100644
+--- a/hw/meson.build
++++ b/hw/meson.build
+@@ -64,3 +64,4 @@ subdir('sparc')
+ subdir('sparc64')
+ subdir('tricore')
+ subdir('xtensa')
++subdir('avatar')
+diff --git a/include/hw/avatar/arm_helper.h b/include/hw/avatar/arm_helper.h
+new file mode 100644
+index 0000000000..38c3fe8a79
+--- /dev/null
++++ b/include/hw/avatar/arm_helper.h
+@@ -0,0 +1,5 @@
++#ifndef AVATAR_ARM_HELPER_H
++#define AVATAR_ARM_HELPER_H
++void avatar_add_banked_registers(ARMCPU *cpu);
++
++#endif
+diff --git a/include/hw/avatar/avatar_posix.h b/include/hw/avatar/avatar_posix.h
+new file mode 100644
+index 0000000000..c5d987e592
+--- /dev/null
++++ b/include/hw/avatar/avatar_posix.h
+@@ -0,0 +1,28 @@
++#ifndef AVATAR_POSIX_H
++#define AVATAR_POSIX_H
++
++#include <semaphore.h>
++#include <mqueue.h>
++
++#include "sysemu/runstate.h"
++
++typedef struct {
++    sem_t *sem;
++} QemuAvatarSemaphore;
++
++typedef struct {
++    mqd_t mq;
++} QemuAvatarMessageQueue;
++
++void qemu_avatar_sem_wait(QemuAvatarSemaphore *sem);
++void qemu_avatar_sem_post(QemuAvatarSemaphore *sem);
++void qemu_avatar_sem_open(QemuAvatarSemaphore *sem, const char *name);
++
++void qemu_avatar_mq_open_read(QemuAvatarMessageQueue *mq, const char *name, size_t msg_size);
++void qemu_avatar_mq_open_write(QemuAvatarMessageQueue *mq, const char *name, size_t msg_size);
++void qemu_avatar_mq_send(QemuAvatarMessageQueue *mq, void *msg, size_t len);
++int qemu_avatar_mq_receive(QemuAvatarMessageQueue *mq, void *buffer, size_t len);
++int qemu_avatar_mq_get_fd(QemuAvatarMessageQueue *mq);
++
++
++#endif
+diff --git a/include/hw/avatar/halucinator_irq_memory.h b/include/hw/avatar/halucinator_irq_memory.h
+new file mode 100644
+index 0000000000..fad76ace4f
+--- /dev/null
++++ b/include/hw/avatar/halucinator_irq_memory.h
+@@ -0,0 +1,20 @@
++#ifndef HW_HALUCINATOR_IRQ_MEMORY_H
++#define HW_HALUCINATOR_IRQ_MEMORY_H
++
++
++#define GLOBAL_IRQ_ENABLED 0x00000001
++#define IRQ_N_ACTIVE 0x01
++#define IRQ_N_ENABLED 0x80
++
++typedef struct HALucinatorIRQState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint64_t address;
++    uint32_t num_irqs;
++    uint64_t request_id;
++    unsigned char * irq_regs;
++    uint32_t status_reg;
++    qemu_irq irq;
++} HALucinatorIRQState;
++
++#endif
+\ No newline at end of file
+diff --git a/include/hw/avatar/interrupts.h b/include/hw/avatar/interrupts.h
+new file mode 100644
+index 0000000000..e709ffd5cc
+--- /dev/null
++++ b/include/hw/avatar/interrupts.h
+@@ -0,0 +1,26 @@
++#ifndef HW_AVATAR_INTERRUPTS_H
++#define HW_AVATAR_INTERRUPTS_H
++
++enum RemoteInterruptOperation{
++  INTERRUPT_ENTER,
++  INTERRUPT_EXIT,
++};
++
++typedef struct V7MInterruptReq{
++  uint64_t id;
++  uint32_t num_irq;
++  uint32_t operation;
++  uint32_t type;
++} V7MInterruptReq;
++
++typedef struct V7MInterruptResp{
++    uint64_t id;
++    bool success;
++    uint32_t operation;
++} V7MInterruptResp;
++
++void avatar_armv7m_exception_exit(int irq, uint32_t type);
++void avatar_armv7m_exception_enter(int irq);
++bool avatar_armv7m_nvic_forward_write(uint32_t offset, uint32_t value,unsigned size);
++
++#endif
+diff --git a/include/hw/avatar/remote_memory.h b/include/hw/avatar/remote_memory.h
+new file mode 100644
+index 0000000000..2635ee6900
+--- /dev/null
++++ b/include/hw/avatar/remote_memory.h
+@@ -0,0 +1,45 @@
++#ifndef HW_AVATAR_REMOTE_MEMORY_H
++#define HW_AVATAR_REMOTE_MEMORY_H
++
++
++#include "hw/avatar/avatar_posix.h"
++
++enum RemoteMemoryOperation{
++  AVATAR_READ,
++  AVATAR_WRITE,
++};
++
++
++
++typedef struct MemoryForwardReq{
++  uint64_t id;
++  uint64_t pc;
++  uint64_t address;
++  uint64_t value;
++  uint32_t size;
++  enum RemoteMemoryOperation operation;
++
++} MemoryForwardReq;
++
++typedef struct RemoteMemoryResp{
++    uint64_t id;
++    uint64_t value;
++    uint32_t success;
++} RemoteMemoryResp;
++
++typedef struct AvatarRMemoryState {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint64_t address;
++    uint32_t size;
++    uint64_t request_id;
++    char *rx_queue_name;
++    char *tx_queue_name;
++    QemuAvatarMessageQueue *rx_queue;
++    QemuAvatarMessageQueue *tx_queue;
++    qemu_irq irq;
++} AvatarRMemoryState;
++
++uint64_t get_current_pc(void);
++
++#endif
+diff --git a/include/hw/boards.h b/include/hw/boards.h
+index 9c1c190104..2cef7231e6 100644
+--- a/include/hw/boards.h
++++ b/include/hw/boards.h
+@@ -349,6 +349,7 @@ struct MachineState {
+     const char *boot_once;
+     char *kernel_filename;
+     char *kernel_cmdline;
++    char *avatar_config;
+     char *initrd_filename;
+     const char *cpu_type;
+     AccelState *accelerator;
+diff --git a/include/qemu/log.h b/include/qemu/log.h
+index 9b80660207..621d9c2c77 100644
+--- a/include/qemu/log.h
++++ b/include/qemu/log.h
+@@ -64,6 +64,7 @@ static inline bool qemu_log_separate(void)
+ #define CPU_LOG_PLUGIN     (1 << 18)
+ /* LOG_STRACE is used for user-mode strace logging. */
+ #define LOG_STRACE         (1 << 19)
++#define LOG_AVATAR         (1 << 20)
+ 
+ /* Lock output for a series of related logs.  Since this is not needed
+  * for a single qemu_log / qemu_log_mask / qemu_log_mask_and_addr, we
+diff --git a/meson.build b/meson.build
+index 96de1a6ef9..a7da350603 100644
+--- a/meson.build
++++ b/meson.build
+@@ -51,6 +51,7 @@ endforeach
+ have_user = have_linux_user or have_bsd_user
+ have_tools = 'CONFIG_TOOLS' in config_host
+ have_block = have_system or have_tools
++have_avatar = 'CONFIG_AVATAR' in config_host
+ 
+ python = import('python').find_installation()
+ 
+@@ -2975,6 +2976,11 @@ foreach target : target_dirs
+       exe_name += '-unsigned'
+     endif
+ 
++    if have_avatar
++      # To link the configurable machine with mqueue.h
++      link_args += ['-lrt']
++    endif
++
+     emulator = executable(exe_name, exe['sources'],
+                install: true,
+                c_args: c_args,
+@@ -3212,6 +3218,7 @@ summary_info += {'vhost-user-blk server support': have_vhost_user_blk_server}
+ summary_info += {'vhost-user-fs support': config_host.has_key('CONFIG_VHOST_USER_FS')}
+ summary_info += {'vhost-vdpa support': config_host.has_key('CONFIG_VHOST_VDPA')}
+ summary_info += {'build guest agent': config_host.has_key('CONFIG_GUEST_AGENT')}
++summary_info += {'avatar2 support': config_host.has_key('CONFIG_AVATAR')}
+ summary(summary_info, bool_yn: true, section: 'Configurable features')
+ 
+ # Compilation information
+diff --git a/qapi/meson.build b/qapi/meson.build
+index c0c49c15e4..5777d0c814 100644
+--- a/qapi/meson.build
++++ b/qapi/meson.build
+@@ -66,6 +66,12 @@ if have_system or have_tools
+     'ui',
+   ]
+ endif
++if have_avatar
++  qapi_all_modules += [
++    'avatar-target',
++  ]
++endif
++
+ 
+ qapi_storage_daemon_modules = [
+   'block-core',
+diff --git a/qapi/qapi-schema.json b/qapi/qapi-schema.json
+index 4912b9744e..16a8ef1519 100644
+--- a/qapi/qapi-schema.json
++++ b/qapi/qapi-schema.json
+@@ -93,3 +93,4 @@
+ { 'include': 'audio.json' }
+ { 'include': 'acpi.json' }
+ { 'include': 'pci.json' }
++{ 'include': 'avatar-target.json' }
+diff --git a/qemu-options.hx b/qemu-options.hx
+index ae2c6dbbfc..b869653bf9 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -3607,6 +3607,13 @@ SRST
+     or in multiboot format.
+ ERST
+ 
++DEF("avatar-config", HAS_ARG, QEMU_OPTION_avatar_config, \
++    "-avatar-config config used by configurable machine\n", QEMU_ARCH_ALL)
++SRST
++``-avatar-config``
++    Use AVATARCONFIG as config file for configurable machine.
++ERST
++
+ DEF("append", HAS_ARG, QEMU_OPTION_append, \
+     "-append cmdline use 'cmdline' as kernel command line\n", QEMU_ARCH_ALL)
+ SRST
+diff --git a/softmmu/vl.c b/softmmu/vl.c
+index 620a1f1367..e6255a87b3 100644
+--- a/softmmu/vl.c
++++ b/softmmu/vl.c
+@@ -2952,6 +2952,9 @@ void qemu_init(int argc, char **argv, char **envp)
+             case QEMU_OPTION_kernel:
+                 qdict_put_str(machine_opts_dict, "kernel", optarg);
+                 break;
++            case QEMU_OPTION_avatar_config:
++                qdict_put_str(machine_opts_dict, "avatar-config", optarg);
++                break;
+             case QEMU_OPTION_initrd:
+                 qdict_put_str(machine_opts_dict, "initrd", optarg);
+                 break;
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index e33f37b70a..fc2e6b9c5e 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -2152,6 +2152,7 @@ enum arm_features {
+     ARM_FEATURE_M_SECURITY, /* M profile Security Extension */
+     ARM_FEATURE_M_MAIN, /* M profile Main Extension */
+     ARM_FEATURE_V8_1M, /* M profile extras only in v8.1M and later */
++    ARM_FEATURE_CONFIGURABLE, /* created with avatar */
+ };
+ 
+ static inline int arm_feature(CPUARMState *env, int feature)
+@@ -2334,6 +2335,7 @@ static inline bool armv7m_nvic_can_take_pending_exception(void *opaque)
+     return true;
+ }
+ #endif
++
+ /**
+  * armv7m_nvic_set_pending: mark the specified exception as pending
+  * @opaque: the NVIC
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index 9b317899a6..d91a532a42 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -9029,7 +9029,12 @@ void cpsr_write(CPUARMState *env, uint32_t val, uint32_t mask,
+              * to switch mode. (Those are caught by translate.c for writes
+              * triggered by guest instructions.)
+              */
+-            mask &= ~CPSR_M;
++
++            /* avatar-modification:
++             * while above holds true, we want explicitly be able to switch
++             * mode from CPU_MODE_USR via GDB
++             */
++            if(!arm_feature(env, ARM_FEATURE_CONFIGURABLE)) mask &= ~CPSR_M;
+         } else if (bad_mode_switch(env, val & CPSR_M, write_type)) {
+             /* Attempt to switch to an invalid mode: this is UNPREDICTABLE in
+              * v7, and has defined behaviour in v8:
+diff --git a/target/arm/m_helper.c b/target/arm/m_helper.c
+index 2c9922dc29..6cb1ed9c74 100644
+--- a/target/arm/m_helper.c
++++ b/target/arm/m_helper.c
+@@ -33,6 +33,10 @@
+ #include "exec/cpu_ldst.h"
+ #include "semihosting/common-semi.h"
+ #endif
++#ifdef CONFIG_AVATAR
++#include "hw/avatar/interrupts.h"
++#endif
++
+ 
+ static void v7m_msr_xpsr(CPUARMState *env, uint32_t mask,
+                          uint32_t reg, uint32_t val)
+@@ -1408,6 +1412,10 @@ static void do_v7m_exception_exit(ARMCPU *cpu)
+                   " previous exception %d\n",
+                   excret, env->v7m.exception);
+ 
++#ifdef CONFIG_AVATAR
++    avatar_armv7m_exception_exit(env->v7m.exception, excret);
++#endif
++
+     if ((excret & R_V7M_EXCRET_RES1_MASK) != R_V7M_EXCRET_RES1_MASK) {
+         qemu_log_mask(LOG_GUEST_ERROR, "M profile: zero high bits in exception "
+                       "exit PC value 0x%" PRIx32 " are UNPREDICTABLE\n",
+diff --git a/util/log.c b/util/log.c
+index 2ee1500bee..fc286828d0 100644
+--- a/util/log.c
++++ b/util/log.c
+@@ -334,6 +334,8 @@ const QEMULogItem qemu_log_items[] = {
+ #endif
+     { LOG_STRACE, "strace",
+       "log every user-mode syscall, its input, and its result" },
++    { LOG_AVATAR, "avatar",
++      "Show avatar related events\n" },
+     { 0, NULL, NULL },
+ };
+ 
+diff --git a/util/qemu-config.c b/util/qemu-config.c
+index 436ab63b16..f31d994b80 100644
+--- a/util/qemu-config.c
++++ b/util/qemu-config.c
+@@ -162,6 +162,10 @@ static QemuOptsList machine_opts = {
+             .name = "accel",
+             .type = QEMU_OPT_STRING,
+             .help = "accelerator list",
++        },{
++            .name = "avatar-config",
++            .type = QEMU_OPT_STRING,
++            .help = "avatar config for configurable machine",
+         },{
+             .name = "kernel_irqchip",
+             .type = QEMU_OPT_BOOL,

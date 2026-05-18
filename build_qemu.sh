@@ -1,28 +1,34 @@
 #!/bin/bash
-# usage: build_qemu.sh [--source <subdir>] [target-list...]
+# usage: build_qemu.sh [options] [target-list...]
+#
+# Options:
+#   --source {avatar-qemu | libafl-qemu-bridge}
+#       Pick which pre-existing fork to build from. Output goes to
+#       deps/build-qemu/ (avatar-qemu, default) or deps/build-qemu-libafl/
+#       (libafl-qemu-bridge).
+#
+#   --upstream-qemu <git-ref>
+#       Clone vanilla upstream QEMU at <git-ref> into deps/qemu-upstream/,
+#       apply the avatar overlay from tools/avatar-qemu-overlay/ on top,
+#       and build into deps/build-qemu-upstream/. Lets users run
+#       halucinator against any QEMU release the overlay still applies
+#       to (currently verified at v6.2.0).
 #
 # Default source tree is deps/avatar-qemu (QEMU 6.2 fork carrying the
-# avatar hooks). Pass --source libafl-qemu-bridge to build the
-# halucinator/libafl-qemu-bridge fork instead — a newer QEMU 10.x base
-# that also carries the avatar hooks plus LibAFL fuzzing surface.
-#
-# Build output goes to:
-#   deps/build-qemu/        (default / avatar-qemu)
-#   deps/build-qemu-libafl/ (libafl-qemu-bridge)
+# avatar hooks).
 set -o errexit
 
 SOURCE="avatar-qemu"
 BUILD_SUBDIR="build-qemu"
+UPSTREAM_REF=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --source)
             SOURCE="$2"
             case "$SOURCE" in
-                avatar-qemu)
-                    BUILD_SUBDIR="build-qemu" ;;
-                libafl-qemu-bridge)
-                    BUILD_SUBDIR="build-qemu-libafl" ;;
+                avatar-qemu)         BUILD_SUBDIR="build-qemu" ;;
+                libafl-qemu-bridge)  BUILD_SUBDIR="build-qemu-libafl" ;;
                 *)
                     echo "build_qemu.sh: unknown --source '$SOURCE' "\
                          "(want avatar-qemu or libafl-qemu-bridge)" >&2
@@ -35,6 +41,16 @@ while [ "$#" -gt 0 ]; do
             arg="${1#--source=}"
             exec "$0" --source "$arg" "${@:2}"
             ;;
+        --upstream-qemu)
+            UPSTREAM_REF="$2"
+            SOURCE="upstream"
+            BUILD_SUBDIR="build-qemu-upstream"
+            shift 2
+            ;;
+        --upstream-qemu=*)
+            arg="${1#--upstream-qemu=}"
+            exec "$0" --upstream-qemu "$arg" "${@:2}"
+            ;;
         *)
             break
             ;;
@@ -45,6 +61,41 @@ if [ "$1" == "" ] ; then
     TARGET_LIST=("ppc-softmmu" "arm-softmmu" "aarch64-softmmu" "mips-softmmu" "ppc64-softmmu")
 else
     TARGET_LIST=$@
+fi
+
+# --upstream-qemu path: clone vanilla QEMU at the given ref, apply the
+# overlay from tools/avatar-qemu-overlay/, and use that as the source.
+if [ -n "$UPSTREAM_REF" ]; then
+    REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+    OVERLAY_DIR="$REPO_ROOT/tools/avatar-qemu-overlay"
+    UPSTREAM_DIR="$REPO_ROOT/deps/qemu-upstream"
+
+    if [ ! -d "$OVERLAY_DIR" ]; then
+        echo "build_qemu.sh: overlay missing at $OVERLAY_DIR" >&2
+        exit 1
+    fi
+
+    if [ ! -d "$UPSTREAM_DIR/.git" ]; then
+        echo "[build_qemu.sh] cloning upstream QEMU into $UPSTREAM_DIR"
+        git clone --depth 1 --branch "$UPSTREAM_REF" \
+            https://gitlab.com/qemu-project/qemu.git "$UPSTREAM_DIR"
+    else
+        echo "[build_qemu.sh] upstream QEMU already present at $UPSTREAM_DIR"
+        ( cd "$UPSTREAM_DIR" && git fetch --depth 1 origin "$UPSTREAM_REF" \
+            && git checkout -q FETCH_HEAD )
+    fi
+
+    # Reset working tree so re-runs don't double-apply overlay or stale patches.
+    ( cd "$UPSTREAM_DIR" && git reset --hard FETCH_HEAD 2>/dev/null \
+        || git reset --hard "$UPSTREAM_REF" )
+    ( cd "$UPSTREAM_DIR" && git clean -fdq -- ':!build' )
+
+    echo "[build_qemu.sh] applying avatar overlay"
+    "$OVERLAY_DIR/apply.sh" "$UPSTREAM_DIR"
+
+    SOURCE_PATH="../qemu-upstream"
+else
+    SOURCE_PATH="../$SOURCE"
 fi
 
 # build qemu
@@ -82,8 +133,9 @@ do
     # build was already clean.
     #
     # libafl-qemu-bridge is on a much newer QEMU base (10.x); these
-    # flags remain safe no-ops there too.
-    ../../"$SOURCE"/configure --target-list=$target \
+    # flags remain safe no-ops there too. The same applies to the
+    # vanilla-upstream + overlay path when --upstream-qemu is used.
+    "$SOURCE_PATH"/configure --target-list=$target \
         --disable-linux-io-uring --disable-werror --disable-bpf
     make all -j`nproc`
     popd

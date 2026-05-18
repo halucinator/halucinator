@@ -58,3 +58,10 @@ deps/build-qemu/
 # run_backend_matrix.sh per-cell logs and run summary
 .matrix_logs/
 matrix_run.log
+
+# `build_qemu.sh --upstream-qemu <ref>` clones vanilla upstream QEMU
+# into deps/qemu-upstream/ and applies tools/avatar-qemu-overlay before
+# building. Both the working clone and the build tree are ephemeral.
+deps/qemu-upstream/
+deps/build-qemu-upstream/
+deps/build-qemu-libafl/
