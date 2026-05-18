@@ -5,7 +5,11 @@
 #include "qapi/qapi-commands-avatar-target.h"
 #include "qapi/error.h"
 
-#include "hw/sysbus.h"
+#if __has_include("hw/core/sysbus.h")
+#include "hw/core/sysbus.h"          /* QEMU 11+ */
+#else
+#include "hw/sysbus.h"               /* QEMU 10.x */
+#endif
 // #include "sysemu/sysemu.h"
 #include "system/system.h"
 

@@ -32,14 +32,23 @@
 #else
 #include "exec/address-spaces.h"     /* QEMU 10.x */
 #endif
-#include "hw/hw.h"
+/*
+ * v11 moved several core headers under hw/core/ and dropped hw/hw.h
+ * entirely (its only public decl, hw_error(), now lives in
+ * hw/core/hw-error.h — which we don't use). Use __has_include() so
+ * the same overlay tree builds against both v10 and v11.
+ */
+#if __has_include("hw/core/sysbus.h")
+#include "hw/core/sysbus.h"          /* QEMU 11+ */
+#include "hw/core/irq.h"
+#include "hw/core/boards.h"
+#include "hw/core/qdev-properties.h"
+#else
+#include "hw/hw.h"                   /* QEMU 10.x */
 #include "hw/irq.h"
 #include "hw/sysbus.h"
 #include "hw/boards.h"
-#if __has_include("hw/core/qdev-properties.h")
-#include "hw/core/qdev-properties.h" /* QEMU 11+ */
-#else
-#include "hw/qdev-properties.h"      /* QEMU 10.x */
+#include "hw/qdev-properties.h"
 #endif
 #include "hw/avatar/configurable_machine.h"
 
@@ -50,7 +59,11 @@
 
 #if !defined(TARGET_AARCH64)
 #include "hw/arm/armv7m.h"
-#include "hw/qdev-clock.h"
+#if __has_include("hw/core/qdev-clock.h")
+#include "hw/core/qdev-clock.h"      /* QEMU 11+ */
+#else
+#include "hw/qdev-clock.h"           /* QEMU 10.x */
+#endif
 #endif
 typedef ARMCPU THISCPU;
 

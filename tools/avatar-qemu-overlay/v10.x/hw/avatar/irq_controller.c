@@ -11,8 +11,13 @@
 #include "qemu/error-report.h"
 #include "qapi/visitor.h"
 
-#include "hw/sysbus.h"
+#if __has_include("hw/core/sysbus.h")
+#include "hw/core/sysbus.h"          /* QEMU 11+ */
+#include "hw/core/irq.h"
+#else
+#include "hw/sysbus.h"               /* QEMU 10.x */
 #include "hw/irq.h"
+#endif
 #include "qapi/error.h"
 #include <regex.h>
 
