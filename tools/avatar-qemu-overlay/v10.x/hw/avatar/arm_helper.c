@@ -16,7 +16,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "exec/address-spaces.h"
+#if __has_include("system/address-spaces.h")
+#include "system/address-spaces.h"   /* QEMU 11+ */
+#else
+#include "exec/address-spaces.h"     /* QEMU 10.x */
+#endif
 #include "exec/gdbstub.h"
 
 #include "internals.h"

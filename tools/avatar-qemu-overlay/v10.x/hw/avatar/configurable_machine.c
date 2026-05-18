@@ -27,12 +27,20 @@
 #include "qemu/error-report.h"
 // #include "sysemu/sysemu.h"
 #include "system/system.h"
-#include "exec/address-spaces.h"
+#if __has_include("system/address-spaces.h")
+#include "system/address-spaces.h"   /* QEMU 11+ */
+#else
+#include "exec/address-spaces.h"     /* QEMU 10.x */
+#endif
 #include "hw/hw.h"
 #include "hw/irq.h"
 #include "hw/sysbus.h"
 #include "hw/boards.h"
-#include "hw/qdev-properties.h"
+#if __has_include("hw/core/qdev-properties.h")
+#include "hw/core/qdev-properties.h" /* QEMU 11+ */
+#else
+#include "hw/qdev-properties.h"      /* QEMU 10.x */
+#endif
 #include "hw/avatar/configurable_machine.h"
 
 //plattform specific imports
