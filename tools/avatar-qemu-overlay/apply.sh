@@ -92,6 +92,32 @@ if [ -d "$VARIANT_DIR/include/hw/avatar" ]; then
     cp -f "$VARIANT_DIR"/include/hw/avatar/* "$QEMU_SRC/include/hw/avatar/"
 fi
 
+# QEMU 8+ poisons per-target CONFIG_* macros in target-agnostic / per-
+# arch-common compilation units (see include/exec/poison.h built from
+# scripts/make-config-poison.sh). CONFIG_AVATAR is a per-target Kconfig
+# symbol, so the auto-generated poison list would block our
+# `#ifdef CONFIG_AVATAR` hooks in hw/intc/armv7m_nvic.c (built into
+# libsystem_arm, which is arm-common but not avatar-aware). QEMU
+# already pokes a hole here for CONFIG_TCG / CONFIG_USER_ONLY /
+# CONFIG_SOFTMMU using the same sed exclusion trick; we just add
+# CONFIG_AVATAR to that list. Skipped on QEMU 6.x (script doesn't
+# exist there — v6.2 wires poison differently).
+POISON_SCRIPT="$QEMU_SRC/scripts/make-config-poison.sh"
+if [ -f "$POISON_SCRIPT" ] && ! grep -q "CONFIG_AVATAR/d" "$POISON_SCRIPT"; then
+    echo "[apply.sh] exempting CONFIG_AVATAR from make-config-poison.sh"
+    # Insert the new sed -e clause immediately after the CONFIG_SOFTMMU
+    # one so the surrounding ordering still reads naturally.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        sed -i '' "/CONFIG_SOFTMMU\/d/a\\
+\\  -e '/CONFIG_AVATAR/d' \\\\
+" "$POISON_SCRIPT"
+    else
+        sed -i "/CONFIG_SOFTMMU\/d/a\\
+\\  -e '/CONFIG_AVATAR/d' \\\\
+" "$POISON_SCRIPT"
+    fi
+fi
+
 echo "[apply.sh] applying mainline-hook patches"
 for p in "$VARIANT_DIR"/patches/*.patch; do
     [ -e "$p" ] || continue   # empty patches/ dir is fine
@@ -124,7 +150,7 @@ for p in "$VARIANT_DIR"/patches/*.patch; do
         log=$(mktemp)
         ( cd "$QEMU_SRC" && yes n 2>/dev/null \
             | patch -p1 -N -F3 -i "$p" 2>&1 ) > "$log" || true
-        if grep -qE 'hunks? FAILED|FAILED at' "$log"; then
+        if grep -qiE 'hunks? failed|failed at' "$log"; then
             echo "[apply.sh] patch did not apply cleanly: $p" >&2
             cat "$log" >&2
             find "$QEMU_SRC" -name '*.rej' -print -exec cat {} \; >&2
