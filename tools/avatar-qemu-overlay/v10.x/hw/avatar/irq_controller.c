@@ -3,7 +3,11 @@
 // the U.S. Government retains certain rights in this software.
 
 #include "qemu/osdep.h"
-#include "hw/qdev-properties.h"
+#if __has_include("hw/core/qdev-properties.h")
+#include "hw/core/qdev-properties.h" /* QEMU 11+ */
+#else
+#include "hw/qdev-properties.h"      /* QEMU 10.x */
+#endif
 #include "qemu/error-report.h"
 #include "qapi/visitor.h"
 
