@@ -93,9 +93,11 @@ if [ -n "$UPSTREAM_REF" ]; then
     echo "[build_qemu.sh] applying avatar overlay"
     "$OVERLAY_DIR/apply.sh" "$UPSTREAM_DIR"
 
-    SOURCE_PATH="../qemu-upstream"
+    SOURCE_PATH="../../qemu-upstream"
 else
-    SOURCE_PATH="../$SOURCE"
+    # cwd at configure time is deps/<BUILD_SUBDIR>/<target>/, so two
+    # levels up reaches deps/, which is where the source trees live.
+    SOURCE_PATH="../../$SOURCE"
 fi
 
 # build qemu
