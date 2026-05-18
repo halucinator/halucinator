@@ -1,0 +1,179 @@
+diff --git a/configure b/configure
+--- a/configure
++++ b/configure
+@@ -256,6 +256,7 @@
+ use_containers="yes"
+ rust="disabled"
+ rust_target_triple=""
++avatar=yes
+ gdb_bin=$(command -v "gdb-multiarch" || command -v "gdb")
+ gdb_arches=""
+ 
+@@ -780,6 +781,10 @@
+   ;;
+   --disable-rust) rust=disabled
+   ;;
++  --enable-avatar) avatar=yes
++  ;;
++  --disable-avatar) avatar=no
++  ;;
+   # everything else has the same name in configure and meson
+   --*) meson_option_parse "$opt" "$optarg"
+   ;;
+@@ -1771,6 +1776,9 @@
+ echo "EXESUF=$EXESUF" >> $config_host_mak
+ if test "$default_targets" = "yes"; then
+   echo "CONFIG_DEFAULT_TARGETS=y" >> $config_host_mak
++fi
++if test "$avatar" = "yes"; then
++    echo "CONFIG_AVATAR=y" >> $config_host_mak
+ fi
+ 
+ # tests/tcg configuration
+diff --git a/hw/Kconfig b/hw/Kconfig
+--- a/hw/Kconfig
++++ b/hw/Kconfig
+@@ -67,6 +67,7 @@
+ source sparc64/Kconfig
+ source tricore/Kconfig
+ source xtensa/Kconfig
++source avatar/Kconfig
+ 
+ # Symbols used by multiple targets
+ config TEST_DEVICES
+diff --git a/hw/intc/armv7m_nvic.c b/hw/intc/armv7m_nvic.c
+--- a/hw/intc/armv7m_nvic.c
++++ b/hw/intc/armv7m_nvic.c
+@@ -28,6 +28,10 @@
+ #include "qemu/module.h"
+ #include "trace.h"
+ 
++#ifdef CONFIG_AVATAR
++#include "hw/avatar/interrupts.h"
++#endif
++
+ /* IRQ number counting:
+  *
+  * the num-irq property counts the number of external IRQ lines
+@@ -788,6 +792,9 @@
+     assert(s->vectpending_prio < running);
+ 
+     trace_nvic_acknowledge_irq(pending, s->vectpending_prio);
++#ifdef CONFIG_AVATAR
++    avatar_armv7m_exception_enter(pending);
++#endif
+ 
+     vec->active = 1;
+     vec->pending = 0;
+@@ -2345,6 +2352,9 @@
+     unsigned i, startvec, end;
+     unsigned setval = 0;
+ 
++#ifdef CONFIG_AVATAR
++    avatar_armv7m_nvic_forward_write(offset, value, size);
++#endif
+     trace_nvic_sysreg_write(addr, value, size);
+ 
+     if (attrs.user && !nvic_user_access_ok(s, addr, attrs)) {
+diff --git a/hw/meson.build b/hw/meson.build
+--- a/hw/meson.build
++++ b/hw/meson.build
+@@ -48,6 +48,7 @@
+ 
+ subdir('alpha')
+ subdir('arm')
++subdir('avatar')
+ subdir('avr')
+ subdir('hppa')
+ subdir('i386')
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -256,6 +256,7 @@
+            error_message: 'unsupported OS for QEMU guest agent') \
+   .allowed()
+ have_block = have_system or have_tools
++have_avatar = 'CONFIG_AVATAR' in config_host
+ 
+ enable_modules = get_option('modules') \
+   .require(host_os != 'windows',
+@@ -4291,6 +4292,11 @@
+       exe_name += '-unsigned'
+     endif
+ 
++    if have_avatar
++      # To link the configurable machine with mqueue.h
++      link_args += ['-lrt']
++    endif
++
+     emulator = executable(exe_name, exe['sources'],
+                install: true,
+                c_args: c_args,
+@@ -4557,6 +4563,7 @@
+ summary_info += {'vhost-user-blk server support': have_vhost_user_blk_server}
+ summary_info += {'vhost-vdpa support': have_vhost_vdpa}
+ summary_info += {'build guest agent': have_ga}
++summary_info += {'avatar2 support': config_host.has_key('CONFIG_AVATAR')}
+ summary(summary_info, bool_yn: true, section: 'Configurable features')
+ 
+ # Compilation information
+diff --git a/qapi/meson.build b/qapi/meson.build
+--- a/qapi/meson.build
++++ b/qapi/meson.build
+@@ -74,6 +74,12 @@
+   ]
+ endif
+ 
++if have_avatar
++  qapi_all_modules += [
++    'avatar-target',
++  ]
++endif
++
+ qapi_nonmodule_outputs = [
+   'qapi-introspect.c', 'qapi-introspect.h',
+   'qapi-types.c', 'qapi-types.h',
+diff --git a/qapi/qapi-schema.json b/qapi/qapi-schema.json
+--- a/qapi/qapi-schema.json
++++ b/qapi/qapi-schema.json
+@@ -71,3 +71,4 @@
+ { 'include': 'cryptodev.json' }
+ { 'include': 'cxl.json' }
+ { 'include': 'uefi.json' }
++{ 'include': 'avatar-target.json' }
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -2476,6 +2476,7 @@
+      * CPU types added in future.
+      */
+     ARM_FEATURE_BACKCOMPAT_CNTFRQ, /* 62.5MHz timer default */
++    ARM_FEATURE_CONFIGURABLE, /* created with avatar */
+ };
+ 
+ static inline int arm_feature(CPUARMState *env, int feature)
+diff --git a/target/arm/tcg/m_helper.c b/target/arm/tcg/m_helper.c
+--- a/target/arm/tcg/m_helper.c
++++ b/target/arm/tcg/m_helper.c
+@@ -25,6 +25,10 @@
+ #include "hw/intc/armv7m_nvic.h"
+ #endif
+ 
++#ifdef CONFIG_AVATAR
++#include "hw/avatar/interrupts.h"
++#endif
++
+ static void v7m_msr_xpsr(CPUARMState *env, uint32_t mask,
+                          uint32_t reg, uint32_t val)
+ {
+@@ -1400,6 +1404,10 @@
+     qemu_log_mask(CPU_LOG_INT, "Exception return: magic PC %" PRIx32
+                   " previous exception %d\n",
+                   excret, env->v7m.exception);
++
++#ifdef CONFIG_AVATAR
++    avatar_armv7m_exception_exit(env->v7m.exception, excret);
++#endif
+ 
+     if ((excret & R_V7M_EXCRET_RES1_MASK) != R_V7M_EXCRET_RES1_MASK) {
+         qemu_log_mask(LOG_GUEST_ERROR, "M profile: zero high bits in exception "

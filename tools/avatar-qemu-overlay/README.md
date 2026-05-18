@@ -25,24 +25,39 @@ and end up with a QEMU binary halucinator can drive end-to-end.
 
 ## Layout
 
-    hw/avatar/                    -- additive (copied verbatim into qsrc/hw/avatar/)
-        Kconfig
-        meson.build
-        configurable_machine.c    -- the `configurable` machine type
-        remote_memory.c           -- `avatar-rmemory` QOM device (MMIO → halucinator)
-        irq_controller.c
-        interrupts.c              -- armv7m IRQ injection
-        arm_helper.c              -- banked-register helpers
-        avatar_posix.c            -- POSIX MQ glue used by remote_memory
-    qapi/
-        avatar-target.json        -- QMP avatar-* commands
-    patches/
-        0001-avatar-mainline-hooks.patch
-                                  -- the ~20-file mainline patch series:
-                                     register schema, log mask, hw/Kconfig
-                                     subdir, machine-class hook, NVIC IRQ
-                                     hook, ARM helper hooks, etc.
-    apply.sh                      -- copy + apply driver
+The overlay is split per QEMU API generation. `apply.sh` reads the
+target tree's `VERSION` file to pick the right subdir.
+
+    v6.2.x/                       -- tracks the avatar-qemu fork
+        hw/avatar/*               -- additive QOM devices + machine type
+        qapi/avatar-target.json
+        patches/0001-avatar-mainline-hooks.patch
+                                  -- ~17 mainline files: machine-class hook,
+                                     register schema, log mask, NVIC IRQ
+                                     hook, banked-register helpers, etc.
+
+    v10.x/                        -- tracks libafl-qemu-bridge (also covers v11)
+        hw/avatar/*               -- avatar files refactored for the QEMU 10
+                                     hw API (some interfaces renamed/moved
+                                     between 6.2 and 10)
+        include/hw/avatar/*       -- public avatar headers (LOG_AVATAR lives
+                                     in interrupts.h here so the overlay
+                                     doesn't have to patch include/qemu/log.h
+                                     and fight bit-numbering churn)
+        qapi/avatar-target.json
+        patches/0001-avatar-mainline-hooks.patch
+                                  -- 9 mainline files: configure --enable-avatar
+                                     option, hw/Kconfig + hw/meson.build
+                                     wiring, NVIC IRQ hooks, qapi schema
+                                     wiring, ARM_FEATURE_CONFIGURABLE,
+                                     m_helper exception-exit hook, meson
+                                     have_avatar plumbing.
+
+    apply.sh                      -- variant-aware driver. Tries git apply,
+                                     falls back to `patch -N -F3` so minor
+                                     point-release churn (line-number drift,
+                                     hunks already merged upstream) absorbs
+                                     instead of breaking the build.
 
 ## What the mainline patch touches
 
@@ -63,16 +78,19 @@ About 20 files, 250 net new lines:
 
 ## Version compatibility
 
-| QEMU release | Status | Notes |
+| QEMU release | Variant | Status |
 |---|---|---|
-| v6.2.0 | ✅ verified | the base our `avatar-qemu` fork tracks |
-| v8.x   | ⏳ untested | the patches/ series will likely refresh cleanly; some mainline files shifted (e.g. `softmmu/vl.c` moved) |
-| v10.x  | ⏳ untested | `libafl-qemu-bridge` already ships these patches against 10.0.3 so it's known-portable; this overlay just needs minor refreshes |
+| v6.2.0  | v6.2.x | ✅ verified — base of the `avatar-qemu` fork |
+| v10.0.3 | v10.x  | ✅ verified — base of `libafl-qemu-bridge` |
+| v10.0.9 | v10.x  | ✅ verified — applies clean with `git apply` |
+| v11.0.0 | v10.x  | ✅ verified — applies via `patch -N -F3` fallback (one hunk merged upstream and is skipped) |
+| v8.x    | —      | ⏳ untested — softmmu/vl.c moved to system/main.c here; needs a v8.x variant |
 
-Refreshing the patches for a new QEMU release is a one-time chore per
-release — read the rejected hunks, do a 3-way merge, regenerate
-`patches/0001-avatar-mainline-hooks.patch`. The overlay surface is
-small and stable.
+Adding a new variant = create `vN.x/`, copy the closest-matching
+`hw/avatar/`, refresh the mainline patch against the new base, smoke-test
+that `--enable-avatar` configures and `qemu-system-arm -machine help`
+lists `configurable`. The header + .c files usually only need cosmetic
+updates since they live in their own `hw/avatar/` namespace.
 
 ## See also
 

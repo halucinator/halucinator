@@ -1,0 +1,104 @@
+# -*- Mode: Python -*-
+# vim: filetype=python
+
+##
+# = avatar additions
+##
+
+##
+# @avatar-armv7m-enable-irq:
+#
+# Enables custom avatar interrupt handling for armv7m guests
+#
+# @irq-rx-queue-name: queue name for rx irq
+#
+# @irq-tx-queue-name: queue name for tx irq
+#
+# @rmem-rx-queue-name: queue name for rx irq
+#
+# @rmem-tx-queue-name: queue name for tx irq
+#
+# Since 7.1
+##
+{ 'command': 'avatar-armv7m-enable-irq',
+  'data': {
+      'irq-rx-queue-name': 'str', 'irq-tx-queue-name': 'str',
+      'rmem-rx-queue-name': 'str', 'rmem-tx-queue-name': 'str'
+  },
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+##
+# @avatar-armv7m-disable-irq:
+#
+# Disables custom avatar interrupt handling for armv7m guests
+#
+# avatar-qemu only
+##
+{ 'command': 'avatar-armv7m-disable-irq',
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+##
+# @avatar-armv7m-inject-irq:
+#
+# Inject interrupt to armv7m core (requires arv7m interrupt handling enabled)
+#
+# @num-cpu: int CPU number to interrupt
+#
+# @num-irq: int IRQ number to inject
+##
+{ 'command': 'avatar-armv7m-inject-irq',
+  'data': {'num-cpu': 'int', 'num-irq': 'int' },
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+##
+# @avatar-armv7m-ignore-irq-return:
+#
+# Advices QEMU to not communicate with avatar on interrupt returns
+#
+# avatar-qemu only
+# 
+# @num-irq: int IRQ number to ignore on return
+#
+##
+{ 'command': 'avatar-armv7m-ignore-irq-return',
+  'data': {'num-irq': 'int' },
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+
+##
+# @avatar-armv7m-unignore-irq-return:
+#
+# Advices QEMU to communicate with avatar on interrupt returns
+#
+# avatar-qemu only
+#
+# @num-irq: int IRQ Number to remove ignore from
+#
+##
+{ 'command': 'avatar-armv7m-unignore-irq-return',
+  'data': {'num-irq': 'int' },
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+##
+# @avatar-armv7m-set-vector-table-base:
+#
+# Sets the NVIC base address to a user controlled location
+#
+# avatar-qemu only
+#
+# @num-cpu: int CPU number
+#
+# @base: int base address for NVIC base address
+#
+##
+{ 'command': 'avatar-armv7m-set-vector-table-base',
+  'data': {'num-cpu': 'int', 'base': 'int' },
+  'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
+}
+
+

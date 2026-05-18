@@ -1,0 +1,3 @@
+config AVATAR
+    bool
+    default y
