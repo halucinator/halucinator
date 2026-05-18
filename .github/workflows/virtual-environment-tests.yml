@@ -35,20 +35,19 @@ jobs:
       # (sufficient to exercise LibAflQemuBackend's live e2e); other
       # archs can be added once the test surface needs them.
       HALUCINATOR_QEMU_LIBAFL_ARM: "${{ github.workspace }}/deps/build-qemu-libafl/arm-softmmu/qemu-system-arm"
-      # Upstream-QEMU + avatar overlay output. build_qemu.sh --upstream-qemu
-      # clones a vanilla upstream QEMU at a pinned tag, applies the
+      # Upstream-QEMU + avatar overlay output. build_qemu.sh
+      # --upstream-qemu <ref> clones vanilla upstream QEMU at the given
+      # tag into deps/qemu-upstream-<ref>/, applies the
       # tools/avatar-qemu-overlay patches, and builds into
-      # deps/build-qemu-upstream/. Proves that any reasonably modern QEMU
-      # release can host halucinator with only the overlay (no permanent
-      # fork). ARM-only in CI for speed; other archs are a matter of
-      # extending the target list.
-      HALUCINATOR_QEMU_UPSTREAM_ARM: "${{ github.workspace }}/deps/build-qemu-upstream/arm-softmmu/qemu-system-arm"
-      # Pinned upstream QEMU tag used for the overlay-build CI step.
-      # Bumping this exercises the overlay against a newer mainline; if
-      # the patches/0001-avatar-mainline-hooks.patch needs refreshing
-      # against context shifts, the CI Build Upstream QEMU step is the
-      # signal.
-      HALUCINATOR_UPSTREAM_QEMU_REF: v6.2.0
+      # deps/build-qemu-upstream-<ref>/. The same overlay tree is
+      # exercised against three points along the QEMU release timeline
+      # so a patch break shows up on the *first* version it stops
+      # tracking, not at integration time. ARM-only — same scope as the
+      # libafl build; other archs are a matter of extending the target
+      # list.
+      HALUCINATOR_QEMU_UPSTREAM_V62_ARM:  "${{ github.workspace }}/deps/build-qemu-upstream-v6.2.0/arm-softmmu/qemu-system-arm"
+      HALUCINATOR_QEMU_UPSTREAM_V10_ARM:  "${{ github.workspace }}/deps/build-qemu-upstream-v10.0.9/arm-softmmu/qemu-system-arm"
+      HALUCINATOR_QEMU_UPSTREAM_V11_ARM:  "${{ github.workspace }}/deps/build-qemu-upstream-v11.0.0/arm-softmmu/qemu-system-arm"
 
     steps:
     - uses: actions/checkout@v5
@@ -139,34 +138,73 @@ jobs:
 
     - name: Get avatar-qemu-overlay content hash
       id: overlay-ref
-      # Pure content hash of the overlay tree — bumps whenever any patch,
-      # avatar source, or apply script changes, plus when we bump the
-      # pinned upstream QEMU ref.
+      # Pure content hash of the overlay tree — bumps whenever any
+      # patch, avatar source, or apply script changes. Used as part of
+      # the per-ref cache keys below so a refresh of the overlay
+      # invalidates *every* overlay-built cache, not just the first one
+      # that hits.
       run: |
         h=$(git ls-files -s tools/avatar-qemu-overlay/ | git hash-object --stdin)
-        echo "sha=$h-${{ env.HALUCINATOR_UPSTREAM_QEMU_REF }}" >> "$GITHUB_OUTPUT"
+        echo "sha=$h" >> "$GITHUB_OUTPUT"
 
-    - name: Restore upstream-QEMU + overlay build cache
-      id: cache-upstream-qemu
+    # --- v6.2.0: the QEMU base our `avatar-qemu` fork tracks --------------
+    - name: Restore upstream-QEMU v6.2.0 + overlay cache
+      id: cache-upstream-qemu-v62
       uses: actions/cache/restore@v5
       with:
-        path: deps/build-qemu-upstream
-        key: upstream-qemu-overlay-v1-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+        path: deps/build-qemu-upstream-v6.2.0
+        key: upstream-qemu-overlay-v6.2.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
 
-    - name: Build upstream QEMU + overlay ARM (cached)
-      # Proves the avatar-qemu-overlay applies cleanly to vanilla upstream
-      # QEMU at the pinned tag and produces a halucinator-compatible
-      # binary. ARM-only — same scope as the libafl build above.
-      if: steps.cache-upstream-qemu.outputs.cache-hit != 'true'
+    - name: Build upstream-QEMU v6.2.0 + overlay ARM (cached)
+      if: steps.cache-upstream-qemu-v62.outputs.cache-hit != 'true'
       run: |
         set -e
         set -x
-        rm -rf deps/build-qemu-upstream deps/qemu-upstream
+        rm -rf deps/build-qemu-upstream-v6.2.0 deps/qemu-upstream-v6.2.0
         source $(pwd)/virtualenvs/halucinator/bin/activate
-        ./build_qemu.sh --upstream-qemu "${{ env.HALUCINATOR_UPSTREAM_QEMU_REF }}" arm-softmmu
-        # Drop the upstream-qemu working clone after build — only the
-        # build output needs to be cached.
-        rm -rf deps/qemu-upstream
+        ./build_qemu.sh --upstream-qemu v6.2.0 arm-softmmu
+        # Drop the working clone — only the build output needs caching.
+        rm -rf deps/qemu-upstream-v6.2.0
+
+    # --- v10.0.9: latest 10.x point release --------------------------------
+    - name: Restore upstream-QEMU v10.0.9 + overlay cache
+      id: cache-upstream-qemu-v10
+      uses: actions/cache/restore@v5
+      with:
+        path: deps/build-qemu-upstream-v10.0.9
+        key: upstream-qemu-overlay-v10.0.9-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+    - name: Build upstream-QEMU v10.0.9 + overlay ARM (cached)
+      if: steps.cache-upstream-qemu-v10.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        set -x
+        rm -rf deps/build-qemu-upstream-v10.0.9 deps/qemu-upstream-v10.0.9
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        # QEMU 10+ uses mkvenv (introduced in 8.x) and pulls in distlib
+        # at configure time. The base ubuntu image doesn't ship it.
+        pip install distlib
+        ./build_qemu.sh --upstream-qemu v10.0.9 arm-softmmu
+        rm -rf deps/qemu-upstream-v10.0.9
+
+    # --- v11.0.0: current major (overlay applies via patch -N -F3 fallback)
+    - name: Restore upstream-QEMU v11.0.0 + overlay cache
+      id: cache-upstream-qemu-v11
+      uses: actions/cache/restore@v5
+      with:
+        path: deps/build-qemu-upstream-v11.0.0
+        key: upstream-qemu-overlay-v11.0.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+    - name: Build upstream-QEMU v11.0.0 + overlay ARM (cached)
+      if: steps.cache-upstream-qemu-v11.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        set -x
+        rm -rf deps/build-qemu-upstream-v11.0.0 deps/qemu-upstream-v11.0.0
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        pip install distlib
+        ./build_qemu.sh --upstream-qemu v11.0.0 arm-softmmu
+        rm -rf deps/qemu-upstream-v11.0.0
 
     - name: Build libafl-qemu-bridge ARM (cached)
       # Only ARM is built — that's enough to exercise LibAflQemuBackend's
@@ -214,17 +252,25 @@ jobs:
             exit 1
           }
         fi
-        # upstream-QEMU + overlay ARM build: same smoke checks
-        if [ -x deps/build-qemu-upstream/arm-softmmu/qemu-system-arm ]; then
-          echo "=== Testing deps/build-qemu-upstream/arm-softmmu/qemu-system-arm ==="
-          deps/build-qemu-upstream/arm-softmmu/qemu-system-arm --version
-          ldd deps/build-qemu-upstream/arm-softmmu/qemu-system-arm | grep "not found" && exit 1 || true
-          deps/build-qemu-upstream/arm-softmmu/qemu-system-arm -machine help \
-            | grep -q configurable || {
-            echo "FATAL: 'configurable' machine missing from upstream-QEMU + overlay ARM"
+        # upstream-QEMU + overlay ARM builds: smoke each variant. Failure
+        # here means the overlay no longer applies cleanly OR applied
+        # cleanly but produced a binary missing the `configurable`
+        # machine — either way the patch refresh has gone wrong.
+        for variant in v6.2.0 v10.0.9 v11.0.0; do
+          bin="deps/build-qemu-upstream-$variant/arm-softmmu/qemu-system-arm"
+          echo "=== Testing $bin ==="
+          if [ ! -x "$bin" ]; then
+            echo "FATAL: $bin missing — overlay build for $variant failed"
+            exit 1
+          fi
+          "$bin" --version
+          ldd "$bin" | grep "not found" && exit 1 || true
+          "$bin" -machine help | grep -q configurable || {
+            echo "FATAL: 'configurable' machine missing from $bin"
+            "$bin" -machine help
             exit 1
           }
-        fi
+        done
         # Test that ARM QEMU can start and accept GDB connections
         deps/build-qemu/arm-softmmu/qemu-system-arm \
           -machine configurable -nographic -S -gdb tcp::19999 &
@@ -337,6 +383,35 @@ jobs:
           -p no:timeout --tb=short \
           --cov=halucinator --cov-report=term-missing --cov-report=html:coverage_report
 
+    - name: run live qemu pytest against each overlay variant
+      # The main pytest run above uses HALUCINATOR_QEMU_ARM, which points
+      # at the avatar-qemu fork build. To prove each overlay variant
+      # actually drives halucinator end-to-end (not just "configurable
+      # machine is registered"), point HALUCINATOR_QEMU_ARM at each
+      # overlay binary in turn and re-run only the live qemu backend
+      # suite. Failure here means the overlay built a binary that QEMU
+      # accepts as `-machine configurable` but halucinator's
+      # QEMUBackend can't actually drive (GDB/QMP handshake, memory
+      # ops, breakpoints).
+      timeout-minutes: 10
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        for variant in v6.2.0 v10.0.9 v11.0.0; do
+          bin="$(pwd)/deps/build-qemu-upstream-$variant/arm-softmmu/qemu-system-arm"
+          echo "=== live qemu backend against upstream+overlay $variant ==="
+          # Override HALUCINATOR_QEMU_ARM for this pytest invocation.
+          # AVATAR2_QEMU_EXECUTABLE doesn't matter — these tests don't
+          # touch avatar2 — but override it too for consistency in case
+          # we add avatar2-overlay coverage later.
+          HALUCINATOR_QEMU_ARM="$bin" \
+          AVATAR2_QEMU_EXECUTABLE="$bin" \
+          PYTHONPATH=src:test/pytest/helpers \
+            python3 -m pytest test/pytest/backends/test_live_qemu_backend.py \
+            -p no:timeout --tb=short -v
+        done
+
     - name: Upload coverage report
       if: always()
       uses: actions/upload-artifact@v5
@@ -370,9 +445,23 @@ jobs:
         path: deps/build-qemu-libafl
         key: libafl-qemu-build-v1-${{ matrix.os }}-${{ steps.libafl-qemu-ref.outputs.sha }}
 
-    - name: Save upstream-QEMU + overlay build cache
-      if: success() && steps.cache-upstream-qemu.outputs.cache-hit != 'true'
+    - name: Save upstream-QEMU v6.2.0 + overlay cache
+      if: success() && steps.cache-upstream-qemu-v62.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
-        path: deps/build-qemu-upstream
-        key: upstream-qemu-overlay-v1-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+        path: deps/build-qemu-upstream-v6.2.0
+        key: upstream-qemu-overlay-v6.2.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+    - name: Save upstream-QEMU v10.0.9 + overlay cache
+      if: success() && steps.cache-upstream-qemu-v10.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: deps/build-qemu-upstream-v10.0.9
+        key: upstream-qemu-overlay-v10.0.9-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+    - name: Save upstream-QEMU v11.0.0 + overlay cache
+      if: success() && steps.cache-upstream-qemu-v11.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: deps/build-qemu-upstream-v11.0.0
+        key: upstream-qemu-overlay-v11.0.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}

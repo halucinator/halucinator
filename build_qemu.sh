@@ -8,11 +8,13 @@
 #       (libafl-qemu-bridge).
 #
 #   --upstream-qemu <git-ref>
-#       Clone vanilla upstream QEMU at <git-ref> into deps/qemu-upstream/,
-#       apply the avatar overlay from tools/avatar-qemu-overlay/ on top,
-#       and build into deps/build-qemu-upstream/. Lets users run
-#       halucinator against any QEMU release the overlay still applies
-#       to (currently verified at v6.2.0).
+#       Clone vanilla upstream QEMU at <git-ref> into
+#       deps/qemu-upstream-<ref>/, apply the avatar overlay from
+#       tools/avatar-qemu-overlay/ on top, and build into
+#       deps/build-qemu-upstream-<ref>/. The per-ref naming lets CI
+#       (and humans) keep parallel builds for multiple upstream tags
+#       — e.g. v6.2.0, v10.0.9, v11.0.0 — without one stomping on
+#       another. Each build is independently cacheable.
 #
 # Default source tree is deps/avatar-qemu (QEMU 6.2 fork carrying the
 # avatar hooks).
@@ -44,7 +46,12 @@ while [ "$#" -gt 0 ]; do
         --upstream-qemu)
             UPSTREAM_REF="$2"
             SOURCE="upstream"
-            BUILD_SUBDIR="build-qemu-upstream"
+            # Suffix sanitised for filesystem use: keep alnum / dot /
+            # dash / underscore (covers tags like v6.2.0, v10.0.9,
+            # v11.0.0, master) and replace anything else with `_`.
+            UPSTREAM_SUFFIX=$(printf '%s' "$UPSTREAM_REF" \
+                | tr -c '[:alnum:]._-' '_')
+            BUILD_SUBDIR="build-qemu-upstream-$UPSTREAM_SUFFIX"
             shift 2
             ;;
         --upstream-qemu=*)
@@ -68,7 +75,7 @@ fi
 if [ -n "$UPSTREAM_REF" ]; then
     REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
     OVERLAY_DIR="$REPO_ROOT/tools/avatar-qemu-overlay"
-    UPSTREAM_DIR="$REPO_ROOT/deps/qemu-upstream"
+    UPSTREAM_DIR="$REPO_ROOT/deps/qemu-upstream-$UPSTREAM_SUFFIX"
 
     if [ ! -d "$OVERLAY_DIR" ]; then
         echo "build_qemu.sh: overlay missing at $OVERLAY_DIR" >&2
@@ -93,7 +100,7 @@ if [ -n "$UPSTREAM_REF" ]; then
     echo "[build_qemu.sh] applying avatar overlay"
     "$OVERLAY_DIR/apply.sh" "$UPSTREAM_DIR"
 
-    SOURCE_PATH="../../qemu-upstream"
+    SOURCE_PATH="../../qemu-upstream-$UPSTREAM_SUFFIX"
 else
     # cwd at configure time is deps/<BUILD_SUBDIR>/<target>/, so two
     # levels up reaches deps/, which is where the source trees live.

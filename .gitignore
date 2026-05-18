@@ -60,8 +60,10 @@ deps/build-qemu/
 matrix_run.log
 
 # `build_qemu.sh --upstream-qemu <ref>` clones vanilla upstream QEMU
-# into deps/qemu-upstream/ and applies tools/avatar-qemu-overlay before
-# building. Both the working clone and the build tree are ephemeral.
-deps/qemu-upstream/
-deps/build-qemu-upstream/
+# into deps/qemu-upstream-<ref>/ and applies tools/avatar-qemu-overlay
+# before building into deps/build-qemu-upstream-<ref>/. Both the
+# working clone and the build tree are ephemeral and per-ref so
+# parallel builds for different upstream tags don't collide.
+deps/qemu-upstream*/
+deps/build-qemu-upstream*/
 deps/build-qemu-libafl/
