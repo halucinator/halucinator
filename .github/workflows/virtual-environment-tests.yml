@@ -30,6 +30,11 @@ jobs:
       # so test_arm_qemu.py's avatar2-spawning tests find a binary even if
       # HALUCINATOR_QEMU_ARM is unset in a given shell.
       AVATAR2_QEMU_EXECUTABLE: "${{ github.workspace }}/deps/build-qemu/arm-softmmu/qemu-system-arm"
+      # libafl-qemu-bridge build output — same per-arch layout under
+      # deps/build-qemu-libafl/. Only ARM is built in CI by default
+      # (sufficient to exercise LibAflQemuBackend's live e2e); other
+      # archs can be added once the test surface needs them.
+      HALUCINATOR_QEMU_LIBAFL_ARM: "${{ github.workspace }}/deps/build-qemu-libafl/arm-softmmu/qemu-system-arm"
 
     steps:
     - uses: actions/checkout@v5
@@ -75,6 +80,10 @@ jobs:
       id: qemu-ref
       run: echo "sha=$(git rev-parse HEAD:deps/avatar-qemu)" >> "$GITHUB_OUTPUT"
 
+    - name: Get libafl-qemu-bridge submodule commit
+      id: libafl-qemu-ref
+      run: echo "sha=$(git rev-parse HEAD:deps/libafl-qemu-bridge)" >> "$GITHUB_OUTPUT"
+
     - name: Restore QEMU build cache
       id: cache-qemu
       uses: actions/cache/restore@v5
@@ -85,6 +94,13 @@ jobs:
         # because the old `Save` step had `if: always()` and saved on
         # build failure too.
         key: qemu-build-v3-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
+
+    - name: Restore libafl-qemu-bridge build cache
+      id: cache-libafl-qemu
+      uses: actions/cache/restore@v5
+      with:
+        path: deps/build-qemu-libafl
+        key: libafl-qemu-build-v1-${{ matrix.os }}-${{ steps.libafl-qemu-ref.outputs.sha }}
 
     - name: Setup Python virtualenv and install dependencies
       run: |
@@ -107,6 +123,24 @@ jobs:
         source $(pwd)/virtualenvs/halucinator/bin/activate
         ./build_qemu.sh
 
+    - name: Build libafl-qemu-bridge ARM (cached)
+      # Only ARM is built — that's enough to exercise LibAflQemuBackend's
+      # live e2e tests. Extending to the other archs is a matter of
+      # appending to the target list; the bridge is a much larger build
+      # so we keep CI scope tight until a test needs it.
+      if: steps.cache-libafl-qemu.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        set -x
+        rm -rf deps/build-qemu-libafl
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        # libafl-qemu-bridge tracks newer upstream QEMU, which uses
+        # mkvenv (introduced in QEMU 8.x) and pulls in distlib at
+        # configure-time. The base ubuntu image doesn't ship distlib,
+        # so install it before configure runs.
+        pip install distlib
+        ./build_qemu.sh --source libafl-qemu-bridge arm-softmmu
+
     - name: Smoke-test QEMU binaries
       run: |
         set -e
@@ -124,6 +158,17 @@ jobs:
             exit 1
           }
         done
+        # libafl-qemu-bridge ARM build: same smoke checks
+        if [ -x deps/build-qemu-libafl/arm-softmmu/qemu-system-arm ]; then
+          echo "=== Testing deps/build-qemu-libafl/arm-softmmu/qemu-system-arm ==="
+          deps/build-qemu-libafl/arm-softmmu/qemu-system-arm --version
+          ldd deps/build-qemu-libafl/arm-softmmu/qemu-system-arm | grep "not found" && exit 1 || true
+          deps/build-qemu-libafl/arm-softmmu/qemu-system-arm -machine help \
+            | grep -q configurable || {
+            echo "FATAL: 'configurable' machine missing from libafl-qemu-bridge ARM"
+            exit 1
+          }
+        fi
         # Test that ARM QEMU can start and accept GDB connections
         deps/build-qemu/arm-softmmu/qemu-system-arm \
           -machine configurable -nographic -S -gdb tcp::19999 &
@@ -260,3 +305,11 @@ jobs:
       with:
         path: deps/build-qemu
         key: qemu-build-v3-${{ matrix.os }}-${{ steps.qemu-ref.outputs.sha }}
+
+    - name: Save libafl-qemu-bridge build cache
+      # Same protection — only save on full-job success.
+      if: success() && steps.cache-libafl-qemu.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: deps/build-qemu-libafl
+        key: libafl-qemu-build-v1-${{ matrix.os }}-${{ steps.libafl-qemu-ref.outputs.sha }}

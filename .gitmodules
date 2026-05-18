@@ -4,3 +4,6 @@
 [submodule "deps/avatar-qemu"]
 	path = deps/avatar-qemu
 	url = ../avatar-qemu
+[submodule "deps/libafl-qemu-bridge"]
+	path = deps/libafl-qemu-bridge
+	url = ../libafl-qemu-bridge

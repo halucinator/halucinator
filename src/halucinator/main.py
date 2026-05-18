@@ -425,6 +425,20 @@ def _emulate_with_backend(
             print_qemu_command=print_qemu_command,
             gdb_server_port=gdb_server_port,
         )
+    if emulator == "libafl-qemu":
+        # libafl-qemu-bridge is a drop-in QEMU replacement (newer
+        # base, plus LibAFL fuzzing hooks). Reuses the qemu backend
+        # path; only the binary resolution differs, which the
+        # backend class handles itself via HALUCINATOR_QEMU_LIBAFL_*.
+        return _emulate_with_qemu_backend(
+            config, target_name=target_name,
+            log_basic_blocks=log_basic_blocks, rx_port=rx_port,
+            tx_port=tx_port, gdb_port=gdb_port, elf_file=elf_file,
+            singlestep=singlestep, qemu_args=qemu_args,
+            print_qemu_command=print_qemu_command,
+            gdb_server_port=gdb_server_port,
+            backend_variant="libafl-qemu",
+        )
     if emulator == "unicorn":
         return _emulate_with_unicorn_backend(
             config, target_name=target_name, rx_port=rx_port, tx_port=tx_port,
@@ -440,7 +454,8 @@ def _emulate_with_backend(
         )
     raise NotImplementedError(
         f"Backend {emulator!r} not yet wired into main.py. "
-        f"Supported: 'avatar2' (default), 'qemu', 'unicorn', 'renode', 'ghidra'."
+        f"Supported: 'avatar2' (default), 'qemu', 'libafl-qemu', "
+        f"'unicorn', 'renode', 'ghidra'."
     )
 
 
@@ -587,6 +602,7 @@ def _emulate_with_qemu_backend(
     qemu_args: Optional[str],
     print_qemu_command: Optional[bool],
     gdb_server_port: Optional[int] = None,
+    backend_variant: str = "qemu",
 ) -> None:
     """
     Direct-QEMU path: spawns QEMU ourselves and drives it via GDB RSP + QMP
@@ -595,10 +611,19 @@ def _emulate_with_qemu_backend(
     We still reuse avatar2's QemuTarget for the configurable-machine JSON
     and command-line assembly - that logic is non-trivial and duplicating
     it here would just create drift.
+
+    *backend_variant* selects the underlying QEMU binary family:
+      - ``"qemu"`` (default) — avatar-qemu fork, the existing path.
+      - ``"libafl-qemu"`` — halucinator/libafl-qemu-bridge, a newer-base
+        QEMU that carries the same avatar hooks plus LibAFL fuzzing
+        surface. Drop-in compatible at the GDB+QMP layer.
     """
     import subprocess
     import time
     from halucinator.backends.qemu_backend import QEMUBackend
+    from halucinator.backends.libafl_qemu_backend import (
+        LibAflQemuBackend, _resolve_libafl_qemu_path,
+    )
 
     # Step 1: build avatar + qemu_target (no init_targets, so no spawn).
     avatar, qemu_target = get_qemu_target(
@@ -608,6 +633,21 @@ def _emulate_with_qemu_backend(
     # Force TCP QMP (our _QMPClient only speaks TCP).
     qemu_target.qmp_unix_socket = None
     qemu_target.qmp_port = gdb_port + 1
+
+    # Swap executable to libafl-qemu-bridge build if that variant was
+    # requested. avatar2's QemuTarget reads ``executable`` straight into
+    # assemble_cmd_line, so this is the only intervention needed.
+    if backend_variant == "libafl-qemu":
+        libafl_bin = _resolve_libafl_qemu_path(config.machine.arch)
+        if libafl_bin is None:
+            raise RuntimeError(
+                "libafl-qemu backend selected but no libafl-qemu-bridge "
+                f"binary found for arch={config.machine.arch!r}. Set "
+                "HALUCINATOR_QEMU_LIBAFL_<ARCH> or run "
+                "`./build_qemu.sh --source libafl-qemu-bridge`."
+            )
+        qemu_target.executable = libafl_bin
+        log.info("LibAFL QEMU binary: %s", libafl_bin)
 
     # Step 2: wire memory regions into avatar (same as avatar2 path).
     record_memories: List[Tuple[int, int]] = []
@@ -643,8 +683,14 @@ def _emulate_with_qemu_backend(
     qemu_err = open(err_path, "wb")
     qemu_proc = subprocess.Popen(cmd_line, stdout=qemu_out, stderr=qemu_err)
 
-    # Step 5: connect QEMUBackend (GDB + QMP).
-    backend: "HalBackend" = QEMUBackend(arch=config.machine.arch, gdb_port=gdb_port,
+    # Step 5: connect QEMUBackend (GDB + QMP). LibAFL variant reuses
+    # the same GDB+QMP control surface; the subclass only changes
+    # binary resolution semantics, which the main.py logic above
+    # already drove via `qemu_target.executable`.
+    backend_cls = (
+        LibAflQemuBackend if backend_variant == "libafl-qemu" else QEMUBackend
+    )
+    backend: "HalBackend" = backend_cls(arch=config.machine.arch, gdb_port=gdb_port,
                           qmp_port=gdb_port + 1)
     backend._process = qemu_proc
     # Give QEMU a moment to open its listening sockets.
@@ -1311,8 +1357,12 @@ def main() -> None:
     parser.add_argument(
         "--emulator",
         default=None,
-        choices=["avatar2", "qemu", "unicorn", "renode", "ghidra"],
-        help="Emulator backend to use (default: avatar2, or value from config emulator: key)",
+        choices=["avatar2", "qemu", "libafl-qemu", "unicorn", "renode",
+                 "ghidra"],
+        help="Emulator backend to use (default: avatar2, or value from "
+             "config emulator: key). 'libafl-qemu' picks the "
+             "halucinator/libafl-qemu-bridge build via "
+             "HALUCINATOR_QEMU_LIBAFL_*.",
     )
     parser.add_argument(
         "--print_qemu_command",
