@@ -237,7 +237,13 @@ static void halucinator_irq_unrealize(DeviceState *dev)
     g_free(s->irq_regs);
 }
 
-static void halucinator_irq_class_init(ObjectClass *oc, void *data)
+#if __has_include("system/address-spaces.h")
+#define AVATAR_CLASS_DATA_T const void
+#else
+#define AVATAR_CLASS_DATA_T void
+#endif
+
+static void halucinator_irq_class_init(ObjectClass *oc, AVATAR_CLASS_DATA_T *data)
 {
     printf("Initializing Halucinator-IRQ 2\n");
     DeviceClass *dc = DEVICE_CLASS(oc);
