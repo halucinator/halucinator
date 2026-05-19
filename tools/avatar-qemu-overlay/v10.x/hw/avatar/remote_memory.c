@@ -139,7 +139,13 @@ static void avatar_rmemory_realize(DeviceState *dev, Error **errp)
 
 }
 
-static void avatar_rmemory_class_init(ObjectClass *oc, void *data)
+#if __has_include("system/address-spaces.h")
+#define AVATAR_CLASS_DATA_T const void
+#else
+#define AVATAR_CLASS_DATA_T void
+#endif
+
+static void avatar_rmemory_class_init(ObjectClass *oc, AVATAR_CLASS_DATA_T *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 

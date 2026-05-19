@@ -800,7 +800,18 @@ static void configurable_set_config_filename(Object *obj, const char *value, Err
     cms->config_filename = g_strdup(value);
 }
 
-static void configurable_machine_class_init(ObjectClass *oc, void *data)
+/* v11 made class_init's data arg `const void *`. v10 had it as plain
+ * `void *`. The struct-field-vs-function-pointer mismatch is a warning
+ * on either version but is technically UB and on v11 prevents the
+ * machine class from being registered. Match the field's expected
+ * type per-version. */
+#if __has_include("system/address-spaces.h")
+#define AVATAR_CLASS_DATA_T const void
+#else
+#define AVATAR_CLASS_DATA_T void
+#endif
+
+static void configurable_machine_class_init(ObjectClass *oc, AVATAR_CLASS_DATA_T *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
