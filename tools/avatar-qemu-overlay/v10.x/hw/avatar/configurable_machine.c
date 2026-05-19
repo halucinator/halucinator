@@ -52,6 +52,19 @@
 #endif
 #include "hw/avatar/configurable_machine.h"
 
+/*
+ * v11 added a per-binary machine-class filter: `-machine help` (and
+ * `find_machine()`) only consider machines that declare a specific
+ * target interface (TYPE_TARGET_ARM_MACHINE for qemu-system-arm, etc).
+ * Machines opt in by setting .interfaces on their TypeInfo. The header
+ * that exposes the interface tables (arm_machine_interfaces,
+ * arm_aarch64_machine_interfaces, aarch64_machine_interfaces) is
+ * v11-only — gate the include so v10 still builds.
+ */
+#if __has_include("hw/arm/machines-qom.h")
+#include "hw/arm/machines-qom.h"
+#endif
+
 //plattform specific imports
 #if defined(TARGET_ARM)
 #include "target/arm/cpu.h"
@@ -846,7 +859,17 @@ static const TypeInfo configurable_machine_type = {
     .class_init = configurable_machine_class_init,
     .instance_size = sizeof(ConfigurableMachineState),
     .instance_init = configurable_machine_instance_init,
-
+    /* v11 hides machines from `-machine help` (and find_machine()) unless
+     * they implement the target binary's machine interface. v10 doesn't
+     * have the interface tables — gate on the header to keep both
+     * versions buildable. */
+#if __has_include("hw/arm/machines-qom.h")
+# if defined(TARGET_AARCH64)
+    .interfaces = arm_aarch64_machine_interfaces,
+# elif defined(TARGET_ARM)
+    .interfaces = arm_machine_interfaces,
+# endif
+#endif
 };
 
 static void configurable_machine_init(void)
