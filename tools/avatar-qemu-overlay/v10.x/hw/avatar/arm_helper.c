@@ -138,6 +138,19 @@ static int banked_gdb_get_reg(CPUState *cs, GByteArray *buf, int reg)
 
 void avatar_add_banked_registers(ARMCPU *cpu){
     CPUState *cs = CPU(cpu);
+    /*
+     * v11 dropped the trailing `int g_pos` arg from
+     * gdb_register_coprocessor (the GPOS hint that lets a feature
+     * splice into the "general" register set). We never asked for
+     * splicing (always passed 0), so behaviour is preserved either
+     * way. Use __has_include of a v11-only umbrella header as a proxy
+     * for the API version.
+     */
+#if __has_include("system/address-spaces.h")
+    gdb_register_coprocessor(cs, banked_gdb_get_reg, banked_gdb_set_reg,
+            gdb_find_static_feature("arm-banked.xml"));
+#else
     gdb_register_coprocessor(cs, banked_gdb_get_reg, banked_gdb_set_reg,
             gdb_find_static_feature("arm-banked.xml"), 0);
+#endif
 }
