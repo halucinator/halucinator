@@ -72,11 +72,6 @@ def tx_msg(funct: CallableVar) -> CallableVar:
         data is a yaml encoded of the calling model_cls.funct
         """
         data = funct(model_cls, *args)
-        try:
-            from rehostscope.integration.halucinator_bridge import on_peripheral_tx
-            on_peripheral_tx(model_cls, funct, data)
-        except Exception:
-            pass
         topic = f"Peripheral.{model_cls.__name__}.{funct.__name__}"
         msg = encode_zmq_msg(topic, data)
         log.info("Sending: %s", msg)

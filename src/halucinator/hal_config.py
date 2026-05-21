@@ -406,17 +406,6 @@ class HalucinatorConfig:
                     log.debug("Resolved symbol: %s, %#x", inter.symbol, addr)
                 else:
                     log.warning("Unresolved symbol: %s, %s", inter.symbol, inter)
-                    try:
-                        from rehostscope.integration.halucinator_bridge import (
-                            on_gap_unresolved_symbol,
-                        )
-                        on_gap_unresolved_symbol(
-                            symbol=sym_name,
-                            intercept=inter.function,
-                            handler=inter.cls,
-                        )
-                    except Exception:
-                        pass
 
     def get_symbol_name(self, addr: int) -> str:
         """

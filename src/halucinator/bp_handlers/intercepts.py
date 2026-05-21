@@ -24,14 +24,6 @@ log = logging.getLogger(__name__)
 hal_log = hal_log_conf.getHalLogger()
 
 
-def _rehostscope_bridge():
-    try:
-        from rehostscope.integration.halucinator_bridge import get_active_bridge
-        return get_active_bridge()
-    except Exception:
-        return None
-
-
 hal_stats.stats["used_intercepts"] = set()
 hal_stats.stats["bypassed_funcs"] = set()
 
@@ -258,16 +250,6 @@ def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
                 qemu, intercept.bp_addr, intercept.function
             )
     except ValueError as error:
-        try:
-            from rehostscope.integration.halucinator_bridge import on_gap_missing_handler
-            on_gap_missing_handler(
-                symbol=getattr(intercept, "symbol", "") or intercept.function,
-                intercept=intercept.function,
-                handler=intercept.cls,
-                reason=str(error),
-            )
-        except Exception:
-            pass
         hal_log.error("Invalid BP registration failed for %s", intercept)
         hal_log.error(error)
         hal_log.error("Input registration args are %s", intercept.registration_args)
@@ -325,10 +307,6 @@ def register_bp_handler(qemu: Any, intercept: Any) -> Optional[int]:
     )
     addr2bp_lut[intercept.bp_addr] = breakpoint_num
     log.info("BP is %i", breakpoint_num)
-    bridge = _rehostscope_bridge()
-    if bridge is not None:
-        from rehostscope.integration.halucinator_bridge import on_intercept_registered
-        on_intercept_registered(intercept)
     return breakpoint_num
 
 
@@ -369,20 +347,7 @@ def interceptor(avatar: Any, message: Any) -> None:  # pylint: disable=unused-ar
         pc,
         bp_info.bp_handler,
     )
-    bridge = _rehostscope_bridge()
-    handler_started_ns = 0
-    if bridge is not None:
-        from rehostscope.integration.halucinator_bridge import (
-            on_handler_enter,
-            on_handler_exit,
-            on_intercept_hit,
-        )
-        on_intercept_hit(bp_info, pc, breakpoint_num)
-    intercept_result = False
-    ret_value = None
     try:
-        if bridge is not None:
-            handler_started_ns = on_handler_enter(bp_info, pc)
         intercept_result, ret_value = bp_info.bp_handler(
             bp_info.bp_class, target, pc
         )
@@ -392,19 +357,8 @@ def interceptor(avatar: Any, message: Any) -> None:  # pylint: disable=unused-ar
                 "bypassed_funcs", hal_stats.stats[breakpoint_num]["function"]
             )
     except Exception as err:
-        if bridge is not None:
-            try:
-                from rehostscope.integration.halucinator_bridge import on_handler_exception
-                on_handler_exception(bp_info, pc, err)
-            except Exception:
-                pass
         log.exception("Error executing handler %s", repr(bp_info.bp_handler))
         raise err
-    else:
-        if bridge is not None:
-            on_handler_exit(
-                bp_info, pc, intercept_result, ret_value, handler_started_ns
-            )
 
     global emulation_detected, emulation_complete
     if intercept_result:
