@@ -167,6 +167,11 @@ def run_server(avatar: Avatar) -> None:
     try:
         periph_server.run_server()
     except KeyboardInterrupt:
+        try:
+            from rehostscope.integration.halucinator_bridge import stop
+            stop(status="interrupted", exit_code=130)
+        except Exception:
+            pass
         periph_server.stop()
         avatar.stop()
         avatar.shutdown()
@@ -256,6 +261,16 @@ def emulate_binary(
 
     config.prepare_and_validate() MUST have been already called!
     """
+    try:
+        from rehostscope.integration.halucinator_bridge import maybe_start_from_env
+
+        maybe_start_from_env(
+            target=target_name or "halucinator",
+            arch=getattr(config.machine, "arch", ""),
+            config=",".join(getattr(config, "config_files", []) or []),
+        )
+    except Exception:
+        pass
     # Bug in QEMU about init stack pointer/entry point this works around
     if config.machine.arch == "cortex-m3":
         mem = (
@@ -324,6 +339,12 @@ def emulate_binary(
     periph_server.start(rx_port, tx_port, qemu)
 
     def signal_handler(sig: int, frame: Any) -> None:
+        try:
+            from rehostscope.integration.halucinator_bridge import stop
+
+            stop(status="interrupted", exit_code=130)
+        except Exception:
+            pass
         print("You pressed Ctrl+C!")
         avatar.stop()
         avatar.shutdown()
@@ -492,19 +513,26 @@ def main(cli_args: List[str] = None) -> None:
     if args.qemu_args:
         qemu_args = " ".join(args.qemu_args)
 
-    emulate_binary(
-        config,
-        args.name,
-        args.log_blocks,
-        args.rx_port,
-        args.tx_port,
-        elf_file=args.elf,
-        gdb_port=args.gdb_port,
-        qemu_args=qemu_args,
-        dap_port=args.dap,
-        dap_bind=args.dap_bind,
-        gdb_server_port=args.gdb_server,
-    )
+    try:
+        emulate_binary(
+            config,
+            args.name,
+            args.log_blocks,
+            args.rx_port,
+            args.tx_port,
+            elf_file=args.elf,
+            gdb_port=args.gdb_port,
+            qemu_args=qemu_args,
+            dap_port=args.dap,
+            dap_bind=args.dap_bind,
+            gdb_server_port=args.gdb_server,
+        )
+    finally:
+        try:
+            from rehostscope.integration.halucinator_bridge import stop
+            stop(status="completed", exit_code=0)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

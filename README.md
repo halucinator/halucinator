@@ -177,6 +177,22 @@ If not set, HALucinator looks for QEMU in `deps/build-qemu/<arch>-softmmu/`.
 If using virtual environments these can be set in `$VIRTUAL_ENV/bin/postactivate`
 and removed in `$VIRTUAL_ENV/bin/predeactivate`.
 
+### Optional: RehostScope trace export
+
+HALucinator can emit a structured JSONL trace for RehostScope when the
+optional `rehostscope` package is available on `PYTHONPATH`. This integration
+is disabled unless one of the trace environment variables is set, and normal
+HALucinator runs do not require RehostScope.
+
+```sh
+export REHOSTSCOPE_TRACE=1
+export REHOSTSCOPE_TRACE_PATH=/tmp/halucinator-trace.jsonl
+export REHOSTSCOPE_RUN_ID=my-run-id
+export REHOSTSCOPE_TRACE_META='{"target":"demo"}'
+```
+
+`REHOSTSCOPE_TRACE` may also be set directly to the desired JSONL output path.
+
 ### Optional: Symbol Extraction with angr
 
 To auto-generate address files from ELF binaries:

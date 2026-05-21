@@ -40,6 +40,11 @@ class UARTPublisher(object):
            Publishes the data to sub/pub server
         '''
         log.info("Writing: %s" % chars)
+        try:
+            from rehostscope.integration.halucinator_bridge import on_io_uart_write
+            on_io_uart_write(uart_id, chars)
+        except Exception:
+            pass
         msg = {'id': uart_id, 'chars': chars}
         return msg
 

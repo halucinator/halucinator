@@ -42,7 +42,13 @@ class DigitalIOModel:
         Returns the value for given channel_id
         """
         io_id = cls.get_id(channel_id)
-        return cls.values[io_id]
+        value = cls.values[io_id]
+        try:
+            from rehostscope.integration.halucinator_bridge import on_model_read
+            on_model_read(cls, io_id, value)
+        except Exception:
+            pass
+        return value
 
     @classmethod
     def set_value(cls, channel_id: Union[int, str], value: int) -> None:
@@ -102,7 +108,13 @@ class AnalogIOModel:
         Returns the value for given channel_id
         """
         io_id = cls.get_id(channel_id)
-        return cls.values[io_id]
+        value = cls.values[io_id]
+        try:
+            from rehostscope.integration.halucinator_bridge import on_model_read
+            on_model_read(cls, io_id, value)
+        except Exception:
+            pass
+        return value
 
     @classmethod
     def set_value(cls, channel_id: Union[int, str], value: float) -> None:
