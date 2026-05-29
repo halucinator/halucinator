@@ -79,4 +79,4 @@ WORKDIR  /root/halucinator
 RUN ln -s -T /usr/bin/gdb-multiarch /usr/bin/arm-none-eabi-gdb
 
 
-CMD /root/halucinator
+CMD ["/root/halucinator"]
