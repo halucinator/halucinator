@@ -3,25 +3,35 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 
-from halucinator.bp_handlers.bp_handler import BPHandler, bp_handler
+from halucinator import hal_log as hal_logging
+from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
+hal_log = hal_logging.getHalLogger()
 
 
 class Libc6(BPHandler):
     """This class holds generic libc functionality, such as printf and puts"""
 
+    def __init__(self) -> None:
+        self.fmt_idx = {}
+
+    def register_handler(self, qemu: HALQemuTarget, addr: int, func_name: str, fmt_idx: int = 0) -> HandlerFunction:
+        self.fmt_idx[addr] = fmt_idx
+        return cast(HandlerFunction, Libc6.printf)
+
     @bp_handler(["puts"])
     def puts(self, qemu: "HalBackend", addr: int) -> Tuple[bool, int]:  # pylint: disable=no-self-use,unused-argument
         """int puts(const char *str)"""
-        log.debug("puts 0x%08x", addr)
+        hal_log.debug("puts 0x%08x", addr)
         print_string = qemu.read_string(qemu.get_arg(0))
-        print(print_string)
+        print(f"{print_string}", flush=True)
+        hal_log.info("puts: %s", print_string)
         return True, 1
 
     @bp_handler(["printf"])
@@ -30,7 +40,8 @@ class Libc6(BPHandler):
         handles most formats, but we don't do anything special
         for length or for the n. The n should never have been created"""
         # pylint: disable=too-many-branches
-        fmt = qemu.read_string(qemu.get_arg(0))
+        idx = self.fmt_idx.get(bp_addr, 0)
+        fmt = qemu.read_string(qemu.get_arg(idx))
 
         formats = []  # We aren't handling anything fancy or even length args
         strsplit = re.split(r"(\W)", fmt)
@@ -40,7 +51,7 @@ class Libc6(BPHandler):
                     formats.append(strsplit[i + 1])
         printf_args = []
         for i, form in enumerate(formats):
-            arg_int = i + 1
+            arg_int = idx + i + 1
             value = qemu.get_arg(arg_int)
             if "i" in form or "d" in form or "u" in form:  # int
                 value = int(value)
@@ -72,8 +83,8 @@ class Libc6(BPHandler):
             printf_args.append(value)
 
         print_string = fmt % tuple(printf_args)
-        print(str(print_string), end="")
-        log.info("%s", print_string)
+        print(f"{print_string}", flush=True)
+        hal_log.info("printf: %s", print_string)
         return True, len(print_string)
 
     @bp_handler(["exit"])
