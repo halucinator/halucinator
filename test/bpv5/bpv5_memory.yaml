@@ -1,0 +1,37 @@
+memories:
+  bootrom:
+    base_addr: 0x0
+    size: 0x4000
+    file: b2.bin
+    permissions: r-x
+  flash:
+    base_addr: 0x10000000
+    size: 0x1000000
+    file: bus_pirate5_rev10.bin
+    permissions: r-x
+  ram:
+    base_addr: 0x20000000
+    size: 0x42000
+    permissions: rwx
+  halucinator:
+    base_addr: 0x30000000
+    size: 0x1000000
+    permissions: rwx
+  io_ram:
+    base_addr: 0x40000000
+    size: 0x1000000
+    permissions: rwx
+  sio_ram:
+    base_addr: 0xd0000000
+    size: 0x1000000
+    permissions: rwx
+  ssi_ram:
+    base_addr: 0x18000000
+    size: 0x00010000
+    permissions: rwx
+peripherals:
+  logger:
+    base_addr: 0x50000000
+    size: 0x10000000
+    emulate: GenericPeripheral
+    permissions: rw-

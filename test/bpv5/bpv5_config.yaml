@@ -1,0 +1,345 @@
+machine:
+  arch: cortex-m3
+  cpu_model: cortex-m3
+  entry_addr: 0x100001f7
+  init_sp: 0x20042000
+
+intercepts:
+  - class: halucinator.bp_handlers.SkipFunc
+    function: dummy_delay
+    symbol: busy_wait_us
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: dummy_delay_ms
+    symbol: busy_wait_ms
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_sleep_ms
+    symbol: sleep_ms
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_sleep_us
+    symbol: sleep_us
+    registration_args:
+      silent: true
+  - class: test.bpv5.bpv5_handlers.RP2040Init
+    function: init_spinlocks
+    symbol: runtime_init_early_resets
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_post_clock_resets
+    symbol: runtime_init_post_clock_resets
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_clocks
+    symbol: runtime_init_clocks
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_usb_power_down
+    symbol: runtime_init_usb_power_down
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_claim
+    symbol: hw_claim_or_assert
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_claim_unused
+    symbol: hw_claim_unused_from_range
+    registration_args:
+      ret_value: 0
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_lock
+    symbol: hw_claim_lock
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_unlock
+    symbol: hw_claim_unlock
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_clear
+    symbol: hw_claim_clear
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_exc
+    symbol: irq_set_exclusive_handler
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_shared
+    symbol: irq_add_shared_handler
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_en
+    symbol: irq_set_enabled
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rom_reset_wait
+    addr: 0x19a
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rom_reset_wait2
+    addr: 0x196
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_put_get
+    addr: 0x1770
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_do_cmd
+    addr: 0x20000350
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_write_ram
+    addr: 0x20000250
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_boot2_copy
+    addr: 0x2000029c
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_xip_boot2
+    addr: 0x200002cc
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_board_id
+    symbol: pico_get_unique_board_id
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: fix_rev
+    symbol: mcu_detect_revision
+    registration_args:
+      ret_value: 10
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_init
+    symbol: spi_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_busy
+    symbol: spi_busy_wait_internal
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_panic
+    symbol: hard_assertion_failure
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_bio_init
+    symbol: bio_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_storage_init
+    symbol: storage_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_psucmd_init
+    symbol: psucmd_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_psucmd_disable
+    symbol: psucmd_disable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_init
+    symbol: shift_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_wait
+    symbol: shift_clear_set_wait
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_en
+    symbol: shift_output_enable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_adc_init
+    symbol: adc_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_init
+    symbol: lcd_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_conf
+    symbol: lcd_configure
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_write_string
+    symbol: lcd_write_string
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_update
+    symbol: disp_default_lcd_update
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_backlight
+    symbol: lcd_backlight_enable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rgb_init
+    symbol: rgb_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_pullups_init
+    symbol: pullups_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_storage_mount
+    symbol: storage_mount
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_multicore_launch
+    symbol: multicore_launch_core1
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_icm
+    symbol: icm_core0_send_message_synchronous
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_conf
+    symbol: binmode_load_save_config
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_setup
+    symbol: binmode_setup
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_service
+    symbol: binmode_service
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_mutex_enter
+    symbol: mutex_enter_blocking
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_mutex_exit
+    symbol: mutex_exit
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_mutex_try
+    symbol: mutex_try_enter_block_until
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_amux
+    symbol: amux_sweep
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_monitor
+    symbol: monitor
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_alarm_pool
+    symbol: alarm_pool_add_alarm_at_force_in_context
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_usbmsdrive_readonly
+    symbol: prepare_usbmsdrive_readonly
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_insert_usbmsdrive
+    symbol: insert_usbmsdrive
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_tud_task
+    symbol: tud_task
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_tud_flush
+    symbol: tud_cdc_n_write_flush
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_vprintf
+    symbol: SEGGER_RTT_vprintf
+    registration_args:
+      silent: true
+  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+    function: rx_fifo_try_get
+    symbol: rx_fifo_try_get
+  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+    function: write
+    symbol: tud_cdc_n_write
+  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+    function: write_flush
+    symbol: tud_cdc_n_write_flush
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_usb_conn
+    symbol: tud_cdc_n_connected
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.generic.libc.Libc6
+    function: printf
+    symbol: SEGGER_RTT_printf
+    registration_args:
+      fmt_idx: 1
+  - class: halucinator.bp_handlers.generic.libc.Libc6
+    function: printf
+    symbol: printf_
+    registration_args:
+      fmt_idx: 0
+  - class: halucinator.bp_handlers.PrintString
+    function: puts
+    symbol: stdio_puts
+    registration_args:
+      arg_num: 0
+  - class: halucinator.bp_handlers.ReturnZero
+    function: dummy_usb
+    symbol: tusb_init
+  - class: halucinator.bp_handlers.SkipFunc
+    function: rtt_init
+    symbol: SEGGER_RTT_Init
