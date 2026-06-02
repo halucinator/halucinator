@@ -8,9 +8,6 @@ from typing import Any
 
 from halucinator.peripherals.hal_peripheral import HalPeripheral as AvatarPeripheral  # noqa: F401
 from .. import hal_stats as hal_stats
-# HACK: imported UTTYModel into src/halucinator/peripheral_models/generic.py to fix an AttributeError during initialization
-# because UTTYModel lives in its own file (utty.py) and wasn't imported into the generic.py namespace, main's call to getattr() fails
-from .utty import UTTYModel
 
 log = logging.getLogger(__name__)
 

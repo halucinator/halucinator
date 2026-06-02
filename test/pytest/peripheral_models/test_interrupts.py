@@ -121,6 +121,52 @@ def test_clear_active_bp(mock_irq):
     mock_irq.assert_called_once_with(10)
 
 
+@mock.patch.object(peripheral_server, "irq_clear_bp")
+def test_clear_active_bp_with_none_irq_num_is_noop(mock_irq):
+    """Peripheral models call clear_irq() defensively even when they
+    haven't been assigned an IRQ line (e.g. UTTYModel without
+    halucinator-irq configured). The None case must short-circuit
+    before peripheral_server is called, so backends without an IRQ
+    controller don't crash on routine rx-char delivery."""
+    Interrupts.clear_active_bp(None)
+    mock_irq.assert_not_called()
+
+
+@mock.patch.object(
+    peripheral_server,
+    "irq_clear_bp",
+    side_effect=AttributeError("'UnicornBackend' has no attribute 'irq_clear_bp'"),
+)
+def test_clear_active_bp_swallows_attribute_error(mock_irq):
+    """Backends that don't implement irq_clear_bp (unicorn pre-stubs,
+    custom backends) raise AttributeError from peripheral_server. The
+    guard swallows it so the firmware doesn't see a synthetic crash on
+    every UTTYModel rx char."""
+    Interrupts.active[10] = True
+    # Should not raise:
+    Interrupts.clear_active_bp(10)
+    assert Interrupts.active[10] is False
+    mock_irq.assert_called_once_with(10)
+
+
+@mock.patch.object(
+    peripheral_server,
+    "irq_clear_bp",
+    side_effect=TypeError(
+        "No Interrupt Controller found, include a memory with qemu_name: halucinator-irq"
+    ),
+)
+def test_clear_active_bp_swallows_type_error(mock_irq):
+    """avatar2/hal_qemu's irq_clear_bp raises TypeError when the YAML
+    doesn't define a halucinator-irq memory region. Peripheral models
+    must not crash configurations that intentionally skip the IRQ
+    controller (e.g. bpv5)."""
+    Interrupts.active[10] = True
+    Interrupts.clear_active_bp(10)
+    assert Interrupts.active[10] is False
+    mock_irq.assert_called_once_with(10)
+
+
 # ---------- _trigger_interrupt_qmp / _trigger_interrupt_bp ----------
 
 @mock.patch.object(peripheral_server, "irq_set_qmp")

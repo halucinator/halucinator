@@ -72,10 +72,22 @@ class Interrupts:
     def clear_active_bp(cls, irq_num: int) -> None:
         """
         Clears active interrupt.  Safe for use in BP Handler context.
+        Silently no-ops when ``irq_num`` is None, which happens for
+        peripheral models that don't model interrupts (e.g. UTTYModel
+        without an assigned IRQ line).
         """
+        if irq_num is None:
+            return
         log.debug("Clear Active BP: %i", irq_num)
         cls.active[irq_num] = False
-        peripheral_server.irq_clear_bp(irq_num)
+        try:
+            peripheral_server.irq_clear_bp(irq_num)
+        except (AttributeError, TypeError) as exc:
+            # Backend has no IRQ controller hooked up (unicorn without
+            # IRQ stubs; arm_qemu without a halucinator-irq memory region).
+            # Peripheral models call this defensively — they don't actually
+            # need the line to deassert, they just want to be polite.
+            log.debug("clear_active_bp(%s): no IRQ controller (%s)", irq_num, exc)
 
     @classmethod
     def clear_active_qmp(cls, irq_num: int) -> None:

@@ -625,6 +625,21 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     _EXC_RETURN_MAGIC = 0xFFFFFFF0  # any PC matching this top nibble is
                                      # an exception-return attempt
 
+    # The avatar2/QEMU path implements these by writing to the halucinator-irq
+    # controller MMIO region. Unicorn doesn't model a NVIC/GIC, so IRQ
+    # delivery goes through inject_irq() / IrqController.trigger() instead.
+    # Peripheral models call these defensively to deassert lines that were
+    # never asserted via MMIO; stub them so peripheral_server.irq_clear_bp()
+    # etc. don't AttributeError (e.g. UTTYModel clearing its rx line).
+    def irq_set_bp(self, irq_num: int = 1) -> None:
+        return None
+
+    def irq_clear_bp(self, irq_num: int = 1) -> None:
+        return None
+
+    def irq_enable_bp(self, irq_num: int = 1) -> None:
+        return None
+
     def inject_irq(self, irq_num: int) -> None:
         """Deliver an external IRQ to a cortex-m CPU. Pushes a minimal
         exception frame (r0–r3, r12, lr, pc, xpsr) onto the main stack,
