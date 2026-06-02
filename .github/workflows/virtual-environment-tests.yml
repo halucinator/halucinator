@@ -345,6 +345,17 @@ jobs:
         source $(pwd)/virtualenvs/halucinator/bin/activate
         bash ./test/firmware-rehosting/p2im-drone/run_tests.bash
 
+    - name: run Bus Pirate v5 (RP2040) demo smoke test
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        # bpv5_terminal is a two-process external device (matches the
+        # STM32 UART example pattern); HAL_EMULATOR=avatar2 to match
+        # the rest of the CI suite. Other backends are exercised by
+        # running this script with HAL_EMULATOR=unicorn|qemu|ghidra|renode.
+        HAL_EMULATOR=avatar2 bash ./test/bpv5/run_tests.bash
+
     - name: run multi-arch e2e tests (ARM32, ARM64, MIPS)
       run: |
         set -e
