@@ -330,8 +330,6 @@ intercepts:
   - class: halucinator.bp_handlers.generic.libc.Libc6
     function: printf
     symbol: printf_
-    registration_args:
-      fmt_idx: 0
   - class: halucinator.bp_handlers.PrintString
     function: puts
     symbol: stdio_puts
