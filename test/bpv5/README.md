@@ -3,10 +3,12 @@
 This example demonstrates how to re-host the Bus Pirate v5 (bpv5) firmware using HALucinator. The bpv5 is based on the Raspberry Pi RP2040 microcontroller.
 
 ## Provenance
-The binary and symbolized ELF were provided for testing.
-*   **Binary:** `bus_pirate5_rev10.bin` (MIT License)[^1]
-*   **ELF:** `bus_pirate5_rev10.elf`
-*   **Bootrom:** `b2.bin` (Downloaded from Raspberry Pi's official repo) (Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.) [^2]
+The third-party binaries shipped here are redistributed under their upstream
+licenses; see [`PROVENANCE.md`](PROVENANCE.md) for sources, copyright
+holders, and rebuild instructions, and [`licenses/`](licenses/) for the
+upstream `LICENSE.TXT` files.
+*   **Binary:** `bus_pirate5_rev10.bin` — MIT, DangerousPrototypes/BusPirate5-firmware
+*   **Bootrom:** `b2.bin` — BSD-3-Clause, raspberrypi/pico-bootrom-rp2040
 
 ## Emulation Challenges & Solutions
 
@@ -24,31 +26,60 @@ We leveraged HALucinator's intercept system to "short-circuit" hardware-heavy lo
 *   **USB Connection Spoofing:** The Bus Pirate waits for a USB CDC connection before entering the command loop. We intercepted `tud_cdc_n_connected` to always return `True` (1).
 
 ### 3. I/O Redirection
-*   **Flexible Printf:** The Bus Pirate uses `SEGGER_RTT_printf`, which places the format string as the second argument. We enhanced the core `halucinator.bp_handlers.generic.libc.Libc6` handler to support a `fmt_idx` parameter, allowing us to specify the format string position in the configuration.
-*   **Console Injection:** We implemented a custom handler for `rx_fifo_try_get`. This allowed us to inject simulated keystrokes (like `\r\n` and `y`) directly into the firmware's input buffer from Python.
+*   **Flexible Printf:** The Bus Pirate uses `SEGGER_RTT_printf`, which places the format string as the second argument. The core `halucinator.bp_handlers.generic.libc.Libc6` handler accepts a `fmt_idx` registration argument so any `printf`-family wrapper whose format string isn't at arg 0 — `SEGGER_RTT_printf`, `fprintf`/`dprintf`, `snprintf` (`fmt_idx: 2`), vendor logging macros, etc. — can be intercepted by the same class.
+*   **Console:** `rx_fifo_try_get` / `tud_cdc_n_write` / `tud_cdc_n_write_flush` are bridged into a `UTTYModel` "BP5" interface by `BusPirateConsole`. Keystrokes are delivered over ZMQ by `bpv5_terminal.py` — the external terminal device that also handles the VT100 cursor-position probe (see "How to Run" below).
 
 ## Core Library Changes
-To support this example, the following changes were made to the HALucinator core:
-*   **`src/halucinator/bp_handlers/generic/libc.py`**:
-    *   Added `fmt_idx` support to `Libc6.printf`.
-    *   Switched output to use `hal_log.getHalLogger()` for better real-time visibility in Docker environments.
-    *   Added `flush=True` to print statements.
-    *   Resolved missing typing imports (`cast`, `HandlerFunction`).
+To support this example (and external-device integration generally), the
+following changes were made to the HALucinator core:
+*   **`src/halucinator/bp_handlers/generic/libc.py`**: `Libc6.printf` and
+    `Libc6.puts` publish formatted output via `Peripheral.UTTYModel.tx_buf`
+    (registering a "STDIO" UTTY interface on init) so external devices can
+    subscribe to firmware stdio over ZMQ, matching the `hal_dev_uart` /
+    STM32 UART example pattern. Falls back to plain `print()` when
+    UTTYModel isn't reachable. Per-intercept `registration_args.fmt_idx`
+    lets the same handler cover `printf`-family variants whose format
+    string isn't at arg 0 (e.g. `SEGGER_RTT_printf` is `fmt_idx: 1`).
+*   **`src/halucinator/peripheral_models/interrupts.py`**: `clear_active_bp`
+    is now a no-op when `irq_num` is None or when the backend has no IRQ
+    controller, so peripheral models that call `clear_irq()` defensively
+    (UTTYModel after `get_rx_char()` is one) don't crash configurations
+    that don't define a `halucinator-irq` memory region.
+*   **`src/halucinator/backends/renode_backend.py`**: r0–r12 writes now use
+    Renode's `cpu SetRegister <N> <val>` instead of `cpu rN <val>` (which
+    Renode rejects with "sysbus.cpu does not provide a field, method or
+    property R0"). Without this fix, `ReturnConstant(ret_value=N)`
+    intercepts silently delivered `0` to the firmware under the Renode
+    backend — the bpv5 PCB-revision check (`mcu_detect_revision`) was the
+    visible symptom.
 
 ## How to Run
-Ensure you are inside the HALucinator Docker container.
+Ensure you are inside the HALucinator Docker container. Run halucinator
+and the external terminal device as two processes — matching the
+two-window pattern of the STM32 UART example.
+
+In the first window, start halucinator (default backend is `avatar2`;
+override with `HAL_EMULATOR=unicorn|qemu|ghidra|renode`):
 
 ```bash
-# Run the emulation
-PYTHONPATH=.:src halucinator \
-    -c test/bpv5/bpv5_memory.yaml \
-    -c test/bpv5/bpv5_config.yaml \
-    -c test/bpv5/bpv5_addrs.yaml \
-    -n bpv5_run
+bash test/bpv5/run.sh
 ```
 
-The output will show the Bus Pirate banner and initialization sequence, ultimately reaching the VT100 color mode prompt.
+In the second window, attach the terminal device:
 
-----
-[^1]: [MIT License](https://github.com/DangerousPrototypes/BusPirate5-firmware/blob/d821f1344fa561a015362b5499ef9606cc16df69/LICENSE.TXT)
-[^2]: [Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/ef22cd8ede5bc007f81d7f2416b48db90f313434/LICENSE.TXT)
+```bash
+PYTHONPATH=.:src python3 -m test.bpv5.bpv5_terminal
+```
+
+The output will show the Bus Pirate banner and initialization sequence,
+followed by the firmware's VT100 cursor-position probe — the device
+responds with your terminal's real size, the firmware switches to VT100
+colour mode, and you reach the `HiZ>` command shell. Type `h<Enter>` for
+the help text, Ctrl-D to disconnect.
+
+For a non-interactive smoke test (used by CI) that runs both processes
+together and asserts the firmware reaches the help output:
+
+```bash
+HAL_EMULATOR=avatar2 bash test/bpv5/run_tests.bash
+```

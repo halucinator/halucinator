@@ -1,97 +1,82 @@
 #!/usr/bin/env bash
-# Smoke test: boot Bus Pirate v5 firmware under HALucinator and verify that
-# the firmware reaches the HiZ> command prompt.
+# Smoke test: boot the Bus Pirate v5 firmware under HALucinator, drive it
+# through the VT100 detection handshake using the bpv5_terminal external
+# device, and verify the firmware reaches the HiZ> command shell and
+# executes a help command.
 #
-# The test subscribes to the UTTYModel ZMQ topic that the BusPirateConsole
-# handler publishes CDC write output to, and waits for the "HiZ>" string to
-# appear in the firmware's TX stream.
+# Mirrors the structure of test/STM32/example/run_test.bash:
+#   1. Clean up any leftover halucinator / qemu processes.
+#   2. Launch halucinator (via run.sh) in the background.
+#   3. Launch bpv5_terminal in scripted mode, with --exit-on watching
+#      for an unmistakable post-prompt marker.
+#   4. PASS if the device exits cleanly with the marker observed.
 #
-# Expected pass time: ~30s (QEMU startup + GDB connect + firmware boot).
-# Hard timeout: 120s.
+# Override the backend with HAL_EMULATOR=unicorn (or qemu, ghidra, renode).
+# Default is avatar2 — matching halucinator's default and the bpv5 demo's
+# Docker-image expectation.
+#
+# Expected pass time: ~60s on unicorn, ~120s on avatar2+qemu.
+# Hard timeout: 300s.
 
 set -e
-
-pkill -9 -f qemu-system-arm 2>/dev/null || true
-pkill -9 -f halucinator     2>/dev/null || true
-sleep 1
+set +m  # disable job-control notifications ("Terminated: 15" on cleanup)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# src/ for halucinator package; . for test.bpv5.bpv5_handlers import
-export PYTHONPATH=src:.
+EMULATOR="${HAL_EMULATOR:-avatar2}"
+TIMEOUT="${BPV5_SMOKE_TIMEOUT:-300}"
+EXIT_MARKER="${BPV5_SMOKE_EXIT_MARKER:-work with pins}"
 
-rm -f bpv5_smoke_out.txt
+# --- cleanup -------------------------------------------------------------
+pkill -9 -f qemu-system-arm   2>/dev/null || true
+pkill -9 -f halucinator       2>/dev/null || true
+pkill -9 -f bpv5_terminal     2>/dev/null || true
+pkill -9 -f gdb-multiarch     2>/dev/null || true
+sleep 1
+rm -f bpv5_hal.log bpv5_dev.log
 
-# Write the ZMQ subscriber to a temp file to avoid heredoc quoting issues.
-TMPPY=$(mktemp /tmp/bpv5_monitor_XXXXXX.py)
-trap 'rm -f "$TMPPY"' EXIT
-
-cat > "$TMPPY" << 'PYEOF'
-import sys
-import time
-from halucinator.external_devices.ioserver import IOServer
-
-output = bytearray()
-found = False
-
-def on_tx(server, msg):
-    global found
-    raw = msg.get('chars', b'')
-    if isinstance(raw, (bytes, bytearray)):
-        output.extend(raw)
-    elif isinstance(raw, list):
-        output.extend(bytes(raw))
-    if b'HiZ>' in output:
-        found = True
-
-# rx_port=5556: subscribe to halucinator's PUB socket (firmware TX output)
-# tx_port=5555: connect to halucinator's SUB socket (firmware RX input)
-io = IOServer(rx_port=5556, tx_port=5555)
-io.register_topic('Peripheral.UTTYModel.tx_buf', on_tx)
-io.start()
-
-deadline = time.time() + 120
-while time.time() < deadline and not found:
-    time.sleep(0.25)
-
-io.shutdown()
-
-if found:
-    print('SUCCESS: HiZ> prompt received', file=sys.stderr)
-    sys.exit(0)
-else:
-    print('TIMEOUT: HiZ> not seen within 120s', file=sys.stderr)
-    sys.exit(1)
-PYEOF
-
-# Start the subscriber before halucinator so the ZMQ connection is pending
-# before the peripheral server binds — avoids any early-message race.
-python3 "$TMPPY" &
-MONITOR_PID=$!
-
-echo "=== Starting halucinator for BPv5 smoke test ==="
-PYTHONUNBUFFERED=1 halucinator \
-    -c test/bpv5/bpv5_memory.yaml \
-    -c test/bpv5/bpv5_config.yaml \
-    -c test/bpv5/bpv5_addrs.yaml \
-    -n bpv5_smoke \
-    >bpv5_smoke_out.txt 2>&1 &
+# --- launch halucinator --------------------------------------------------
+echo "=== Launching halucinator (--emulator $EMULATOR) ==="
+HAL_EMULATOR="$EMULATOR" "$SCRIPT_DIR/run.sh" >bpv5_hal.log 2>&1 &
 HAL_PID=$!
 
-wait $MONITOR_PID
-RC=$?
+# Give halucinator a head start so its ZMQ sockets are bound by the time
+# the device subscribes. The device sends its --prelude on first received
+# tx_buf so it's safe even if this is short, but a couple of seconds keeps
+# the logs tidier.
+sleep 2
 
-kill $HAL_PID 2>/dev/null || true
-pkill -f qemu-system-arm 2>/dev/null || true
-
-if [ $RC -eq 0 ]; then
-    echo "BPv5 smoke test PASSED"
-    exit 0
+# --- launch the device in scripted mode ----------------------------------
+# Rely on the device's own --max-runtime — no external `timeout` (the
+# coreutils binary isn't present by default on macOS).
+echo "=== Launching bpv5_terminal in scripted mode ==="
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src:."
+if python3 -m test.bpv5.bpv5_terminal \
+        --script 'h\r\n' \
+        --script-delay 2 \
+        --exit-on "${EXIT_MARKER}" \
+        --max-runtime "${TIMEOUT}" \
+        >bpv5_dev.log 2>&1; then
+    DEV_RC=0
 else
-    echo "BPv5 smoke test FAILED"
-    echo "=== bpv5_smoke_out.txt (last 50 lines) ==="
-    tail -50 bpv5_smoke_out.txt || true
-    exit 1
+    DEV_RC=$?
 fi
+
+# --- evaluate ------------------------------------------------------------
+if [[ "$DEV_RC" -eq 0 ]] && grep -q "exit marker .* seen" bpv5_dev.log; then
+    echo "=== bpv5 smoke test PASSED (--emulator $EMULATOR) ==="
+    { kill "$HAL_PID"; wait "$HAL_PID"; } 2>/dev/null || true
+    pkill -9 -f qemu-system-arm 2>/dev/null || true
+    exit 0
+fi
+
+echo "=== bpv5 smoke test FAILED (--emulator $EMULATOR, device exit=$DEV_RC) ==="
+echo "--- last 30 lines of bpv5_dev.log ---"
+tail -30 bpv5_dev.log || true
+echo "--- last 50 lines of bpv5_hal.log ---"
+tail -50 bpv5_hal.log || true
+{ kill "$HAL_PID"; wait "$HAL_PID"; } 2>/dev/null || true
+pkill -9 -f qemu-system-arm 2>/dev/null || true
+exit 1

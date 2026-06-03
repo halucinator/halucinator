@@ -454,10 +454,21 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
                 and key in self._MONITOR_REGS_CORTEX_M
                 and self._monitor._sock is not None):  # pylint: disable=protected-access
             try:
-                self._monitor.execute(
-                    f"cpu {key.upper() if key in ('pc', 'sp', 'lr') else key} "
-                    f"{value:#x}"
-                )
+                # Renode's monitor exposes PC/SP/LR as CPU *properties*
+                # (``cpu PC <val>``) but general-purpose registers r0–r12 are
+                # *not* exposed by name — writing ``cpu R0 <val>`` errors with
+                # "sysbus.cpu does not provide a field, method or property R0".
+                # The architecturally-numbered registers are reached through
+                # the ``SetRegister`` method instead (``cpu SetRegister <N>
+                # <val>``), matching the pattern in Renode's own platform
+                # scripts (see ``scripts/single-node/zedboard.resc`` etc.).
+                if key in ("pc", "sp", "lr"):
+                    _cmd = f"cpu {key.upper()} {value:#x}"
+                else:
+                    # key is "r0".."r12"
+                    _idx = int(key[1:])
+                    _cmd = f"cpu SetRegister {_idx} {value:#x}"
+                self._monitor.execute(_cmd)
                 return
             except Exception as exc:  # noqa: BLE001
                 log.warning("Monitor %s write failed (%s); falling back to GDB",
