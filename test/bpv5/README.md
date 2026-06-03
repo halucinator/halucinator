@@ -4,9 +4,9 @@ This example demonstrates how to re-host the Bus Pirate v5 (bpv5) firmware using
 
 ## Provenance
 The binary and symbolized ELF were provided for testing.
-*   **Binary:** `bus_pirate5_rev10.bin`
+*   **Binary:** `bus_pirate5_rev10.bin` (MIT License)[^1]
 *   **ELF:** `bus_pirate5_rev10.elf`
-*   **Bootrom:** `b2.bin` (Downloaded from Raspberry Pi's official repo)
+*   **Bootrom:** `b2.bin` (Downloaded from Raspberry Pi's official repo) (Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.) [^2]
 
 ## Emulation Challenges & Solutions
 
@@ -48,3 +48,7 @@ PYTHONPATH=.:src halucinator \
 ```
 
 The output will show the Bus Pirate banner and initialization sequence, ultimately reaching the VT100 color mode prompt.
+
+----
+[^1]: [MIT License](https://github.com/DangerousPrototypes/BusPirate5-firmware/blob/d821f1344fa561a015362b5499ef9606cc16df69/LICENSE.TXT)
+[^2]: [Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.](https://github.com/raspberrypi/pico-bootrom-rp2040/blob/ef22cd8ede5bc007f81d7f2416b48db90f313434/LICENSE.TXT)
