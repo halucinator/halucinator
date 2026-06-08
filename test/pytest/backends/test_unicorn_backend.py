@@ -137,6 +137,24 @@ class TestUnicornBackendInterface:
         b.shutdown()
         assert b._uc is None
 
+    def test_irq_set_clear_enable_bp_are_noops(self):
+        """The avatar2/QEMU path drives irq_{set,clear,enable}_bp by
+        writing to the halucinator-irq controller's MMIO region. Unicorn
+        doesn't model a NVIC/GIC — IRQ delivery here goes through
+        inject_irq() / IrqController.trigger() instead. Peripheral models
+        call these defensively to deassert lines that were never asserted
+        via MMIO (UTTYModel after rx-char delivery is the most common
+        trigger), so they must exist as no-ops rather than AttributeError."""
+        b = _make_backend()
+        # Should be callable without raising; return value is irrelevant.
+        assert b.irq_set_bp(1) is None
+        assert b.irq_clear_bp(1) is None
+        assert b.irq_enable_bp(1) is None
+        # And without arguments, default to irq_num=1:
+        assert b.irq_set_bp() is None
+        assert b.irq_clear_bp() is None
+        assert b.irq_enable_bp() is None
+
 
 # ---------------------------------------------------------------------------
 # Execution tests — run real ARM Thumb instructions

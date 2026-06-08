@@ -74,8 +74,46 @@ class TestRenodeBackend:
         backend.write_register("pc", 0x8000)
         backend._monitor.execute.assert_called_once()
         cmd = backend._monitor.execute.call_args[0][0]
-        assert "PC" in cmd and "0x8000" in cmd
+        assert cmd == "cpu PC 0x8000"
         backend._gdb.write_register.assert_not_called()
+
+    def test_write_register_uses_property_syntax_for_sp_and_lr(self, backend):
+        """SP / LR are CPU properties on Renode and accept the
+        ``cpu <REG> <val>`` shorthand directly."""
+        backend._monitor._sock = mock.Mock()
+        backend.write_register("sp", 0x20001000)
+        backend.write_register("lr", 0x10000123)
+        assert backend._monitor.execute.call_args_list[0][0][0] == "cpu SP 0x20001000"
+        assert backend._monitor.execute.call_args_list[1][0][0] == "cpu LR 0x10000123"
+
+    def test_write_register_uses_setregister_for_r0_through_r12(self, backend):
+        """R0-R12 are NOT property-accessible on Renode's CortexM CPU;
+        writing ``cpu R0 <val>`` errors with "sysbus.cpu does not provide
+        a field, method or property R0". They must use the ``SetRegister
+        <index> <val>`` method instead. Without this, ReturnConstant
+        ret_value silently delivers 0 to the firmware (e.g. the bpv5 demo
+        fails with mcu_detect_revision returning 0 instead of 10)."""
+        backend._monitor._sock = mock.Mock()
+        for n in range(13):
+            backend.write_register(f"r{n}", 0xA000 + n)
+        calls = [c[0][0] for c in backend._monitor.execute.call_args_list]
+        assert calls == [f"cpu SetRegister {n} {0xA000 + n:#x}" for n in range(13)]
+
+    def test_write_register_uppercase_r_normalised_to_setregister(self, backend):
+        """Register names are lowercased before dispatch so callers can
+        pass either ``r0`` or ``R0``."""
+        backend._monitor._sock = mock.Mock()
+        backend.write_register("R3", 0xDEADBEEF)
+        backend._monitor.execute.assert_called_once_with("cpu SetRegister 3 0xdeadbeef")
+
+    def test_write_register_falls_back_to_gdb_on_monitor_exception(self, backend):
+        """If the Monitor write raises, the backend logs a warning and
+        falls through to the GDB packet, so a transient Monitor failure
+        doesn't lose the write entirely."""
+        backend._monitor._sock = mock.Mock()
+        backend._monitor.execute.side_effect = RuntimeError("monitor closed")
+        backend.write_register("r0", 0x42)
+        backend._gdb.write_register.assert_called_once_with("r0", 0x42)
 
     def test_write_register_delegates_to_gdb_for_non_cortex_m(self):
         """For non-cortex-m archs, register writes still go through GDB."""
