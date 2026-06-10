@@ -40,10 +40,12 @@ def test_trigger_interrupt_propagates_to_peripheral_sever_qemu(
     interrupter = setup_send_interrupt
     num_interrupts = 2
     for num in range(num_interrupts):
-        SetupPeripheralServer.qemu.irq_set_qmp.reset_mock()
+        # Modern HalBackends expose inject_irq; peripheral_server now
+        # routes the zmq Interrupt.Trigger topic through it.
+        SetupPeripheralServer.qemu.inject_irq.reset_mock()
         interrupter.trigger_interrupt(num)
         wait_assert(
-            lambda: SetupPeripheralServer.qemu.irq_set_qmp.assert_called_once_with(
+            lambda: SetupPeripheralServer.qemu.inject_irq.assert_called_once_with(
                 num
             )
         )

@@ -1,0 +1,29 @@
+machine:
+  arch: mips
+  cpu_model: 24Kf
+  entry_addr: 0x80000030
+  init_sp: 0xA001FF00
+  vector_base: 0x80000000
+  gdb_exe: gdb-multiarch
+  interrupt_controller:
+    type: mips
+    # Shadow-write addresses for in-process backends (unicorn,
+    # ghidra) and for avatar2/qemu's avatar-shadow-irq QMP path.
+    # avatar-shadow-irq writes via cpu_physical_memory_write so it
+    # uses physical addresses; in-process backends use the kseg1
+    # view (no MMU). Both refer to the same 4 bytes of the ram
+    # region. nm test_irq.elf gives 0xA0010000/04 for the kseg1
+    # view; phys translation drops the kseg1 offset 0xA0000000.
+    irq_number_addr: 0xA0010000
+    irq_fired_addr:  0xA0010004
+    irq_number_phys_addr: 0x00010000
+    irq_fired_phys_addr:  0x00010004
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

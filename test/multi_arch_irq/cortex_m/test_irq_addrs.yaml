@@ -1,0 +1,7 @@
+symbols:
+  0x08000400: Reset_Handler
+  0x08000414: uart_init
+  0x08000420: uart_write
+  0x08000430: IRQ_Handler
+  0x08000448: HardFault_Handler
+  0x0800045c: main

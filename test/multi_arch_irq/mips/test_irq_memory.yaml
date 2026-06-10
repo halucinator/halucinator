@@ -1,0 +1,25 @@
+memories:
+  # MIPS BE memory layout. Firmware sits in kseg0 (0x80000000-0x9FFFFFFF)
+  # so reset + code fetches need no TLB; data lives in kseg1 (0xA0xxxxxx)
+  # which is also unmapped + uncached. Each kseg view has a fixed
+  # hardware translation to physical address (kseg0: PA = VA - 0x80000000;
+  # kseg1: PA = VA - 0xA0000000), so to keep flash and ram from aliasing
+  # in physical space we put ram at +0x10000 (kseg1) instead of 0.
+  #
+  # `alias_at` mirrors the region at the matching physical address so
+  # avatar2/qemu can reach the bytes through the CPU's hardware-mapped
+  # kseg0/kseg1 view. Unicorn / Ghidra (no MIPS MMU) read straight from
+  # base_addr and ignore the alias.
+  flash:
+    {base_addr: 0x80000000, file: firmware/test_irq.bin,
+     permissions: r-x, size: 0x10000, alias_at: 0x00000000}
+  ram:
+    {base_addr: 0xA0010000, size: 0x10000, permissions: rw-,
+     alias_at: 0x00010000}
+  halucinator:
+    {base_addr: 0xA0100000, size: 0x100000, permissions: rw-,
+     alias_at: 0x00100000}
+peripherals:
+  logger:
+    {base_addr: 0xB0000000, emulate: GenericPeripheral,
+     permissions: rw-, size: 0x10000000, alias_at: 0x10000000}

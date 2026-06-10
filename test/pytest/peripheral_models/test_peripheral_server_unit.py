@@ -41,17 +41,34 @@ def _set_qemu(mock_qemu):
 class TestIrqFunctions:
     """Test IRQ helper functions when __QEMU is set/not set."""
 
-    def test_irq_set_qmp_with_qemu(self):
+    def test_irq_set_qmp_routes_to_modern_inject_irq(self):
+        """Modern HalBackend exposes inject_irq; the deprecated
+        irq_set_qmp() alias should route through it."""
         mock_qemu = mock.Mock()
-        with mock.patch.object(ps, "_PeripheralServer__QEMU" if hasattr(ps, "_PeripheralServer__QEMU") else "__QEMU", mock_qemu, create=True):
-            # Use setattr to work around name mangling
-            old = getattr(ps, "__QEMU", None)
-            setattr(ps, "__QEMU", mock_qemu)
-            try:
-                ps.irq_set_qmp(5)
-                mock_qemu.irq_set_qmp.assert_called_once_with(5)
-            finally:
-                setattr(ps, "__QEMU", old)
+        old = getattr(ps, "__QEMU", None)
+        setattr(ps, "__QEMU", mock_qemu)
+        try:
+            ps.irq_set_qmp(5)
+            mock_qemu.inject_irq.assert_called_once_with(5)
+        finally:
+            setattr(ps, "__QEMU", old)
+
+    def test_irq_set_qmp_legacy_avatar2_path(self):
+        """Avatar2 + bare QemuTarget exposes irq_set_qmp but NOT
+        inject_irq. Verify the alias falls back to the legacy method."""
+        # spec= restricts the mock's attributes — getattr(mock, 'inject_irq')
+        # returns None, mirroring a real legacy QemuTarget.
+        class _LegacyQemu:
+            def __init__(self):
+                self.irq_set_qmp = mock.Mock()
+        mock_qemu = _LegacyQemu()
+        old = getattr(ps, "__QEMU", None)
+        setattr(ps, "__QEMU", mock_qemu)
+        try:
+            ps.irq_set_qmp(5)
+            mock_qemu.irq_set_qmp.assert_called_once_with(5)
+        finally:
+            setattr(ps, "__QEMU", old)
 
     def test_irq_set_qmp_without_qemu(self):
         old = getattr(ps, "__QEMU", None)
@@ -189,13 +206,15 @@ class TestIrqFunctions:
 
 
 class TestTriggerInterrupt:
-    def test_trigger_interrupt_calls_irq_set_qmp(self):
+    def test_trigger_interrupt_calls_inject_irq(self):
+        """trigger_interrupt() routes through inject_irq(), which prefers
+        the modern HalBackend.inject_irq path."""
         mock_qemu = mock.Mock()
         old = getattr(ps, "__QEMU", None)
         setattr(ps, "__QEMU", mock_qemu)
         try:
             ps.trigger_interrupt(10)
-            mock_qemu.irq_set_qmp.assert_called_once_with(10)
+            mock_qemu.inject_irq.assert_called_once_with(10)
         finally:
             setattr(ps, "__QEMU", old)
 

@@ -120,14 +120,16 @@ def test_set_vtor_stores_vector_base():
 
 
 @pytest.mark.skipif(not _HAVE_PYGHIDRA, reason="pyghidra not installed")
-def test_inject_irq_on_non_cortex_m_is_warning(caplog):
-    """IRQ injection is Cortex-M specific; other archs log and return."""
-    import logging
+def test_inject_irq_on_non_cortex_m_routes_through_controller():
+    """On non-Cortex-M archs the GhidraBackend falls through to
+    HalBackend.inject_irq, which delegates to the configured
+    IrqController. Without one attached, IrqConfigError fires with a
+    pointer to the YAML config the user needs to declare."""
     from halucinator.backends.ghidra_backend import GhidraBackend
+    from halucinator.backends.irq import IrqConfigError
     b = GhidraBackend(arch="mips")
-    caplog.set_level(logging.WARNING)
-    b.inject_irq(5)
-    assert any("cortex-m3" in r.message for r in caplog.records)
+    with pytest.raises(IrqConfigError, match="no interrupt controller"):
+        b.inject_irq(5)
 
 
 @pytest.mark.skipif(not _HAVE_PYGHIDRA, reason="pyghidra not installed")

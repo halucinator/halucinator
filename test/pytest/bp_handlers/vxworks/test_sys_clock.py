@@ -29,6 +29,8 @@ class TestSysClock:
 
         result = clk.sys_clk_enable(qemu, 0x1000)
 
+        # Starts the software tick timer and lets the real enable run too
+        # (return False) — running it natively is boot-safe.
         assert result == (False, 0)
         clk.model.start_timer.assert_called_once_with('testClk', 5, 0.1, 10)
 

@@ -1,0 +1,17 @@
+memories:
+  flash:
+    {base_addr: 0x00000000, file: firmware/test_irq.bin,
+     permissions: r-x, size: 0x10000}
+  ram:
+    {base_addr: 0x40000000, size: 0x10000, permissions: rw-}
+  halucinator:
+    {base_addr: 0x60000000, size: 0x100000, permissions: rw-}
+  # No OpenPIC peripheral here — IRQ delivery on avatar2/qemu
+  # goes through the avatar-ppc-inject-irq QMP command which
+  # pulses env->irq_inputs[N] directly. unicorn/ghidra deliver via
+  # the IrqController shadow-write (irq_fired_addr in
+  # interrupt_controller). No CPU-side OpenPIC modelling needed.
+peripherals:
+  logger:
+    {base_addr: 0x50000000, emulate: GenericPeripheral,
+     permissions: rw-, size: 0x10000000}

@@ -18,7 +18,7 @@ def setup_peripheral_server():
 
 def test_start_timer():
     irq_name = "irq_name"
-    SetupPeripheralServer.qemu.irq_set_qmp.reset_mock()
+    SetupPeripheralServer.qemu.inject_irq.reset_mock()
     TimerModel.start_timer(name=irq_name, isr_num=IRQ_NUM, rate=IRQ_RATE)
     event, timer_irq = TimerModel.active_timers[irq_name]
     num_loops = 5
@@ -34,7 +34,7 @@ def test_start_timer():
     # the scheduler with every other test's background thread. What we
     # care about is (a) the timer did fire at all, and (b) every call
     # carries the right IRQ_NUM.
-    calls = SetupPeripheralServer.qemu.irq_set_qmp.call_args_list
+    calls = SetupPeripheralServer.qemu.inject_irq.call_args_list
     assert 1 <= len(calls) <= num_loops * 3 + 5, (
         f"expected around {num_loops - 1} fires, got {len(calls)}"
     )

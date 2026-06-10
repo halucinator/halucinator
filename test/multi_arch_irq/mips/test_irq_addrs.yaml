@@ -1,0 +1,7 @@
+symbols:
+  0x80000030: _reset
+  0x80000070: _irq_entry_simple
+  0x80000090: uart_init
+  0x800000a0: uart_write
+  0x800000b8: IRQ_Handler
+  0x800000e4: main

@@ -1,0 +1,34 @@
+machine:
+  arch: arm
+  cpu_model: cortex-a9
+  entry_addr: 0x00000000
+  init_sp: 0x4000FF00
+  vector_base: 0x00000000
+  gdb_exe: gdb-multiarch
+  # ARMv7-A external IRQs come through a GICv2. The IrqController
+  # spec writes GICD_ISPENDR to set bits pending; backends that
+  # model the GIC (avatar2/qemu/renode) would propagate that to the
+  # CPU. For unicorn/ghidra (no GIC model) the synthetic IRQ entry
+  # in _apply_pending_irq_armv7a takes the CPU directly to vector
+  # 0x18 and the firmware's _irq_entry stub handles the rest.
+  interrupt_controller:
+    type: gicv2
+    gicd_base: 0x08000000
+    gicc_base: 0x08010000
+    # Shadow-state addresses for in-process backends (ghidra
+    # specifically — the banked-register synthetic ARMv7-A IRQ
+    # entry doesn't survive Ghidra's PCode emulator state). The
+    # backend writes irq_number/irq_fired directly so main's
+    # polling loop sees the IRQ. Keep in sync with .bss layout
+    # (see `arm-none-eabi-nm test_irq.elf`).
+    irq_number_addr: 0x40000008
+    irq_fired_addr:  0x40000004
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

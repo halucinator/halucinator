@@ -1,0 +1,21 @@
+machine:
+  arch: ppc64
+  cpu_model: 970_v2.2-powerpc64-cpu
+  entry_addr: 0x00000000
+  init_sp: 0x4000FF00
+  vector_base: 0x00000000
+  gdb_exe: gdb-multiarch
+  interrupt_controller:
+    type: openpic
+    openpic_base: 0x40040000
+    irq_number_addr: 0x40000000
+    irq_fired_addr:  0x40000004
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

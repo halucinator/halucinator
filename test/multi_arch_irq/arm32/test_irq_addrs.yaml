@@ -1,0 +1,8 @@
+symbols:
+  0x0000002c: _reset
+  0x00000048: _irq_entry
+  0x00000064: uart_init
+  0x00000074: uart_write
+  0x0000008c: IRQ_Handler
+  0x000000cc: Default_Handler
+  0x000000e8: main

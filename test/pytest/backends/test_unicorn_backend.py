@@ -82,31 +82,57 @@ class TestUnicornBackendInterface:
             b.read_register("xyz_unknown")
 
     def test_inject_irq_warns_without_vector(self, caplog):
-        """When no ISR is installed at the vector table slot, inject_irq
-        should refuse to jump into zero rather than crash."""
+        """When no ISR is installed at the vector table slot, applying
+        a queued IRQ should refuse to jump into zero rather than
+        crash."""
         import logging
         b = _make_backend()
-        # No vector table installed → slot holds 0.
+        # No vector table installed → slot holds 0. inject_irq queues;
+        # _apply_pending_irq is what the dispatch loop runs.
+        b.inject_irq(5)
         with caplog.at_level(logging.WARNING):
-            b.inject_irq(5)
+            b._apply_pending_irq(b._pending_irqs.pop(0))
         assert "vector table slot" in caplog.text
 
-    def test_inject_irq_non_cortex_m_is_noop(self, caplog):
-        """On non-cortex-m archs, inject_irq just warns — we don't have
-        an in-process interrupt model for ARMv7A / ARM64 / MIPS / PPC."""
+    def test_inject_irq_non_cortex_m_routes_through_controller(self):
+        """On non-cortex-m archs, inject_irq falls through to
+        HalBackend.inject_irq, which uses the configured IrqController.
+        Without a controller attached, it raises IrqConfigError so the
+        caller sees a clear "no controller configured" message instead
+        of a silent no-op."""
         from halucinator.backends.hal_backend import MemoryRegion
         from halucinator.backends.unicorn_backend import UnicornBackend
-        import logging
+        from halucinator.backends.irq import IrqConfigError
         b = UnicornBackend(arch="arm64")
         b.add_memory_region(MemoryRegion("ram", 0x40000000, 0x1000, "rw"))
         b.init()
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(IrqConfigError, match="no interrupt controller"):
             b.inject_irq(5)
-        assert "only cortex-m3" in caplog.text
+
+    def test_inject_irq_non_cortex_m_with_controller_attached(self):
+        """When the user configured a GIC controller, inject_irq routes
+        through it and the GICD MMIO write happens on the unicorn
+        engine (visible via read_memory)."""
+        from halucinator.backends.hal_backend import MemoryRegion
+        from halucinator.backends.unicorn_backend import UnicornBackend
+        from halucinator.backends.irq.gic import GicController
+        b = UnicornBackend(arch="arm64")
+        # Map space the GICD will write into.
+        b.add_memory_region(MemoryRegion("gicd", 0x08000000, 0x10000, "rw"))
+        b.add_memory_region(MemoryRegion("ram",  0x40000000, 0x1000,  "rw"))
+        b.init()
+        b.set_irq_controller(GicController(gicd_base=0x08000000, version=2))
+        b.inject_irq(33)  # SPI 33 → ISPENDR1 bit 1
+        # GICD_ISPENDR1 at gicd_base + 0x200 + 4 = 0x08000204
+        assert b.read_memory(0x08000204, 4, 1) == (1 << 1)
 
     def test_inject_irq_enters_isr_on_cortex_m(self):
-        """With a vector table installed, inject_irq pushes an exception
-        frame, sets PC to the ISR, and puts the EXC_RETURN magic in LR."""
+        """With a vector table installed, inject_irq queues the IRQ;
+        applying it pushes an exception frame, sets PC to the ISR,
+        and puts the EXC_RETURN magic in LR. Apply happens
+        automatically inside cont() between emu_start chunks; the
+        test calls _apply_pending_irq directly to avoid spinning a
+        real CPU."""
         import struct
         b = _make_backend()
         # Pretend vector table starts at flash base.
@@ -121,6 +147,10 @@ class TestUnicornBackendInterface:
         b.write_register("lr", 0x08000ABF)
 
         b.inject_irq(2)
+        assert b._pending_irqs == [2]
+        # Drain the pending IRQ as cont() would on the dispatch thread.
+        b._apply_pending_irq(b._pending_irqs.pop(0))
+
         assert b.read_register("pc") == isr_addr  # Thumb bit handled by unicorn
         # EXC_RETURN thread/MSP value
         assert b.read_register("lr") == 0xFFFFFFF9
@@ -131,6 +161,65 @@ class TestUnicornBackendInterface:
         # saved lr (index 5) and saved pc (index 6) match what we set
         assert frame[5] == 0x08000ABF
         assert frame[6] == 0x08000ABC
+
+    def test_arm_vic_inject_irq_queues_via_trigger(self):
+        """A-profile ARM with an ArmVicController: inject_irq routes
+        through the controller's trigger() (queue-only) — the IRQ lands
+        in _pending_irqs exactly once (no double-append) and no CPU
+        state is mutated by the queue step."""
+        from halucinator.backends.hal_backend import MemoryRegion
+        from halucinator.backends.unicorn_backend import UnicornBackend
+        from halucinator.backends.irq.arm_vic import ArmVicController
+        b = UnicornBackend(arch="arm")
+        b.add_memory_region(MemoryRegion("ram", 0x20000000, 0x10000, "rwx"))
+        b.add_memory_region(MemoryRegion("low", 0x00000000, 0x1000, "rwx"))
+        b.init()
+        b.set_irq_controller(ArmVicController(vector_base=0x0))
+        b.inject_irq(7)
+        assert b._pending_irqs == [7]   # queued once, not twice
+
+    def test_arm_vic_apply_pending_irq_vectors(self):
+        """Applying a pended IRQ on the ARM ArmVic path performs the
+        architectural IRQ-mode vector entry: SPSR_irq=CPSR, LR_irq=PC+4,
+        CPSR=IRQ mode (I set), PC=vector_base+0x18. This is what cont()
+        runs on the dispatch thread between emu_start chunks."""
+        from halucinator.backends.hal_backend import MemoryRegion
+        from halucinator.backends.unicorn_backend import UnicornBackend
+        from halucinator.backends.irq.arm_vic import ArmVicController
+        b = UnicornBackend(arch="arm")
+        b.add_memory_region(MemoryRegion("ram", 0x20000000, 0x10000, "rwx"))
+        b.add_memory_region(MemoryRegion("low", 0x00000000, 0x1000, "rwx"))
+        b.init()
+        b.set_irq_controller(ArmVicController(vector_base=0x0))
+        b.write_register("cpsr", 0x13)            # SVC mode, IRQs enabled
+        b.write_register("pc", 0x20001000)
+        b.inject_irq(4)
+        assert b._pending_irqs == [4]
+        b._apply_pending_irq(b._pending_irqs.pop(0))
+        assert b.read_register("pc") == 0x18      # IRQ vector
+        assert (b.read_register("cpsr") & 0x1F) == 0x12   # IRQ mode
+        assert (b.read_register("cpsr") & 0x80) != 0      # I masked
+        # LR is banked in IRQ mode now and holds the return address.
+        assert b.read_register("lr") == 0x20001004
+
+    def test_arm_vic_apply_pending_irq_masked_drops(self):
+        """When CPSR.I masks IRQs, applying the pended IRQ is a no-op
+        (the tick is dropped, not re-queued, so cont() doesn't spin)."""
+        from halucinator.backends.hal_backend import MemoryRegion
+        from halucinator.backends.unicorn_backend import UnicornBackend
+        from halucinator.backends.irq.arm_vic import ArmVicController
+        b = UnicornBackend(arch="arm")
+        b.add_memory_region(MemoryRegion("ram", 0x20000000, 0x10000, "rwx"))
+        b.add_memory_region(MemoryRegion("low", 0x00000000, 0x1000, "rwx"))
+        b.init()
+        b.set_irq_controller(ArmVicController(vector_base=0x0))
+        b.write_register("cpsr", 0x13 | 0x80)     # I bit set: masked
+        b.write_register("pc", 0x20001000)
+        b.inject_irq(4)
+        b._apply_pending_irq(b._pending_irqs.pop(0))
+        # PC unchanged; not re-queued.
+        assert b.read_register("pc") == 0x20001000
+        assert b._pending_irqs == []
 
     def test_shutdown(self):
         b = _make_backend()
