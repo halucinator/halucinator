@@ -87,7 +87,9 @@ typedef  X86CPU THISCPU;
 
 #elif defined(TARGET_MIPS)
 #include "hw/mips/mips.h"
-#include "hw/mips/cpudevs.h"
+#if __has_include("hw/mips/cpudevs.h")
+#include "hw/mips/cpudevs.h"   /* removed in QEMU 10+ */
+#endif
 #include "target/mips/cpu.h"
 typedef  MIPSCPU THISCPU;
 

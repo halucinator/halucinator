@@ -80,4 +80,52 @@
   'if': { 'all': ['CONFIG_AVATAR', 'TARGET_ARM'] }
 }
 
+##
+# @hal-shadow-irq:
+#
+# Shadow-write IRQ delivery.
+#
+# @number-addr: physical address of the irq_number word
+#
+# @fired-addr: physical address of the irq_fired word
+#
+# @irq-num: interrupt number to record
+##
+{ 'command': 'hal-shadow-irq',
+  'data': {'number-addr': 'int', 'fired-addr': 'int', 'irq-num': 'int' } }
 
+##
+# @hal-arm-inject-irq:
+#
+# Pulse the GIC SPI line for an ARM/AArch64 IRQ.
+#
+# @num-cpu: CPU number
+#
+# @num-irq: interrupt id
+##
+{ 'command': 'hal-arm-inject-irq',
+  'data': {'num-cpu': 'int', 'num-irq': 'int' } }
+
+##
+# @hal-mips-inject-irq:
+#
+# Assert a MIPS Cause.IP pin.
+#
+# @num-cpu: CPU number
+#
+# @num-irq: IP bit index
+##
+{ 'command': 'hal-mips-inject-irq',
+  'data': {'num-cpu': 'int', 'num-irq': 'int' } }
+
+##
+# @hal-ppc-inject-irq:
+#
+# Raise the PowerPC external interrupt.
+#
+# @num-cpu: CPU number
+#
+# @num-irq: accepted for symmetry
+##
+{ 'command': 'hal-ppc-inject-irq',
+  'data': {'num-cpu': 'int', 'num-irq': 'int' } }

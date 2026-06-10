@@ -129,6 +129,27 @@ class PowerPC64QemuTarget(HALQemuTarget):
     def get_irq_base_addr(self) -> int:
         raise NotImplementedError
 
+    def inject_irq(self, irq_num: int) -> None:
+        """Deliver IRQ *irq_num* via avatar-qemu's avatar-shadow-irq
+        QMP command — see PowerPCQemuTarget.inject_irq for the
+        shadow-write rationale.
+        """
+        ctrl = getattr(self, "_irq_controller", None)
+        irq_fired_addr = getattr(ctrl, "irq_fired_addr", None)
+        irq_number_addr = getattr(ctrl, "irq_number_addr", None)
+        if irq_fired_addr is not None and irq_number_addr is not None:
+            self.protocols.monitor.execute_command(
+                "avatar-shadow-irq",
+                args={"number-addr": int(irq_number_addr),
+                      "fired-addr":  int(irq_fired_addr),
+                      "irq-num":     int(irq_num)},
+            )
+            return
+        self.protocols.monitor.execute_command(
+            "avatar-ppc-inject-irq",
+            args={"num-irq": 5, "num-cpu": 0},
+        )
+
     def irq_set_qmp(self, irq_num: int = 1) -> None:
         """
             Set interrupt using qmp.

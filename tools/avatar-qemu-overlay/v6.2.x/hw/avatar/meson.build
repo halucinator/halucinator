@@ -1,4 +1,5 @@
 if have_avatar
+  specific_ss.add(when: 'CONFIG_AVATAR', if_true: files('hal_irq.c'))
   specific_ss.add(when: 'TARGET_ARM', if_true: files(
     'configurable_machine.c',
     'avatar_posix.c',

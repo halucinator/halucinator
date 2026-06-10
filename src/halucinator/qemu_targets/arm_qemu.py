@@ -14,7 +14,7 @@ import logging
 import struct
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from avatar2 import QemuTarget
+from avatar2 import QemuTarget, TargetStates
 
 from halucinator import hal_log
 from halucinator.bp_handlers import intercepts
@@ -83,6 +83,33 @@ class ARMQemuTarget(QemuTarget):
         self._init_halucinator_heap()
         self.calls_memory_blocks: Dict[Any, Any] = {}
         self.REGISTER_IRQ_OFFSET: int = 4  # pylint: disable=invalid-name
+
+    def inject_irq(self, irq_num: int) -> None:
+        """Pulse SPI IRQ *irq_num* via avatar-qemu's
+        ``avatar-arm-inject-irq`` QMP command.
+
+        The configurable machine instantiates the GIC as the
+        peripheral named "gic" (per the halucinator YAML
+        convention with ``qemu_name: arm_gic``); the QMP
+        command pulses the corresponding GIC GPIO input,
+        propagating through the GIC -> CPU IRQ wiring already
+        in the configurable machine. Falls back to the legacy
+        ``irq_set_qmp`` for setups that don't declare an
+        interrupt_controller block.
+        """
+        cfg = getattr(self.avatar, "config", None)
+        machine_cfg = getattr(cfg, "machine", None) if cfg else None
+        spec = getattr(machine_cfg, "interrupt_controller", None) \
+            if machine_cfg else None
+        if spec is not None:
+            self.protocols.monitor.execute_command(
+                "avatar-arm-inject-irq",
+                args={"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        # Legacy halucinator-irq QOM path (cortex-m or configs
+        # without an IrqController declaration).
+        self.irq_set_qmp(int(irq_num))
 
     def read_string(self, addr: int, max_len: int = 256) -> str:
         """
