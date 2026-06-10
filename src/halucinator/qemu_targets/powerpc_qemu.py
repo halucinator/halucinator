@@ -226,6 +226,42 @@ class PowerPCQemuTarget(QemuTarget):
     def get_irq_base_addr(self) -> int:
         raise NotImplementedError
 
+    # PPCE500_INPUT_INT = 4. The user-facing IRQ number from
+    # hal_dev_irq_trigger doesn't map 1:1 to env->irq_inputs[]
+    # indices on PowerPC — there are only ~5 input lines and
+    # they're named (RESET_CORE, MCK, CINT, INT, DEBUG, ...).
+    # Always pulse INPUT_INT for external IRQs so the firmware
+    # vector at 0x500 fires consistently.
+    _PPCE500_INPUT_INT = 4
+
+    def inject_irq(self, irq_num: int) -> None:
+        """Deliver IRQ *irq_num* via avatar-qemu's avatar-shadow-irq
+        QMP command, which writes irq_fired / irq_number straight
+        into the firmware's RAM globals from the iothread (under
+        BQL, no GDB stub involvement).
+
+        Why not the GDB M-packet path: avatar-qemu's configurable
+        machine doesn't model an OpenPIC, and the alternative
+        env->irq_inputs[] pulse races MTTCG. The M-packet write
+        also collides with halucinator's dispatch loop holding the
+        GDB socket. Routing through QMP avoids both problems.
+        """
+        ctrl = getattr(self, "_irq_controller", None)
+        irq_fired_addr = getattr(ctrl, "irq_fired_addr", None)
+        irq_number_addr = getattr(ctrl, "irq_number_addr", None)
+        if irq_fired_addr is not None and irq_number_addr is not None:
+            self.protocols.monitor.execute_command(
+                "avatar-shadow-irq",
+                args={"number-addr": int(irq_number_addr),
+                      "fired-addr":  int(irq_fired_addr),
+                      "irq-num":     int(irq_num)},
+            )
+            return
+        self.protocols.monitor.execute_command(
+            "avatar-ppc-inject-irq",
+            args={"num-irq": self._PPCE500_INPUT_INT, "num-cpu": 0},
+        )
+
     def irq_set_qmp(self, irq_num: int = 1) -> None:
         '''
             Set interrupt using qmp.

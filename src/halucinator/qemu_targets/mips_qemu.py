@@ -67,3 +67,35 @@ class MIPSQemuTarget(HALQemuTarget):
             # TODO: if longer than 1 word, need to split ret_value and put in v0 and v1
             self.regs.v0 = ret_value & 0xFFFFFFFF  # Truncate to 32 bits
         self.regs.pc = self.regs.ra
+
+    def inject_irq(self, irq_num: int) -> None:
+        """Deliver IRQ *irq_num* to the firmware.
+
+        Prefers avatar-qemu's avatar-shadow-irq QMP command when
+        the YAML interrupt_controller declares physical
+        irq_*_phys_addr fields — that writes the post-ack state
+        straight into the firmware's RAM globals on the iothread
+        (under BQL, no GDB stub involvement) and bypasses CPU
+        exception machinery entirely. The MIPS firmware just polls
+        irq_fired and emits the magic UART output once it flips.
+
+        Falls back to avatar-mips-inject-irq (Cause.IP[N] pulse)
+        for configs that don't have shadow-state addresses — those
+        rely on the firmware's CP0 exception entry, which only the
+        few MIPS variants we care about model accurately.
+        """
+        ctrl = getattr(self, "_irq_controller", None)
+        irq_fired_phys = getattr(ctrl, "irq_fired_phys_addr", None)
+        irq_number_phys = getattr(ctrl, "irq_number_phys_addr", None)
+        if irq_fired_phys is not None and irq_number_phys is not None:
+            self.protocols.monitor.execute_command(
+                "avatar-shadow-irq",
+                args={"number-addr": int(irq_number_phys),
+                      "fired-addr":  int(irq_fired_phys),
+                      "irq-num":     int(irq_num)},
+            )
+            return
+        self.protocols.monitor.execute_command(
+            "avatar-mips-inject-irq",
+            args={"num-irq": int(irq_num), "num-cpu": 0},
+        )

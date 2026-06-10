@@ -26,6 +26,7 @@ from halucinator.config.symbols_config import HalSymbolConfig
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
+    from halucinator.backends.irq import IrqController, IrqControllerSpec
 
 # Openable is a NewType to distinguish file paths from other strings.
 Openable = NewType("Openable", str)
@@ -82,7 +83,14 @@ class HalInterceptConfig:
         class_str = split_str[-1]
         try:
             module = importlib.import_module(module_str)
-        except ImportError:
+        except Exception:  # noqa: BLE001
+            # A handler module that can't be imported — for ANY reason —
+            # makes the intercept invalid. Catch broadly, not just
+            # ImportError: when pyghidra/JPype is loaded it installs a
+            # meta-path import hook that raises a Java exception (not an
+            # ImportError) for names it treats as Java packages, e.g. a
+            # bogus class string like "cls.Class". Letting that propagate
+            # turned is_valid() into a crash instead of a False return.
             hal_log.error("No module %s on Intercept %s", module_str, self)
             return False
 
@@ -153,6 +161,8 @@ class HALMachineConfig:
         vector_base: int = 0x08000000,
         gdb_arch: Optional[str] = None,
         machine: Optional[str] = None,
+        interrupt_controller: Optional[Dict[str, Any]] = None,
+        irq_delivery: Optional[Dict[str, Any]] = None,
     ) -> None:  # pylint: disable=too-many-arguments
         self.arch = arch
         self.machine = machine
@@ -163,6 +173,12 @@ class HALMachineConfig:
         self.gdb_arch = gdb_arch
         self.vector_base = vector_base
         self.config_file = config_file
+        # Keep the raw controller dict so the irq_delivery back-compat
+        # shim can recover firmware/synth fields that the IrqControllerSpec
+        # folds into `options`.
+        self._interrupt_controller_raw = interrupt_controller
+        self._irq_delivery_raw = irq_delivery
+        self.interrupt_controller = self._parse_irq_spec(interrupt_controller)
         self.using_default_machine: bool = config_file is None
         self._using_default_machine: bool = self.using_default_machine  # private alias
 
@@ -172,6 +188,90 @@ class HALMachineConfig:
                 self.arch,
                 list(HALUCINATOR_TARGETS.keys()),
             )
+
+    @staticmethod
+    def _parse_irq_spec(
+        spec: Optional[Dict[str, Any]],
+    ) -> Optional["IrqControllerSpec"]:
+        """Convert the YAML `interrupt_controller` block into a
+        backends.irq.IrqControllerSpec. None passes through (caller
+        will fall back to the per-arch default)."""
+        if spec is None:
+            return None
+        from halucinator.backends.irq import IrqControllerSpec
+        # YAML is parsed as a dict like:
+        #   {type: gicv2, gicd_base: 0x08000000, ...}
+        # Pluck the well-known keys, send the rest to options for
+        # controllers that take extra kwargs (none today, but
+        # avoiding an interface tax on future ones).
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"machine.interrupt_controller must be a mapping, "
+                f"got {type(spec).__name__}"
+            )
+        if "type" not in spec:
+            raise ValueError(
+                "machine.interrupt_controller: missing required `type` key. "
+                "One of: cortex_m, gicv2, gicv3, mips, openpic."
+            )
+        known = {"type", "gicd_base", "gicc_base",
+                 "irq_simple_entry", "irq_fired_addr",
+                 "irq_number_addr", "openpic_base"}
+        options = {k: v for k, v in spec.items() if k not in known}
+        if spec.get("gicc_base") is not None:
+            options.setdefault("gicc_base", spec["gicc_base"])
+        if spec.get("irq_simple_entry") is not None:
+            options.setdefault("irq_simple_entry", spec["irq_simple_entry"])
+        if spec.get("irq_fired_addr") is not None:
+            options.setdefault("irq_fired_addr", spec["irq_fired_addr"])
+        if spec.get("irq_number_addr") is not None:
+            options.setdefault("irq_number_addr", spec["irq_number_addr"])
+        return IrqControllerSpec(
+            type=spec["type"],
+            gicd_base=spec.get("gicd_base"),
+            openpic_base=spec.get("openpic_base"),
+            options=options,
+        )
+
+    def build_irq_controller(self) -> Optional["IrqController"]:
+        """Construct the per-machine IrqController.
+
+        Returns None if the user didn't declare one and this arch has
+        no default — the backend's inject_irq will then raise
+        IrqConfigError if anyone calls it.
+        """
+        from halucinator.backends.irq import build_irq_controller
+        return build_irq_controller(self.arch, self.interrupt_controller)
+
+    def build_delivery_plan(self) -> Optional[Any]:
+        """Construct the CPU-exception DeliveryPlan for in-process
+        backends (Unicorn/Ghidra), or None when the backend's CPU model
+        takes exceptions natively (QEMU/avatar2) and no plan is needed.
+
+        Resolution order:
+          1. An explicit `machine.irq_delivery` block — the new shape.
+          2. Back-compat: derive a plan from firmware/synth fields left
+             on the old `interrupt_controller` block, with a one-time
+             deprecation warning pointing at the new shape.
+          3. None — a purely-hardware controller; nothing to deliver.
+        """
+        from halucinator.backends.irq.delivery import DeliveryPlan
+
+        if self._irq_delivery_raw is not None:
+            return DeliveryPlan.from_block(self._irq_delivery_raw)
+
+        plan = DeliveryPlan.from_legacy_controller(
+            self._interrupt_controller_raw or {}
+        )
+        if plan is not None:
+            hal_log.warning(
+                "machine.interrupt_controller carries delivery fields "
+                "(isr_addr/irq_simple_entry/irq_fired_addr/…). These are "
+                "deprecated there; move them into a `machine.irq_delivery` "
+                "block (model: %s). Auto-deriving for now.",
+                plan.model.value,
+            )
+        return plan
 
     def get_avatar_arch(self) -> Any:
         """

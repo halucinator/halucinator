@@ -16,8 +16,21 @@ import argparse
 import signal
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
-from avatar2 import Avatar
-from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
+# avatar2 is imported best-effort. The pluggable-backend refactor means
+# the unicorn/ghidra/renode paths don't touch avatar2 at all, and avatar2
+# drags in a native keystone-engine that isn't importable on every host
+# (e.g. Apple Silicon). Catching the import error lets those backends run
+# where avatar2 can't load; the avatar2/qemu/renode paths use these names
+# and require a working avatar2. The names stay at module scope so they
+# remain patchable by the test-suite and resolvable for the avatar2 path.
+try:
+    from avatar2 import Avatar
+    from avatar2.peripherals.avatar_peripheral import AvatarPeripheral
+    _AVATAR2_AVAILABLE = True
+except Exception:  # noqa: BLE001  (keystone/native-lib load can fail)
+    Avatar = None  # type: ignore[assignment,misc]
+    AvatarPeripheral = None  # type: ignore[assignment,misc]
+    _AVATAR2_AVAILABLE = False
 from .peripheral_models import generic as peripheral_emulators
 
 from .bp_handlers import intercepts
@@ -79,7 +92,13 @@ def get_qemu_target(
         executable=qemu_path,
         entry_address=config.machine.entry_addr,
         name=name,
-        qmp_unix_socket=f"/tmp/{name}-qmp",
+        # Default gdb + qmp to Unix sockets (faster than loopback TCP);
+        # HALUCINATOR_QEMU_TCP=1 forces TCP. The direct QEMUBackend path
+        # overrides these paths below; the avatar2 path uses them as-is.
+        gdb_unix_socket_path=(None if os.environ.get("HALUCINATOR_QEMU_TCP")
+                              else f"/tmp/{name}-gdb"),
+        qmp_unix_socket=(None if os.environ.get("HALUCINATOR_QEMU_TCP")
+                         else f"/tmp/{name}-qmp"),
     )
 
     if log_basic_blocks == "irq":
@@ -162,6 +181,9 @@ def setup_memory(
         memory.base_addr,
         memory.size,
     )
+    extra: Dict[str, Any] = {}
+    if memory.alias_at is not None:
+        extra["alias_at"] = int(memory.alias_at)
     avatar.add_memory_range(
         memory.base_addr,
         memory.size,
@@ -172,6 +194,8 @@ def setup_memory(
         qemu_name=memory.qemu_name,
         irq=memory.irq_config,
         qemu_properties=memory.properties,
+        regions=memory.regions,
+        **extra,
     )
 
     if record_memories is not None:
@@ -339,6 +363,15 @@ def emulate_binary(
         # Other archs (arm64/mips/ppc/ppc64) need SP set manually - the
         # firmware's _start prologue assumes a valid stack.
         qemu.regs.sp = config.machine.init_sp
+
+    # Attach the IrqController to the QemuTarget so per-arch
+    # inject_irq overrides (powerpc_qemu, mips_qemu, ...) can read
+    # shadow-state addresses (irq_fired_addr / irq_number_addr) when
+    # they fall back to the shadow-write delivery path.
+    try:
+        qemu._irq_controller = config.machine.build_irq_controller()
+    except Exception:  # noqa: BLE001
+        qemu._irq_controller = None
 
     _start_execution(avatar, qemu, rx_port, tx_port, gdb_server_port)
 
@@ -590,6 +623,26 @@ def _start_mmio_forwarding(
     return dispatcher
 
 
+def _wire_irq(backend: "HalBackend", config: Any) -> None:
+    """Attach the IRQ controller and, when configured, the CPU-exception
+    delivery plan + deliverer.
+
+    The controller (make-pending) is always attached. The DeliveryPlan
+    (take-the-exception) is only set when the config implies one — an
+    explicit `machine.irq_delivery` block or legacy synth fields on the
+    controller block; it's None for QEMU/avatar targets whose CPU model
+    takes exceptions natively. The deliverer is None for arches not yet
+    migrated, so those keep using the backend's per-arch fallback."""
+    backend.set_irq_controller(config.machine.build_irq_controller())
+    plan = config.machine.build_delivery_plan()
+    if plan is not None:
+        from halucinator.backends.irq.delivery import build_exception_deliverer
+        backend.set_delivery_plan(plan)
+        deliverer = build_exception_deliverer(config.machine.arch)
+        if deliverer is not None:
+            backend.set_exception_deliverer(deliverer)
+
+
 def _emulate_with_qemu_backend(
     config: Any,
     target_name: Optional[str],
@@ -630,8 +683,17 @@ def _emulate_with_qemu_backend(
         target_name, config, log_basic_blocks=log_basic_blocks,
         gdb_port=gdb_port, singlestep=singlestep, qemu_args=qemu_args,
     )
-    # Force TCP QMP (our _QMPClient only speaks TCP).
-    qemu_target.qmp_unix_socket = None
+    # Default the internal gdb + qmp control channels to Unix domain sockets
+    # (faster than loopback TCP, no delayed-ACK tail latency; we own both
+    # ends). avatar's assemble_cmd_line() emits `-gdb unix:…` / `-qmp unix:…`
+    # when these are set, and the QEMUBackend's _GDBClient/_QMPClient connect
+    # to the same paths below. Set HALUCINATOR_QEMU_TCP=1 to force TCP. Keep
+    # paths in /tmp to stay under the AF_UNIX path-length limit (~104 chars).
+    _force_tcp = bool(os.environ.get("HALUCINATOR_QEMU_TCP"))
+    gdb_sock_path = None if _force_tcp else f"/tmp/hal-{target_name}-{gdb_port}-gdb.sock"
+    qmp_sock_path = None if _force_tcp else f"/tmp/hal-{target_name}-{gdb_port}-qmp.sock"
+    qemu_target.gdb_unix_socket_path = gdb_sock_path
+    qemu_target.qmp_unix_socket = qmp_sock_path
     qemu_target.qmp_port = gdb_port + 1
 
     # Swap executable to libafl-qemu-bridge build if that variant was
@@ -691,7 +753,9 @@ def _emulate_with_qemu_backend(
         LibAflQemuBackend if backend_variant == "libafl-qemu" else QEMUBackend
     )
     backend: "HalBackend" = backend_cls(arch=config.machine.arch, gdb_port=gdb_port,
-                          qmp_port=gdb_port + 1)
+                          qmp_port=gdb_port + 1,
+                          gdb_unix_socket=gdb_sock_path,
+                          qmp_unix_socket=qmp_sock_path)
     backend._process = qemu_proc
     # Give QEMU a moment to open its listening sockets.
     time.sleep(0.5)
@@ -699,6 +763,7 @@ def _emulate_with_qemu_backend(
 
     # periph_server.start() needs qemu.avatar.output_directory; graft it on.
     backend.avatar = avatar
+    _wire_irq(backend, config)
 
     # Step 6: apply PC/SP init (same rules as avatar2 path).
     config.initialize_target(backend)
@@ -892,6 +957,7 @@ def _emulate_with_unicorn_backend(
     # addresses. Graft a shim that exposes both.
     from types import SimpleNamespace
     backend.avatar = SimpleNamespace(output_directory=outdir, config=config)
+    _wire_irq(backend, config)
 
     # Apply PC/SP init.
     if config.machine.entry_addr is not None:
@@ -1094,6 +1160,7 @@ def _emulate_with_renode_backend(
             size=size,
             permissions=memory.permissions or "rwx",
             file=memory.file,
+            qemu_name=memory.qemu_name,
         )
         log.info("Adding Memory: %s Addr: 0x%08x Size: 0x%08x",
                  memory.name, memory.base_addr, size)
@@ -1107,6 +1174,7 @@ def _emulate_with_renode_backend(
 
     from types import SimpleNamespace
     backend.avatar = SimpleNamespace(output_directory=outdir, config=config)
+    _wire_irq(backend, config)
 
     # Skip config.initialize_target: PC/SP are already baked into the
     # .resc via cpu PC / cpu SP (set by RenodeBackend.set_initial_state
@@ -1202,6 +1270,7 @@ def _emulate_with_ghidra_backend(
 
     from types import SimpleNamespace
     backend.avatar = SimpleNamespace(output_directory=outdir, config=config)
+    _wire_irq(backend, config)
 
     if config.machine.entry_addr is not None:
         backend.regs.pc = config.machine.entry_addr
