@@ -25,6 +25,8 @@ class HalMemConfig(object):
         qemu_name: Optional[str] = None,
         properties: Optional[Dict[str, Any]] = None,
         irq: Optional[Any] = None,
+        regions: Optional[Any] = None,
+        alias_at: Optional[int] = None,
     ) -> None:
         '''
             Reads in config
@@ -40,6 +42,20 @@ class HalMemConfig(object):
         self.qemu_name: Optional[str] = qemu_name
         self.irq_config: Optional[Any] = irq
         self.properties: Optional[Dict[str, Any]] = properties
+        # Multi-region MMIO mapping for sysbus devices that expose
+        # more than one region (e.g. arm_gic: distributor + cpu
+        # interface). Format: list of {region: int, address: int}.
+        # Region 0 is implicitly mapped at base_addr; entries here
+        # cover any additional regions (region: 1, 2, ...).
+        self.regions: Optional[Any] = regions
+        # Optional second mapping for the same memory region. Useful
+        # for MIPS where firmware lives in kseg0 (0x80000000-0x9FFFFFFF)
+        # at link time but the CPU's hardware mapping makes the only
+        # reachable physical addresses 0x00000000-0x1FFFFFFF — listing
+        # the kseg0 view at base_addr and an alias_at: 0x00000000
+        # makes both unicorn (no MMU) and avatar2/qemu (real MIPS MMU)
+        # find the firmware bytes.
+        self.alias_at: Optional[int] = alias_at
 
         if self.file != None:
             self.get_full_path()

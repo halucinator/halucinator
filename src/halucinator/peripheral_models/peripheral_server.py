@@ -149,15 +149,40 @@ def start(rx_port: int = 5555, tx_port: int = 5556, qemu: Any = None) -> None:
 
 
 def trigger_interrupt(irq_num: int, source: Optional[str] = None) -> None:
-    """Trigger an interrupt by number using the QMP interface."""
+    """Trigger an interrupt by number on the running backend."""
     log.info("Triggering interrupt %s (source=%s)", irq_num, source)
-    irq_set_qmp(irq_num)
+    inject_irq(irq_num)
+
+
+def inject_irq(irq_num: int = 1) -> None:
+    """Inject *irq_num* on the running backend.
+
+    Prefers the modern HalBackend.inject_irq path (which routes
+    through the configured IrqController for non-Cortex-M arches).
+    Falls back to the legacy avatar2 QemuTarget.irq_set_qmp method
+    when the registered backend doesn't expose inject_irq — that
+    keeps the existing avatar2 + cortex-m flow working unchanged.
+    """
+    if __QEMU is None:
+        return
+    inject = getattr(__QEMU, "inject_irq", None)
+    if callable(inject):
+        inject(irq_num)
+        return
+    # Legacy avatar2 path: bare QemuTarget with the halucinator-irq
+    # qom device.
+    legacy = getattr(__QEMU, "irq_set_qmp", None)
+    if callable(legacy):
+        legacy(irq_num)
 
 
 def irq_set_qmp(irq_num: int = 1) -> None:
-    """Set irq_num via QMP. No-op if QEMU not connected."""
-    if __QEMU is not None:
-        __QEMU.irq_set_qmp(irq_num)
+    """Deprecated alias for inject_irq().
+
+    Kept so external_devices/* call sites that imported this name
+    keep working. Will be removed in a future release.
+    """
+    inject_irq(irq_num)
 
 
 def irq_clear_qmp(irq_num: int = 1) -> None:
@@ -242,7 +267,7 @@ def run_server() -> None:
 
             elif topic.startswith("Interrupt.Trigger"):
                 log.info("Triggering Interrupt %s", msg["num"])
-                irq_set_qmp(msg["num"])
+                inject_irq(msg["num"])
             elif topic.startswith("Interrupt.Base"):
                 log.info("Setting Vector Base Addr %s" % msg["num"])
                 __QEMU.set_vector_table_base(msg["base"])
