@@ -48,6 +48,11 @@ class TimerModel(object):
 class TimerIRQ(Thread):
     def __init__(self, event: Event, irq_name: str, irq_num: int, rate: float, delay: int = 0) -> None:
         Thread.__init__(self)
+        # Daemon so a running tick timer never blocks interpreter shutdown:
+        # the run loop only exits when stop_event is set, and on an abrupt
+        # emulation end (fault / emu_stop) nothing sets it, which otherwise
+        # hangs Py_FinalizeEx waiting to join this non-daemon thread.
+        self.daemon = True
         self.stopped: Event = event
         self.name: str = irq_name
         self.irq_num: int = irq_num
@@ -60,8 +65,20 @@ class TimerIRQ(Thread):
             time.sleep(self.delay)
             self.delay = 0
         Interrupts.enabled[self.irq_num] = True
+        # Diagnostic file-log bypasses logger-level filtering; opt in via
+        # HAL_TIMER_DBG=path env var.
+        import os as __os
+        _dbg = __os.environ.get("HAL_TIMER_DBG")
+        _dbg_f = open(_dbg, "a") if _dbg else None
+        if _dbg_f is not None:
+            _dbg_f.write("timer-thread-start irq=%d rate=%g\n"
+                         % (self.irq_num, self.rate))
+            _dbg_f.flush()
         while not self.stopped.wait(self.rate):
             log.info("Sending IRQ: %s" % hex(self.irq_num))
+            if _dbg_f is not None:
+                _dbg_f.write("tick\n")
+                _dbg_f.flush()
             Interrupts.Active_Interrupts[self.name] = True
             Interrupts.set_active_qmp(self.irq_num)
             # call a function
