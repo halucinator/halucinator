@@ -10,11 +10,13 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, bp_handler
+from halucinator import hal_log
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
+hlog = hal_log.getHalLogger()
 
 class BColors:
     '''For pretty coloring of messages'''
@@ -138,3 +140,25 @@ class Tasks(BPHandler):
 #     The taskSpawn( ) routine is built from taskActivate( ) and taskInit( ). Tasks created by taskSpawn( ) do not require explicit task activation.
 #     RETURNS
 #     OK, or ERROR if the task cannot be activated.
+
+
+class TaskSpawnLogger(BPHandler):
+    '''Observe-only: log each VxWorks task as it is spawned, to show the
+    tasks the scheduler creates and runs during bring-up. taskSpawn's
+    signature is taskSpawn(name, priority, options, stackSize, entryPt, ...);
+    we read the name (arg0) and entry point (arg4). Returns False so the
+    real taskSpawn runs and the task actually goes through the scheduler.'''
+
+    @bp_handler(['taskSpawn'])
+    def log_spawn(self, qemu: "HalBackend", addr: int) -> Tuple[bool, None]:
+        try:
+            name_ptr = qemu.get_arg(0)
+            name = qemu.read_string(name_ptr) if name_ptr else '<null>'
+        except Exception:  # noqa: BLE001
+            name = '<unreadable>'
+        try:
+            entry = qemu.get_arg(4)
+        except Exception:  # noqa: BLE001
+            entry = 0
+        hlog.info('VxWorks taskSpawn: name=%s entry=0x%x', name, entry)
+        return False, None
