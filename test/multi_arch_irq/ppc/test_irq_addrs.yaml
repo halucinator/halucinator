@@ -1,0 +1,4 @@
+symbols:
+  0x00000000: _start
+  0x0000017c: uart_init
+  0x00000180: uart_write

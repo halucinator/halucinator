@@ -54,13 +54,13 @@ def test_enable_rx_isr_triggers_interupt(ethernet_model_recv_message):
     interrupt_source = "Ethernet_RX_Frame"
     Interrupts.clear_active(interrupt_source)
     assert Interrupts.Active_Interrupts[interrupt_source] is False
-    SetupPeripheralServer.qemu.irq_set_qmp.reset_mock()
+    SetupPeripheralServer.qemu.inject_irq.reset_mock()
     # Set EthernetModel.rx_frame_isr to an arbitrary value.
     EthernetModel.rx_frame_isr = 20
     msg, _ = ethernet_model_recv_message
     EthernetModel.enable_rx_isr(msg["interface_id"])
     assert Interrupts.Active_Interrupts[interrupt_source] is True
-    SetupPeripheralServer.qemu.irq_set_qmp.assert_called_once_with(
+    SetupPeripheralServer.qemu.inject_irq.assert_called_once_with(
         EthernetModel.rx_frame_isr
     )
 

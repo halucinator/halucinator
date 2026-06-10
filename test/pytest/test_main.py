@@ -112,6 +112,7 @@ class Test_setup_memory:
             qemu_name=None,
             irq=None,
             qemu_properties=None,
+            regions=None,
         )
 
     def test_add_memory_range_is_called_with_member_of_peripheral_models_generic_when_emulate_is_given(
@@ -132,6 +133,7 @@ class Test_setup_memory:
             qemu_name=None,
             irq=None,
             qemu_properties=None,
+            regions=None,
         )
 
     @pytest.mark.parametrize("permissions", ["w", "rw", "rwx", "wx"])

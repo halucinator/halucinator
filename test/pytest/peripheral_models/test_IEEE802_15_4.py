@@ -108,12 +108,12 @@ def model_IEEE802_15_4_recv_message():
 def test_enable_rx_isr_triggers_interupt(model_IEEE802_15_4_recv_message):
     Interrupts.clear_active(model_IEEE802_15_4.IRQ_NAME)
     assert Interrupts.Active_Interrupts[model_IEEE802_15_4.IRQ_NAME] is False
-    SetupPeripheralServer.qemu.irq_set_qmp.reset_mock()
+    SetupPeripheralServer.qemu.inject_irq.reset_mock()
     # Set model_IEEE802_15_4.rx_frame_isr to an arbitrary value.
     model_IEEE802_15_4.rx_frame_isr = 20
     model_IEEE802_15_4.enable_rx_isr("an_interface_id")
     assert Interrupts.Active_Interrupts[model_IEEE802_15_4.IRQ_NAME] is True
-    SetupPeripheralServer.qemu.irq_set_qmp.assert_called_once_with(
+    SetupPeripheralServer.qemu.inject_irq.assert_called_once_with(
         model_IEEE802_15_4.rx_frame_isr
     )
 

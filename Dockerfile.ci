@@ -1,0 +1,66 @@
+# Self-contained CI image: halucinator + QEMU (arm/aarch64/mips/ppc/ppc64)
+# + libafl-qemu-bridge ARM + Ghidra + Renode. `docker build -f Dockerfile.ci`
+# yields one image that runs the ENTIRE pytest suite with zero tool-gated
+# skips (only the debug_shell-removed tests stay skipped — deleted feature).
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GHIDRA_VERSION=12.0.4
+ENV GHIDRA_RELEASE_TAG=20260303
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+
+RUN echo "deb-src http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list
+RUN apt-get update && apt-get install -y \
+  bison flex libfdt-dev libglib2.0-dev libslirp-dev zlib1g-dev \
+  build-essential ca-certificates cmake ethtool g++ gcc-arm-none-eabi \
+  git gdb-multiarch libpixman-1-dev python3-pip python3-venv python-tk \
+  tcpdump vim wget meson ninja-build pkg-config python3 \
+  openjdk-21-jdk-headless unzip curl libicu70 \
+  && apt-get clean && apt-get autoclean -y && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+ADD . ./halucinator
+WORKDIR /root/halucinator
+RUN pip install --upgrade pip "setuptools>=62,<81" wheel
+RUN pip install cffi distlib
+RUN pip install "z3-solver>=4.8.5.0,<4.13"
+RUN pip install -e deps/avatar2/
+RUN pip install --no-build-isolation "pyvex==8.20.7.27"
+RUN pip install --no-build-isolation -r src/requirements.txt
+RUN pip install -e src
+RUN pip install pytest pytest-timeout pyghidra
+
+# --- avatar-qemu: arm / aarch64 / ppc / mips / ppc64 ---
+RUN for t in arm aarch64 ppc mips ppc64; do \
+      mkdir -p deps/build-qemu/$t-softmmu && cd deps/build-qemu/$t-softmmu && \
+      /root/halucinator/deps/avatar-qemu/configure --target-list=$t-softmmu && \
+      make all -j"$(nproc)" && cd /root/halucinator ; \
+    done
+
+# --- libafl-qemu-bridge ARM (newer QEMU base; mkvenv needs distlib) ---
+RUN ./build_qemu.sh --source libafl-qemu-bridge arm-softmmu
+
+# --- Ghidra ---
+RUN curl -fsSL -o /tmp/ghidra.zip \
+      "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_RELEASE_TAG}.zip" \
+ && unzip -q /tmp/ghidra.zip -d /opt \
+ && mv /opt/ghidra_${GHIDRA_VERSION}_PUBLIC ${GHIDRA_INSTALL_DIR} && rm /tmp/ghidra.zip
+
+# --- Renode (arm64 portable .NET; backend runs it --plain --disable-xwt) ---
+RUN curl -fsSL -o /tmp/renode.tar.gz \
+      "https://github.com/renode/renode/releases/download/v1.16.1/renode-1.16.1.linux-arm64-portable-dotnet.tar.gz" \
+ && mkdir -p /opt/renode && tar xzf /tmp/renode.tar.gz -C /opt/renode --strip-components=1 \
+ && rm /tmp/renode.tar.gz \
+ && RB=$(find /opt/renode -maxdepth 2 -name renode -type f | head -1) && ln -sf "$RB" /usr/bin/renode
+
+RUN ln -s -T /usr/bin/gdb-multiarch /usr/bin/arm-none-eabi-gdb
+
+ENV HALUCINATOR_QEMU_ARM=/root/halucinator/deps/build-qemu/arm-softmmu/qemu-system-arm \
+    HALUCINATOR_QEMU_ARM64=/root/halucinator/deps/build-qemu/aarch64-softmmu/qemu-system-aarch64 \
+    HALUCINATOR_QEMU_MIPS=/root/halucinator/deps/build-qemu/mips-softmmu/qemu-system-mips \
+    HALUCINATOR_QEMU_PPC=/root/halucinator/deps/build-qemu/ppc-softmmu/qemu-system-ppc \
+    HALUCINATOR_QEMU_PPC64=/root/halucinator/deps/build-qemu/ppc64-softmmu/qemu-system-ppc64 \
+    AVATAR2_QEMU_EXECUTABLE=/root/halucinator/deps/build-qemu/arm-softmmu/qemu-system-arm \
+    HALUCINATOR_QEMU_LIBAFL_ARM=/root/halucinator/deps/build-qemu-libafl/arm-softmmu/qemu-system-arm \
+    HALUCINATOR_RENODE=/usr/bin/renode \
+    PYTHONPATH=src:test/pytest/helpers
+WORKDIR /root/halucinator

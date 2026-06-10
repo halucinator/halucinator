@@ -229,7 +229,7 @@ class TestEthernetModel:
         assert EthernetModel.frame_queues["eth0"][0] == b"\x00\x01\x02"
         assert len(EthernetModel.frame_times["eth0"]) == 1
 
-    @mock.patch("halucinator.peripheral_models.peripheral_server.irq_set_qmp")
+    @mock.patch("halucinator.peripheral_models.peripheral_server.inject_irq")
     def test_rx_frame_triggers_isr_when_enabled(self, mock_irq):
         EthernetModel.rx_frame_isr = 20
         EthernetModel.rx_isr_enabled = True
@@ -299,7 +299,7 @@ class TestEthernetModel:
     def test_get_frame_info_empty(self):
         assert EthernetModel.get_frame_info("eth0") == (0, 0)
 
-    @mock.patch("halucinator.peripheral_models.peripheral_server.irq_set_qmp")
+    @mock.patch("halucinator.peripheral_models.peripheral_server.inject_irq")
     def test_enable_rx_isr_triggers_when_frames_queued(self, mock_irq):
         EthernetModel.rx_frame_isr = 15
         EthernetModel.frame_queues["eth0"].append(b"frame")

@@ -1,0 +1,26 @@
+machine:
+  arch: arm64
+  cpu_model: cortex-a57
+  entry_addr: 0x00000788
+  init_sp: 0x4000FF00
+  vector_base: 0x00000000
+  gdb_exe: gdb-multiarch
+  interrupt_controller:
+    type: gicv2
+    gicd_base: 0x08000000
+    gicc_base: 0x08010000
+    # AArch64-only: trampoline address that backends without a CPU
+    # exception model (unicorn/ghidra) jump to on synthetic IRQ
+    # delivery. Must follow AAPCS — receives LR=interrupted PC.
+    irq_simple_entry: 0x00000884
+    irq_number_addr: 0x4000014c
+    irq_fired_addr:  0x40000148
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

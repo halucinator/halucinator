@@ -1,0 +1,25 @@
+machine:
+  arch: powerpc
+  cpu_model: e500v2_v22-powerpc-cpu
+  entry_addr: 0x00000000
+  init_sp: 0x4000FF00
+  vector_base: 0x00000000
+  gdb_exe: gdb-multiarch
+  interrupt_controller:
+    type: openpic
+    openpic_base: 0x40040000
+    # In-process backends without an OpenPIC model (unicorn,
+    # ghidra) write the post-ack globals straight into RAM. The
+    # firmware's _start zeroes these at boot and main's polling
+    # loop watches irq_fired.
+    irq_number_addr: 0x40000000
+    irq_fired_addr:  0x40000004
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

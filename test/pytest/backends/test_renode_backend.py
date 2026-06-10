@@ -55,13 +55,14 @@ class TestRenodeBackend:
         assert issubclass(RenodeBackend, HalBackend)
 
     def test_arch_map_covers_renode_supported_archs(self):
-        # mips is intentionally missing — the Renode linux-arm64-dotnet-
-        # portable release doesn't ship a MIPS CPU class.
+        # Renode 1.16+ ships CPU.MIPS in the linux-arm64-dotnet-portable
+        # release, so mips is now a first-class arch in the map.
         assert "cortex-m3" in _ARCH_MAP
+        assert "arm" in _ARCH_MAP
         assert "arm64" in _ARCH_MAP
+        assert "mips" in _ARCH_MAP
         assert "powerpc" in _ARCH_MAP
         assert "ppc64" in _ARCH_MAP
-        assert "mips" not in _ARCH_MAP
 
     def test_read_register_delegates_to_gdb(self, backend):
         backend._gdb.read_register.return_value = 0xCAFE
@@ -133,10 +134,17 @@ class TestRenodeBackend:
 
     def test_inject_irq_uses_monitor(self, backend):
         backend.inject_irq(5)
-        backend._monitor.execute.assert_called_once()
-        call_arg = backend._monitor.execute.call_args[0][0]
-        assert "5" in call_arg
-        assert "OnGPIO" in call_arg
+        # IRQ delivery on cortex-m goes through the NVIC peripheral
+        # and is asserted as a pulse (assert-then-deassert) so the
+        # CPU sees an edge.
+        assert backend._monitor.execute.call_count == 2
+        for call in backend._monitor.execute.call_args_list:
+            arg = call[0][0]
+            assert "OnGPIO" in arg
+            assert "5" in arg
+            assert "sysbus.nvic" in arg or "sysbus.cpu" in arg
+        assert "True" in backend._monitor.execute.call_args_list[0][0][0]
+        assert "False" in backend._monitor.execute.call_args_list[1][0][0]
 
     def test_first_cont_sends_c_then_start(self, backend):
         """The first cont() queues GDB `c` and then un-pauses the machine

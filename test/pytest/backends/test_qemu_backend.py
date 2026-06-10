@@ -64,6 +64,8 @@ class TestGDBClient:
         client.port = 1234
         client.timeout = 5.0
         client.arch = "arm"
+        client.unix_path = None
+        client._rxbuf = b""
         client._lock = __import__("threading").Lock()
 
         # Build a byte stream from the responses
@@ -209,7 +211,7 @@ class TestQEMUBackend:
         b.inject_irq(5)
         b._qmp.execute.assert_called_once_with(
             "avatar-armv7m-inject-irq",
-            {"num_irq": 5, "num_cpu": 0},
+            {"num-irq": 5 + 16, "num-cpu": 0},
         )
 
     def test_arm_mixin_get_arg_register(self, backend_with_mocks):
@@ -226,3 +228,66 @@ class TestQEMUBackend:
         b.execute_return(0)
         b._gdb.write_register.assert_any_call("r0", 0)
         b._gdb.write_register.assert_any_call("pc", 0x08001234)
+
+
+class TestInjectIrqGracefulDegradation:
+    """inject_irq against a stock QEMU lacking the avatar IRQ QMP patches
+    should warn once and short-circuit, not silently no-op forever."""
+
+    def test_command_not_found_warns_and_disables(self, backend_with_mocks):
+        b = backend_with_mocks  # arch=cortex-m3 -> avatar-armv7m-inject-irq
+        b._qmp.execute.return_value = {
+            "error": {"class": "CommandNotFound", "desc": "no such command"}}
+        b.inject_irq(5)
+        assert b._qmp.execute.call_count == 1
+        assert getattr(b, "_irq_qmp_unavailable", False) is True
+        # subsequent injects short-circuit — no further QMP round-trips
+        b.inject_irq(6)
+        assert b._qmp.execute.call_count == 1
+
+    def test_success_keeps_injecting(self, backend_with_mocks):
+        b = backend_with_mocks
+        b._qmp.execute.return_value = {"return": {}}
+        b.inject_irq(5)
+        b.inject_irq(6)
+        assert b._qmp.execute.call_count == 2
+        assert getattr(b, "_irq_qmp_unavailable", False) is False
+
+    def test_hal_name_used_when_available(self, backend_with_mocks):
+        b = backend_with_mocks
+        b.arch = "arm"
+        b._qmp.execute.return_value = {"return": {}}
+        b.inject_irq(5)
+        b._qmp.execute.assert_called_once_with(
+            "hal-arm-inject-irq", {"num-irq": 5, "num-cpu": 0})
+
+    def test_falls_back_to_avatar_alias_and_caches(self, backend_with_mocks):
+        b = backend_with_mocks
+        b.arch = "arm"
+        calls = []
+
+        def fake_exec(cmd, args):
+            calls.append(cmd)
+            if cmd == "hal-arm-inject-irq":
+                return {"error": {"class": "CommandNotFound"}}
+            return {"return": {}}
+        b._qmp.execute.side_effect = fake_exec
+        b.inject_irq(5)
+        # tried the hal- name, fell back to the avatar- alias
+        assert calls == ["hal-arm-inject-irq", "avatar-arm-inject-irq"]
+        # second inject uses the cached avatar- name directly, no hal- retry
+        b.inject_irq(6)
+        assert calls == ["hal-arm-inject-irq", "avatar-arm-inject-irq",
+                         "avatar-arm-inject-irq"]
+        assert getattr(b, "_irq_qmp_unavailable", False) is False
+
+    def test_neither_name_warns_and_disables(self, backend_with_mocks):
+        b = backend_with_mocks
+        b.arch = "arm"
+        b._qmp.execute.return_value = {"error": {"class": "CommandNotFound"}}
+        b.inject_irq(5)
+        # tried hal- then avatar-, both missing -> disabled
+        assert b._qmp.execute.call_count == 2
+        assert getattr(b, "_irq_qmp_unavailable", False) is True
+        b.inject_irq(6)
+        assert b._qmp.execute.call_count == 2  # short-circuited
