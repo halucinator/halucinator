@@ -137,20 +137,37 @@ class _GDBClient:
     """
 
     def __init__(self, host: str = "localhost", port: int = 1234,
-                 timeout: float = 5.0, arch: str = "arm"):
+                 timeout: float = 5.0, arch: str = "arm",
+                 unix_path: Optional[str] = None):
         self.host = host
         self.port = port
         self.timeout = timeout
         self.arch = arch  # used for fallback register layout
+        self.unix_path = unix_path  # AF_UNIX path; None -> TCP (host/port)
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._ack_mode: bool = True  # conservative default; turned off if
                                      # QStartNoAckMode is supported
+        # Persistent receive buffer shared by every read site (_recv_pkt,
+        # _drain_socket). Reading the RSP stream one byte per recv() syscall
+        # made each packet cost O(bytes) syscalls — catastrophic for large
+        # register/memory dumps. We now recv() in 4 KiB chunks and frame
+        # packets out of this buffer.
+        self._rxbuf: bytes = b""
 
     def connect(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(self.timeout)
-        self._sock.connect((self.host, self.port))
+        if self.unix_path:
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.settimeout(self.timeout)
+            self._sock.connect(self.unix_path)
+        else:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._sock.settimeout(self.timeout)
+            self._sock.connect((self.host, self.port))
+            # Tiny request/response packets — disable Nagle so they aren't
+            # delayed waiting to coalesce.
+            self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._rxbuf = b""
         # Initial '+' to ACK any startup banner; then negotiate no-ack mode.
         # If the stub doesn't support it (e.g. avatar-qemu's ppc64 stub
         # returns empty), we stay in ACK mode and +-back every packet.
@@ -171,7 +188,9 @@ class _GDBClient:
         self._discover_register_map()
 
     def _drain_socket(self, max_wait: float) -> None:
-        """Read and discard any bytes already in the socket buffer."""
+        """Read and discard any bytes already pending — both the buffered
+        bytes and whatever is still in the kernel socket buffer."""
+        self._rxbuf = b""   # discard anything already framed-but-unread
         prev_timeout = self._sock.gettimeout()
         self._sock.settimeout(max_wait)
         try:
@@ -209,30 +228,46 @@ class _GDBClient:
         with self._lock:
             self._send_raw(frame)
 
+    def _fill_buf(self) -> None:
+        """Pull one chunk into the receive buffer. Propagates socket.timeout
+        (callers set a deadline and rely on it) and raises on clean close."""
+        chunk = self._sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("GDB stub closed the connection")
+        self._rxbuf += chunk
+
     def _recv_pkt(self) -> bytes:
-        """Read one GDB RSP packet, return its payload. If ACK mode is on,
-        send '+' back to the stub so it doesn't re-send. The read loop
-        naturally skips any leading '+' ACKs from the stub."""
-        buf = b""
+        """Read one GDB RSP packet ($<payload>#cc), return its payload.
+
+        Framed out of the persistent buffer rather than one byte per
+        syscall. Parsing is NON-destructive until a complete packet is in
+        hand: ``self._rxbuf`` is only advanced once payload + '#' + the two
+        checksum chars are all present, so a mid-packet socket.timeout (the
+        wait_for_stop drain relies on this) leaves the partial packet intact
+        for the next call instead of corrupting the stream.
+
+        Leading '+'/'-' ACKs and any inter-packet junk are skipped, matching
+        the previous behaviour. If ACK mode is on, '+' is sent back so the
+        stub doesn't retransmit."""
         with self._lock:
             while True:
-                ch = self._sock.recv(1)
-                if ch == b"$":
-                    break
-                # Ignore '+' acks and any other bytes between packets.
-            while True:
-                ch = self._sock.recv(1)
-                if ch == b"#":
-                    # consume 2-char checksum
-                    self._sock.recv(2)
-                    break
-                buf += ch
-            if self._ack_mode:
-                try:
-                    self._sock.sendall(b"+")
-                except OSError:
-                    pass
-        return buf
+                start = self._rxbuf.find(b"$")
+                if start == -1:
+                    # No packet start yet — buffer holds only ACKs/junk.
+                    self._rxbuf = b""
+                else:
+                    hash_i = self._rxbuf.find(b"#", start + 1)
+                    if hash_i != -1 and len(self._rxbuf) >= hash_i + 3:
+                        payload = self._rxbuf[start + 1:hash_i]
+                        # drop payload + '#' + 2 checksum chars; keep the rest
+                        self._rxbuf = self._rxbuf[hash_i + 3:]
+                        if self._ack_mode:
+                            try:
+                                self._sock.sendall(b"+")
+                            except OSError:
+                                pass
+                        return payload
+                self._fill_buf()
 
     def _cmd(self, payload: bytes) -> bytes:
         self._send_pkt(payload)
@@ -391,27 +426,15 @@ class _GDBClient:
         key = name.lower()
         if self._reg_layout and key in self._reg_layout:
             off, size = self._reg_layout[key]
-            # avatar-qemu's ppc64 gdbstub asserts in handle_read_all_regs
-            # ("len == gdbserver_state.mem_buf->len") whenever the 'g'
-            # packet is sent — the assertion crashes the QEMU process
-            # before we can read any register. Fall straight through to
-            # the single-register 'p' protocol for ppc64.
-            if self.arch == "ppc64":
-                hex_resp = self._cmd(f"p{self._regnum_of(key):x}".encode())
+            data = self._read_g_packet()[off:off + size]
+            if len(data) < size:
+                # Fall back to 'p' single-register read for archs that
+                # only send a prefix of the g packet by default (PPC
+                # large vector regs etc).
+                hex_resp = self._cmd(
+                    f"p{self._regnum_of(key):x}".encode())
                 if hex_resp and not hex_resp.startswith(b"E"):
-                    data = bytes.fromhex(hex_resp.decode())[:size]
-                else:
-                    data = b"\x00" * size
-            else:
-                data = self._read_g_packet()[off:off + size]
-                if len(data) < size:
-                    # Fall back to 'p' single-register read for archs that
-                    # only send a prefix of the g packet by default (PPC
-                    # large vector regs etc).
-                    hex_resp = self._cmd(
-                        f"p{self._regnum_of(key):x}".encode())
-                    if hex_resp and not hex_resp.startswith(b"E"):
-                        data = bytes.fromhex(hex_resp.decode())
+                    data = bytes.fromhex(hex_resp.decode())
             order = "big" if self._big_endian_arch() else "little"
             return int.from_bytes(data, order)
         if self._reg_layout:
@@ -459,14 +482,8 @@ class _GDBClient:
         if resp and not resp.startswith(b"E") and resp != b"":
             log.warning("write_register %s: unexpected response %r", name, resp)
             return
-        # Empty reply -> 'P' unsupported. ppc64's avatar-qemu stub
-        # can't service 'g' (and therefore 'G') without crashing; skip
-        # the read-modify-write fallback for it and accept that the
-        # register write didn't take.
-        if self.arch == "ppc64":
-            log.debug("write_register %s: 'P' unsupported on ppc64, skipping",
-                      name)
-            return
+        # Empty reply -> 'P' unsupported; fall back to 'G'
+        # read-modify-write.
         all_bytes = bytearray(self._read_g_packet())
         if off + size > len(all_bytes):
             # Some stubs send a truncated g packet. Pad with zeros.
@@ -611,20 +628,41 @@ class _GDBClient:
 # ---------------------------------------------------------------------------
 
 class _QMPClient:
-    """Minimal QEMU Machine Protocol (QMP) client over a TCP socket."""
+    """Minimal QEMU Machine Protocol (QMP) client.
 
-    def __init__(self, host: str = "localhost", port: int = 4444):
+    Speaks QMP over either a Unix domain socket (``unix_path``) or a TCP
+    socket (``host``/``port``). A Unix socket is strongly preferred for the
+    halucinator inject_irq hot path: every interrupt is a QMP request →
+    reply round-trip, and a Unix socket avoids the loopback TCP/IP stack
+    (no Nagle, no checksums, no port). When TCP is used we at least disable
+    Nagle so the tiny request/response messages aren't delayed.
+    """
+
+    def __init__(self, host: str = "localhost", port: int = 4444,
+                 unix_path: Optional[str] = None):
         self.host = host
         self.port = port
+        self.unix_path = unix_path
         self._sock: Optional[socket.socket] = None
+        self._buf: bytes = b""
         self._lock = threading.Lock()
 
     def connect(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(5.0)
-        self._sock.connect((self.host, self.port))
+        if self.unix_path:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(self.unix_path)
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect((self.host, self.port))
+            # Tiny QMP request/response messages — don't let Nagle coalesce
+            # and delay them.
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._sock = sock
+        self._buf = b""
         # Read the greeting
-        greeting = self._recv_line()
+        self._recv_line()
         # Negotiate capabilities
         self._send({"execute": "qmp_capabilities"})
         self._recv_line()  # OK response
@@ -636,6 +674,7 @@ class _QMPClient:
             except OSError:
                 pass
             self._sock = None
+        self._buf = b""
 
     def _send(self, obj: Dict) -> None:
         data = (json.dumps(obj) + "\n").encode()
@@ -643,13 +682,15 @@ class _QMPClient:
             self._sock.sendall(data)
 
     def _recv_line(self) -> Dict:
-        buf = b""
-        while True:
-            ch = self._sock.recv(1)
-            if not ch or ch == b"\n":
+        # Buffered line read: pull in chunks and split on newlines, instead
+        # of one recv() syscall per byte (which dominated the old TCP path).
+        while b"\n" not in self._buf:
+            chunk = self._sock.recv(4096)
+            if not chunk:
                 break
-            buf += ch
-        return json.loads(buf) if buf else {}
+            self._buf += chunk
+        line, _sep, self._buf = self._buf.partition(b"\n")
+        return json.loads(line) if line else {}
 
     def execute(self, command: str, arguments: Optional[Dict] = None) -> Dict:
         msg: Dict = {"execute": command}
@@ -687,16 +728,27 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
         qemu_args: Optional[List[str]] = None,
         gdb_host: str = "localhost",
         gdb_port: int = 1234,
+        gdb_unix_socket: Optional[str] = None,
         qmp_host: str = "localhost",
         qmp_port: int = 4444,
+        qmp_unix_socket: Optional[str] = None,
         **kwargs: Any,
     ):
         self.config = config
         self.arch = arch
         self.qemu_path = qemu_path
         self.qemu_args = qemu_args or []
-        self._gdb = _GDBClient(gdb_host, gdb_port, arch=arch)
-        self._qmp = _QMPClient(qmp_host, qmp_port)
+        self.gdb_unix_socket = gdb_unix_socket
+        self.qmp_unix_socket = qmp_unix_socket
+        # This is the INTERNAL control channel (halucinator -> QEMU's
+        # gdbstub). A Unix socket is faster than loopback TCP. It is
+        # independent of the EXTERNAL gdb server (avatar spawn_gdb_server on
+        # gdb_server_port) that IDEs/VSCode attach to — that stays TCP.
+        self._gdb = _GDBClient(gdb_host, gdb_port, arch=arch,
+                               unix_path=gdb_unix_socket)
+        # Prefer a Unix domain socket for QMP (much faster inject_irq
+        # round-trips); fall back to TCP when no socket path is given.
+        self._qmp = _QMPClient(qmp_host, qmp_port, unix_path=qmp_unix_socket)
         self._process: Optional[subprocess.Popen] = None
         self._bp_map: Dict[int, int] = {}   # bp_id → addr
         self._next_bp_id = 1
@@ -721,12 +773,47 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
     # ------------------------------------------------------------------
 
     def launch(self) -> None:
-        """Start QEMU and connect GDB + QMP."""
-        if self.qemu_path:
+        """Start QEMU and connect GDB + QMP.
+
+        When we spawn QEMU ourselves the internal gdb + qmp control channels
+        default to Unix domain sockets (faster than loopback TCP, no
+        delayed-ACK tail latency, and we own both ends). Set
+        ``HALUCINATOR_QEMU_TCP=1`` to force TCP instead. Explicitly passing
+        ``gdb_unix_socket`` / ``qmp_unix_socket`` always wins."""
+        # Only spawn QEMU if we were given a path AND the caller hasn't
+        # already started one (some callers — e.g. the direct main path and
+        # the libafl live test — pre-spawn QEMU themselves and set
+        # ``_process`` before calling launch(); we must connect to that one,
+        # not spawn a redundant second QEMU on a different endpoint).
+        if self.qemu_path and self._process is None:
+            force_tcp = bool(os.environ.get("HALUCINATOR_QEMU_TCP"))
+            if not force_tcp:
+                if self.gdb_unix_socket is None:
+                    self.gdb_unix_socket = f"/tmp/hal-gdb-{self._gdb.port}.sock"
+                    self._gdb.unix_path = self.gdb_unix_socket
+                if self.qmp_unix_socket is None:
+                    self.qmp_unix_socket = f"/tmp/hal-qmp-{self._qmp.port}.sock"
+                    self._qmp.unix_path = self.qmp_unix_socket
+            # Remove stale socket files so QEMU's bind (server,nowait) wins.
+            for sp in (self.gdb_unix_socket, self.qmp_unix_socket):
+                if sp:
+                    try:
+                        os.unlink(sp)
+                    except OSError:
+                        pass
+            if self.qmp_unix_socket:
+                qmp_arg = f"-qmp unix:{self.qmp_unix_socket},server,nowait"
+            else:
+                qmp_arg = (f"-qmp tcp:{self._qmp.host}:{self._qmp.port},"
+                           f"server,nowait")
+            if self.gdb_unix_socket:
+                gdb_arg = f"-gdb unix:{self.gdb_unix_socket},server,nowait"
+            else:
+                gdb_arg = f"-gdb tcp::{self._gdb.port}"
             cmd = [self.qemu_path] + self.qemu_args + [
                 "-S",  # start stopped
-                f"-gdb tcp::{self._gdb.port}",
-                f"-qmp tcp:{self._qmp.host}:{self._qmp.port},server,nowait",
+                gdb_arg,
+                qmp_arg,
             ]
             log.info("Launching QEMU: %s", " ".join(cmd))
             self._process = subprocess.Popen(
@@ -735,20 +822,36 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
             )
             time.sleep(0.5)  # let QEMU initialize
 
-        retries = 5
+        # Retry while QEMU's gdb endpoint comes up. TCP not-listening raises
+        # ConnectionRefusedError; a Unix socket QEMU hasn't created yet raises
+        # FileNotFoundError. Both mean "not ready" — newer QEMU (libafl 10.x)
+        # can take >0.5 s to bind the socket, especially on a loaded CI host.
+        retries = 10
         for i in range(retries):
             try:
                 self._gdb.connect()
                 break
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, FileNotFoundError):
                 if i == retries - 1:
                     raise
                 time.sleep(0.5)
 
-        try:
-            self._qmp.connect()
-        except (ConnectionRefusedError, OSError):
-            log.warning("QMP connection failed — IRQ injection will not work")
+        # QMP is best-effort, but retry the same not-ready errors so a slow
+        # QEMU start doesn't silently disable IRQ injection.
+        for i in range(retries):
+            try:
+                self._qmp.connect()
+                break
+            except (ConnectionRefusedError, FileNotFoundError):
+                if i == retries - 1:
+                    log.warning(
+                        "QMP connection failed — IRQ injection will not work")
+                else:
+                    time.sleep(0.5)
+            except OSError:
+                log.warning(
+                    "QMP connection failed — IRQ injection will not work")
+                break
 
     def shutdown(self) -> None:
         self._gdb.disconnect()
@@ -854,8 +957,148 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
     # Optional: IRQ injection via QMP avatar commands
     # ------------------------------------------------------------------
 
+    # Canonical halucinator-native IRQ-injection QMP commands, each mapped
+    # to the deprecated avatar-qemu name kept as a fallback. halucinator
+    # prefers the hal-* name (the goal: QEMU forks that don't require
+    # avatar); against an older build that only has avatar-*, we fall back
+    # and remember. The cortex-m command (avatar-armv7m-inject-irq) is
+    # called directly and isn't aliased here — it's unchanged across builds.
+    _IRQ_CMD_ALIASES = {
+        "hal-shadow-irq": "avatar-shadow-irq",
+        "hal-arm-inject-irq": "avatar-arm-inject-irq",
+        "hal-mips-inject-irq": "avatar-mips-inject-irq",
+        "hal-ppc-inject-irq": "avatar-ppc-inject-irq",
+    }
+
+    @staticmethod
+    def _is_cmd_not_found(resp: Any) -> bool:
+        return (isinstance(resp, dict)
+                and isinstance(resp.get("error"), dict)
+                and resp["error"].get("class") == "CommandNotFound")
+
+    def _qmp_inject(self, command: str, arguments: Dict) -> Optional[Dict]:
+        """Run an IRQ-injection QMP command, preferring the hal-* name and
+        falling back to the deprecated avatar-* alias on older QEMU builds.
+
+        QMP returns ``{"error": {"class": "CommandNotFound"}}`` for an
+        unknown command (it doesn't raise). We try the canonical name; if
+        it's absent and an avatar-* alias exists, we use that and cache the
+        choice. If neither exists (a stock QEMU with no IRQ patches at all),
+        we log one clear warning and short-circuit further attempts instead
+        of silently delivering nothing."""
+        if getattr(self, "_irq_qmp_unavailable", False):
+            return None
+        resolved = getattr(self, "_irq_cmd_resolved", None)
+        cmd = resolved.get(command, command) if resolved else command
+        resp = self._qmp.execute(cmd, arguments)
+        if self._is_cmd_not_found(resp):
+            alias = self._IRQ_CMD_ALIASES.get(command)
+            if alias and alias != cmd:
+                resp_alias = self._qmp.execute(alias, arguments)
+                if not self._is_cmd_not_found(resp_alias):
+                    if resolved is None:
+                        self._irq_cmd_resolved = resolved = {}
+                    resolved[command] = alias  # remember the working name
+                    return resp_alias
+            # Neither hal-* nor avatar-* exists — no IRQ patches at all.
+            self._irq_qmp_unavailable = True
+            log.warning(
+                "QEMU build lacks the IRQ-injection QMP command %r (and its "
+                "avatar-* alias) — IRQs will NOT be delivered to the target. "
+                "Build QEMU with the halucinator IRQ overlay/patches, or use "
+                "a backend that injects via the IrqController.", command)
+        elif isinstance(resp, dict) and "error" in resp:
+            log.warning("inject_irq: QMP %s failed: %r", cmd, resp["error"])
+        return resp
+
     def inject_irq(self, irq_num: int) -> None:
-        self._qmp.execute(
-            "avatar-armv7m-inject-irq",
-            {"num_irq": irq_num, "num_cpu": 0},
-        )
+        arch = getattr(self, "arch", None)
+        # Cortex-M3 fast-path: avatar-qemu's NVIC-aware QMP command
+        # integrates with watchman semantics. Add the 16-system-
+        # exception offset since the QMP command takes a full
+        # Cortex-M exception number.
+        if arch == "cortex-m3":
+            self._qmp_inject(
+                "avatar-armv7m-inject-irq",
+                {"num-irq": int(irq_num) + 16, "num-cpu": 0},
+            )
+            return
+        # ARM/AArch64 fast-path: pulse the GIC's SPI line directly
+        # via avatar-arm-inject-irq. Bypasses the GDB-write_memory
+        # GIC_ISPENDR path which can race with the live target.
+        if arch in ("arm", "arm64"):
+            self._qmp_inject(
+                "hal-arm-inject-irq",
+                {"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        # MIPS: prefer avatar-shadow-irq when the YAML provides
+        # physical shadow-state addresses; falls back to
+        # avatar-mips-inject-irq (Cause.IP pulse) otherwise.
+        if arch == "mips":
+            ctrl = getattr(self, "_irq_controller", None)
+            irq_fired_phys = getattr(ctrl, "irq_fired_phys_addr", None)
+            irq_number_phys = getattr(ctrl, "irq_number_phys_addr", None)
+            if irq_fired_phys is not None and irq_number_phys is not None:
+                self._qmp_inject(
+                    "hal-shadow-irq",
+                    {"number-addr": int(irq_number_phys),
+                     "fired-addr":  int(irq_fired_phys),
+                     "irq-num":     int(irq_num)},
+                )
+                return
+            self._qmp_inject(
+                "hal-mips-inject-irq",
+                {"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        # PPC fast-path: avatar-qemu pulses env->irq_inputs[N] via
+        # avatar-ppc-inject-irq. PowerPC's irq_inputs[] is sparse
+        # (5-7 entries, name-indexed); halucinator's single-IRQ
+        # API always pulses the canonical external INT slot:
+        # 4 for e500v2 (PPCE500_INPUT_INT), 0 for Book3S PPC64.
+        if arch in ("powerpc", "powerpc:MPC8XX", "ppc64"):
+            # Shadow-write delivery via avatar-qemu's QMP avatar-shadow-irq
+            # command: writes irq_number / irq_fired straight into the
+            # firmware's RAM globals from the iothread, under BQL,
+            # without going through the GDB stub. Sidesteps two
+            # problems with the M-packet path: (a) QEMU's GDB stub
+            # rejects writes while the CPU is running, and (b) the
+            # halucinator dispatch loop's wait_for_stop on the same
+            # GDB socket would race against the inject thread's stop
+            # reply. The firmware's polling loop sees the flag flip on
+            # its next iteration.
+            ctrl = getattr(self, "_irq_controller", None)
+            irq_fired_addr = getattr(ctrl, "irq_fired_addr", None)
+            irq_number_addr = getattr(ctrl, "irq_number_addr", None)
+            if irq_fired_addr is not None and irq_number_addr is not None:
+                self._qmp_inject(
+                    "hal-shadow-irq",
+                    {"number-addr": int(irq_number_addr),
+                     "fired-addr":  int(irq_fired_addr),
+                     "irq-num":     int(irq_num)},
+                )
+                return
+            # No shadow-state — fall back to QMP pulse (works only
+            # on e500 where the racy pulse happens to land).
+            self._qmp_inject(
+                "hal-ppc-inject-irq",
+                {"num-irq": 4 if arch != "ppc64" else 5, "num-cpu": 0},
+            )
+            return
+        # Other arches use the IrqController via super().inject_irq
+        # which writes MMIO through self.write_memory. GDB rejects
+        # memory writes while the target is running, so stop+resume
+        # around the IrqController call.
+        try:
+            self._gdb.stop()
+            self._gdb.wait_for_stop(timeout=2.0)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            super().inject_irq(irq_num)
+        finally:
+            try:
+                self._gdb.cont()
+            except Exception:  # noqa: BLE001
+                pass

@@ -119,10 +119,70 @@ class Avatar2Backend(HalBackend):
     # ------------------------------------------------------------------
 
     def inject_irq(self, irq_num: int) -> None:
-        self.target.protocols.monitor.execute_command(
-            "avatar-armv7m-inject-irq",
-            {"num_irq": irq_num, "num_cpu": 0},
-        )
+        arch = getattr(self, "arch", None)
+        mon = self.target.protocols.monitor
+        # Cortex-M3 fast-path: avatar-qemu's NVIC-aware QMP command
+        # integrates with the avatar-qemu watchman semantics
+        # (avatar-armv7m-ignore-irq-return / unignore-irq-return).
+        if arch == "cortex-m3":
+            # avatar-armv7m-inject-irq takes a full Cortex-M exception
+            # number; the halucinator API takes external IRQ numbers,
+            # so add the 16-system-exception offset.
+            mon.execute_command(
+                "avatar-armv7m-inject-irq",
+                args={"num-irq": int(irq_num) + 16, "num-cpu": 0},
+            )
+            return
+        if arch in ("arm", "arm64"):
+            mon.execute_command(
+                "avatar-arm-inject-irq",
+                args={"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        if arch == "mips":
+            ctrl = getattr(self, "_irq_controller", None)
+            irq_fired_phys = getattr(ctrl, "irq_fired_phys_addr", None)
+            irq_number_phys = getattr(ctrl, "irq_number_phys_addr", None)
+            if irq_fired_phys is not None and irq_number_phys is not None:
+                mon.execute_command(
+                    "avatar-shadow-irq",
+                    args={"number-addr": int(irq_number_phys),
+                          "fired-addr":  int(irq_fired_phys),
+                          "irq-num":     int(irq_num)},
+                )
+                return
+            mon.execute_command(
+                "avatar-mips-inject-irq",
+                args={"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        if arch in ("powerpc", "powerpc:MPC8XX", "ppc64"):
+            # Shadow-write delivery via avatar-qemu's QMP
+            # avatar-shadow-irq command — bypasses CPU exception
+            # machinery and the GDB-protocol M-packet path entirely.
+            # See qemu_backend.QEMUBackend.inject_irq for context.
+            ctrl = getattr(self, "_irq_controller", None)
+            irq_fired_addr = getattr(ctrl, "irq_fired_addr", None)
+            irq_number_addr = getattr(ctrl, "irq_number_addr", None)
+            if irq_fired_addr is not None and irq_number_addr is not None:
+                mon.execute_command(
+                    "avatar-shadow-irq",
+                    args={"number-addr": int(irq_number_addr),
+                          "fired-addr":  int(irq_fired_addr),
+                          "irq-num":     int(irq_num)},
+                )
+                return
+            mon.execute_command(
+                "avatar-ppc-inject-irq",
+                args={"num-irq": 4 if arch != "ppc64" else 5,
+                      "num-cpu": 0},
+            )
+            return
+        # arm / arm64 / others: fall through to the generic
+        # IrqController path on HalBackend (writes GICD_ISPENDR
+        # via write_memory; configurable_machine wires the GIC
+        # output to the CPU IRQ input).
+        super().inject_irq(irq_num)
 
     # ------------------------------------------------------------------
     # Shutdown
