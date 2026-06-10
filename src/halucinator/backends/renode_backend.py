@@ -105,7 +105,7 @@ _ARCH_MAP: Dict[str, Dict[str, str]] = {
     "cortex-m3":      {"cpu_type": "CortexM",    "arch_key": "arm"},
     "arm":            {"cpu_type": "ARMv7A",     "arch_key": "arm"},
     "arm64":          {"cpu_type": "ARMv8A",     "arch_key": "arm64"},
-    # mips omitted — CPU.MIPS* doesn't resolve on linux-arm64-dotnet-portable
+    "mips":           {"cpu_type": "MIPS",       "arch_key": "mips"},
     "powerpc":        {"cpu_type": "PowerPc",    "arch_key": "powerpc"},
     "powerpc:MPC8XX": {"cpu_type": "PowerPc",    "arch_key": "powerpc"},
     "ppc64":          {"cpu_type": "PowerPc64",  "arch_key": "ppc64"},
@@ -210,7 +210,12 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
             stdin=subprocess.DEVNULL,
         )
 
-        retries = 20
+        # Renode startup time scales with platform complexity: a
+        # plain Cortex-M is ~5s, ARMv7A + GIC + GDB stub goes
+        # 15-20s on a slow CI runner, and matrix-harness Docker
+        # contention can stretch it past a minute. Retry well
+        # beyond 60s so the matrix doesn't fail spuriously.
+        retries = 240  # 120s @ 0.5s
         last_err: Optional[Exception] = None
         for i in range(retries):
             try:
@@ -236,14 +241,11 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
     # Renode CPU class name + the cpuType string it expects per halucinator
     # arch. The CPU class goes into `CPU.<Class>` in the .repl/.resc; the
     # cpuType is the concrete sub-variant.
-    # NOTE: MIPS is intentionally absent — the linux-arm64-dotnet-portable
-    # Renode release doesn't ship a MIPS CPU class (CPU.MIPS, MIPSCpu,
-    # MIPS4Kc, etc. all fail to resolve at LoadPlatformDescription time).
-    # Use --emulator avatar2 / qemu / unicorn for mips firmware.
     _CPU_TYPE: Dict[str, Tuple[str, str]] = {
         "cortex-m3":      ("CortexM",   "cortex-m3"),
         "arm":            ("ARMv7A",    "cortex-a7"),
         "arm64":          ("ARMv8A",    "cortex-a53"),
+        "mips":           ("MIPS",      "MIPS4Kc"),
         "powerpc":        ("PowerPc",   "e200z6"),
         "powerpc:MPC8XX": ("PowerPc",   "e200z6"),
         "ppc64":          ("PowerPc64", "power8"),
@@ -265,10 +267,10 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
                 "    nvic: nvic",
                 "",
             ]
-        elif cpu_class == "ARMv8A":
-            # ARMv8A requires a GIC attached to the CPU.
+        elif cpu_class in ("ARMv7A", "ARMv8A"):
+            # ARMv7A / ARMv8A require a GIC attached to the CPU.
             lines += [
-                "cpu: CPU.ARMv8A @ sysbus",
+                f"cpu: CPU.{cpu_class} @ sysbus",
                 f"    cpuType: \"{cpu_type}\"",
                 "    genericInterruptController: gic",
                 "",
@@ -331,7 +333,17 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
             repl_lines.append("lowmem: Memory.MappedMemory @ sysbus 0x0")
             repl_lines.append("    size: 0x1000")
             repl_lines.append("")
+        # Memory regions whose qemu_name names a Renode-modelled
+        # peripheral (currently arm_gic, openpic) — skip the
+        # plain-RAM mapping so the per-arch IRQ controller in the
+        # _repl_cpu_block isn't shadowed by an overlapping memory
+        # range. Other backends (avatar2/qemu) honour qemu_name
+        # natively; unicorn/ghidra ignore qemu_name and treat the
+        # entry as plain memory.
+        _PERIPHERAL_QEMU_NAMES = ("arm_gic", "openpic")
         for region in self._regions:
+            if getattr(region, "qemu_name", None) in _PERIPHERAL_QEMU_NAMES:
+                continue
             repl_lines.append(
                 f"mem{region.base_addr:x}: Memory.MappedMemory @ sysbus "
                 f"{hex(region.base_addr)}"
@@ -536,10 +548,32 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
     # ------------------------------------------------------------------
 
     def inject_irq(self, irq_num: int) -> None:
-        # Renode's Monitor call depends on the CPU type; for a simple NVIC
-        # on cortex-m, `sysbus.nvic OnGPIO <irq> True` triggers the IRQ.
-        # Callers that need different wiring should override.
-        try:
-            self._monitor.execute(f"sysbus.cpu OnGPIO {irq_num} True")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("inject_irq(%d): %s", irq_num, exc)
+        """Trigger external IRQ *irq_num* on the running Renode machine.
+
+        Cortex-M targets receive IRQs through the NVIC: external IRQ N
+        is exposed as GPIO input N on the `nvic` peripheral, which our
+        platform description wires to the CPU.
+
+        ARMv8A (and other GIC-backed targets) drive the GIC's input
+        lines. PPC sends GPIO directly to the CPU.
+        """
+        targets: List[str]
+        if self.arch == "cortex-m3":
+            targets = ["sysbus.nvic"]
+        else:
+            # arm/arm64/ppc/ppc64: route through the CPU. For
+            # arm/arm64 the GIC is wired as
+            # `genericInterruptController: gic` on the CPU, and
+            # CPU.ARMv7A / CPU.ARMv8A forward GPIO assertions to
+            # the GIC's SPI inputs. For PPC the CPU's external
+            # IRQ input picks up the assertion.
+            targets = ["sysbus.cpu"]
+        for target in targets:
+            try:
+                # Pulse: assert then deassert so the CPU sees an edge.
+                self._monitor.execute(f"{target} OnGPIO {int(irq_num)} True")
+                self._monitor.execute(f"{target} OnGPIO {int(irq_num)} False")
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("inject_irq(%d) via %s: %s",
+                            irq_num, target, exc)

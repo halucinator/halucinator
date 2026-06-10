@@ -56,7 +56,7 @@ except ImportError:
 # controls pointer width in read_memory(..., num_words=1).
 _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "cortex-m3":      ("arm",    "thumb", True,  False, 4),
-    "arm":            ("arm",    "thumb", True,  False, 4),
+    "arm":            ("arm",    "arm",   False, False, 4),
     "arm64":          ("arm64",  "arm",   False, False, 8),
     "mips":           ("mips",   "mips32_be", False, True, 4),
     "powerpc":        ("ppc",    "ppc32_be", False, True, 4),
@@ -89,6 +89,7 @@ def _get_arm_reg_map() -> Dict[str, int]:
         "lr":   arm_const.UC_ARM_REG_LR,
         "pc":   arm_const.UC_ARM_REG_PC,
         "cpsr": arm_const.UC_ARM_REG_CPSR,
+        "spsr": arm_const.UC_ARM_REG_SPSR,
     }
     _REG_MAPS_CACHE["arm"] = m
     return m
@@ -234,8 +235,49 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         self._next_bp_id = 1
         self._stopped = True
         self._bp_hit_addr: Optional[int] = None
+        # One-shot: when set, _code_hook lets execution pass this breakpoint
+        # address ONCE without stopping. Used to step over a breakpoint after
+        # an observe-only (non-intercept) bp_handler so the real function runs.
+        self._skip_bp_once: Optional[int] = None
         self._breakpoints: Dict[int, int] = {}   # addr → bp_id
+        # RAM-flag spin breaker (opt-in, see _code_hook / _break_ram_spin).
+        # Detect a spin by DISTINCT-PC count over a window: a tight loop (even
+        # one spanning a function call) touches few distinct PCs, while real
+        # progress touches many. Catches call-based `while(check())` spins the
+        # old contiguous-window detector missed.
+        import os as _os
+        self._break_ram_spins = _os.environ.get("HAL_BREAK_RAM_SPINS") == "1"
+        self._spin_limit = int(_os.environ.get("HAL_RAM_SPIN_LIMIT", "200000"))
+        self._spin_distinct_max = int(
+            _os.environ.get("HAL_RAM_SPIN_DISTINCT", "48"))
+        self._spin_pcs: set = set()
+        self._spin_total = 0
+        # Bad-call recovery (opt-in HAL_RECOVER_BAD_CALLS=1): on an invalid
+        # instruction (a `mov pc, r2` indirect call through a `_func_` hook
+        # bound to a routine we can't satisfy, landing in data), return to lr
+        # — valid because the wrapper set it via `mov lr, pc`. Capped per
+        # fault PC so a genuinely wedged address doesn't loop forever.
+        self._recover_bad_calls = (
+            _os.environ.get("HAL_RECOVER_BAD_CALLS") == "1")
+        self._bad_call_recover: Dict[int, int] = {}
         self._bp_callbacks: Dict[int, Callable] = {}  # bp_id → callback
+        # Pending IRQ injected from another thread (peripheral_server zmq
+        # handler). cont() drains the queue before re-entering emu_start
+        # so the synthetic exception frame is set up single-threaded.
+        self._pending_irqs: List[int] = []
+
+        # Opt-in: skip an unhandled SVC instruction (advance past it and
+        # zero r0) instead of aborting. Used to
+        # tolerate fuzz-harness hypercalls baked into instrumented binaries
+        # (e.g. P2IM's aflCall `svc #0x3f`).
+        self.skip_svc: bool = False
+
+        # Generic non-MMIO loop breaker (see _code_hook). Opt-in.
+        self.auto_recover_loops: bool = False
+        self._loop_lo: int = -1
+        self._loop_count: int = 0
+        self._loop_limit: int = 500_000
+        self._loop_recover_budget: int = 200
 
         # Pre-compute the register name -> unicorn reg id map for this arch.
         self._reg_map = _reg_map_for_arch(arch)
@@ -263,6 +305,11 @@ class UnicornBackend(ARMHalMixin, HalBackend):
 
     def init(self) -> None:
         """Initialise unicorn engine and map all registered memory regions."""
+        # Hoisted: `_os` is referenced unconditionally below (HAL_TRACK_READS,
+        # HAL_SP_WATCH, HAL_PC_SAMPLE, HAL_CALL_TRACE, HAL_MAP_UNMAPPED). The
+        # later `import os as _os` statements are kept as harmless re-imports
+        # but this one is what Python's local-binding rule actually needs.
+        import os as _os
         info = _ARCH_MAP.get(self.arch_name)
         if info is None:
             raise ValueError(
@@ -313,6 +360,31 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                     " — kernel boot may UC_ERR_INSN_INVALID", exc,
                 )
 
+        # Plain 32-bit A-profile ARM ("arm"): the generic default core does
+        # not implement the full CP15 system-control coprocessor / classic
+        # privileged instructions an RTOS reset stub uses (MMU+cache enable,
+        # TLB/cache maintenance via mcr p15, banked-mode setup), so deep boot
+        # code can hit UC_ERR_INSN_INVALID. Pin a concrete classic core so
+        # unicorn uses a decoder that implements them. ARM926EJ-S (ARMv5TEJ)
+        # is the typical core in this era of VxWorks PLC/SoC firmware (e.g.
+        # the target PLC); override with HAL_ARM_CPU_MODEL=UC_CPU_ARM_<name>.
+        if self.arch_name == "arm":
+            import os as _os
+            model_name = _os.environ.get("HAL_ARM_CPU_MODEL", "UC_CPU_ARM_926")
+            model = getattr(arm_const, model_name, None)
+            if model is not None:
+                try:
+                    self._uc.ctl_set_cpu_model(model)
+                    log.info("UnicornBackend: ARM CPU model = %s", model_name)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "UnicornBackend: ctl_set_cpu_model(%s) failed (%s)"
+                        " — boot may UC_ERR_INSN_INVALID", model_name, exc,
+                    )
+            else:
+                log.warning("UnicornBackend: unknown HAL_ARM_CPU_MODEL=%r",
+                            model_name)
+
         # PPC64 needs MSR.SF=1 so the CPU decodes 64-bit instructions.
         # Without it, any ld/std fires UC_ERR_EXCEPTION immediately.
         if arch_str == "ppc" and mode_str.startswith("ppc64"):
@@ -354,11 +426,209 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         # Log CPU exceptions (unhandled traps, illegal insns, FP faults)
         self._uc.hook_add(unicorn.UC_HOOK_INTR, self._intr_hook)
 
+        # Diagnostic: HAL_TRACK_READS=1 logs the first read from every SDRAM
+        # address that hasn't been written to in this run. Stripped firmware
+        # boots that depend on globals initialised by other code paths
+        # (e.g. C++ static constructors we can't run) crash when those
+        # globals are dereferenced; this log identifies them.
+        if _os.environ.get("HAL_TRACK_READS") == "1":
+            # Track reads from the .bss region only (above the firmware
+            # file's end-of-image). HAL_BSS_START / HAL_BSS_END configure
+            # the range; default matches the target PLC layout.
+            bss_start = int(_os.environ.get("HAL_BSS_START", "0x20420000"), 16)
+            bss_end = int(_os.environ.get("HAL_BSS_END", "0x24000000"), 16)
+            self._written: set = set()
+            self._read_uninit: dict = {}
+            log.error("HAL_TRACK_READS: tracking uninit reads in 0x%x..0x%x",
+                      bss_start, bss_end)
+            def _track_write(uc, access, addr, size, value, ud):
+                if bss_start <= addr < bss_end:
+                    for off in range(size):
+                        self._written.add(addr + off)
+            def _track_read(uc, access, addr, size, value, ud):
+                if not (bss_start <= addr < bss_end):
+                    return
+                if len(self._read_uninit) >= 80:
+                    return
+                # If any byte in range was previously written, skip.
+                if any(addr + off in self._written
+                       for off in range(size)):
+                    return
+                if addr in self._read_uninit:
+                    return
+                try:
+                    pc = uc.reg_read(self._reg_map.get("pc"))
+                    lr_reg = self._reg_map.get("lr")
+                    lr = uc.reg_read(lr_reg) if lr_reg else 0
+                    self._read_uninit[addr] = (pc, lr, size, value)
+                    log.error("UNINIT-READ: 0x%08x (size %d, value=0x%x) "
+                              "from PC=0x%08x lr=0x%08x",
+                              addr, size, value & 0xffffffff, pc, lr)
+                except Exception:
+                    pass
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _track_write)
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_READ, _track_read)
+
+        # Diagnostic: HAL_SP_WATCH=1 logs PC whenever SP makes a *large*
+        # jump (>= 64 MB), regardless of destination. Catches `mov sp, X` /
+        # `ldr sp, [X]` / context-switch ops that warp the stack pointer
+        # far away in firmware that runs without full memory-allocator init.
+        if _os.environ.get("HAL_SP_WATCH") == "1" and arch_str == "arm":
+            sp_state = {"prev": None, "n": 0}
+            def _sp_watch(uc, addr, size, ud):
+                try:
+                    sp = uc.reg_read(self._reg_map.get("sp"))
+                except Exception:
+                    return
+                prev = sp_state["prev"]
+                sp_state["prev"] = sp
+                if prev is None:
+                    return
+                # Flag any SP jump of >= 64 MB (large warp, not a normal
+                # push/pop). Cap log volume.
+                if abs(sp - prev) >= 0x04000000:
+                    sp_state["n"] += 1
+                    if sp_state["n"] <= 12:
+                        log.error("SP-WATCH: PC=0x%08x sp 0x%08x -> 0x%08x "
+                                  "(delta %d)", addr, prev, sp, sp - prev)
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _sp_watch)
+
+        # Diagnostic: HAL_PC_SAMPLE=1 records a PC execution histogram so a
+        # non-MMIO hang ("stuck where?") can be located. Dumped by
+        # dump_pc_sample(). Off by default (no overhead).
+        import os as _os
+        if _os.environ.get("HAL_PC_SAMPLE"):
+            import collections as _c
+            self._pc_hist = _c.Counter()
+            self._pc_n = 0
+            _every = int(_os.environ.get("HAL_PC_SAMPLE_EVERY", "3000000"))
+
+            def _pc_sample(uc, addr, size, ud):
+                self._pc_hist[addr & ~1] += 1
+                self._pc_n += 1
+                if _every and self._pc_n % _every == 0:
+                    self.dump_pc_sample()
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _pc_sample)
+
+        # Diagnostic: HAL_CALL_TRACE=<path> logs every bl/blx target seen
+        # (call graph). For ARM only -- decodes the instruction at each PC
+        # and records (caller_pc, callee_pc, lr_at_call) when a bl fires.
+        # Useful for finding cold-init reachability without rescue PC.
+        if _os.environ.get("HAL_CALL_TRACE"):
+            _trace_path = _os.environ["HAL_CALL_TRACE"]
+            self._call_trace_fp = open(_trace_path, "w", buffering=1)
+            self._call_trace_seen = set()
+            _max_unique = int(_os.environ.get("HAL_CALL_TRACE_MAX", "50000"))
+
+            def _call_trace(uc, addr, size, ud):
+                if len(self._call_trace_seen) >= _max_unique:
+                    return
+                try:
+                    insn_bytes = uc.mem_read(addr, 4)
+                except Exception:
+                    return
+                w = int.from_bytes(insn_bytes, "little")
+                # ARM bl: cond=any, opcode=0xb (bl), 24-bit signed offset
+                cond = (w >> 28) & 0xf
+                opc = (w >> 24) & 0xf
+                if cond == 0xf or opc != 0xb:
+                    return
+                off = w & 0xffffff
+                if off & 0x800000: off -= 0x1000000
+                tgt = addr + 8 + (off << 2)
+                key = (addr & ~1, tgt)
+                if key in self._call_trace_seen:
+                    return
+                self._call_trace_seen.add(key)
+                self._call_trace_fp.write(
+                    "bl 0x%08x -> 0x%08x\n" % (addr & ~1, tgt))
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _call_trace)
+
+            # ALSO trace indirect calls: pattern is `mov lr, pc; mov pc, Rn`
+            # (ARMv4-era vfunc dispatch, used by the firmware's C++ thunks).
+            # We capture this by hooking AFTER `mov pc, ip` executes -- when
+            # PC differs from expected fall-through, it was an indirect call.
+            self._last_pc_was_movpc = False
+            self._last_movpc_pc = 0
+
+            def _indirect_trace(uc, addr, size, ud):
+                if len(self._call_trace_seen) >= _max_unique:
+                    return
+                # Was the previous instruction `mov pc, ip` (or similar)?
+                if self._last_pc_was_movpc:
+                    self._last_pc_was_movpc = False
+                    src = self._last_movpc_pc
+                    key = (src | 1, addr & ~1)    # mark indirect with low bit on src
+                    if key not in self._call_trace_seen:
+                        self._call_trace_seen.add(key)
+                        self._call_trace_fp.write(
+                            "indirect 0x%08x -> 0x%08x\n" % (src, addr & ~1))
+                try:
+                    insn_bytes = uc.mem_read(addr, 4)
+                except Exception:
+                    return
+                w = int.from_bytes(insn_bytes, "little")
+                # mov pc, Rn: 0xe1a0f00n (n = 0..14, cond=e)
+                # bx Rn:      0xe12fff1n
+                if (w & 0xffffff00) == 0xe1a0f000 or (w & 0xfffffff0) == 0xe12fff10:
+                    self._last_pc_was_movpc = True
+                    self._last_movpc_pc = addr & ~1
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _indirect_trace)
+
+    def dump_pc_sample(self, top: int = 10) -> None:
+        hist = getattr(self, "_pc_hist", None)
+        if not hist:
+            return
+        log.error("PC sample (top %d most-executed):", top)
+        for pc, n in hist.most_common(top):
+            log.error("  0x%08x  x%d", pc, n)
+
     def _intr_hook(self, uc, intno, user_data):
         try:
             pc = self.read_register("pc")
         except Exception:
             pc = -1
+        # On cortex-m3, an ISR returning via `bx lr` jumps to an
+        # EXC_RETURN magic value (top nibble 0xF). Unicorn raises an
+        # exception here rather than firing the fetch-unmapped hook,
+        # so handle it the same way and unwind the synthetic frame.
+        if (self.arch_name == "cortex-m3"
+                and pc != -1
+                and self._maybe_handle_exc_return(pc)):
+            return  # _maybe_handle_exc_return already called emu_stop
+        # Opt-in recovery: a Thumb SVC (high byte 0xDF) from instrumented
+        # firmware (e.g. P2IM aflCall). When the SVC traps, unicorn reports
+        # pc at the *next* instruction, so the SVC opcode is at pc or pc-2.
+        # We zero the return register and continue without stopping (pc has
+        # already advanced past the SVC), rather than aborting the run.
+        if self.skip_svc and pc != -1:
+            try:
+                for probe in (pc - 2, pc):
+                    op = bytes(uc.mem_read(probe, 2))
+                    if len(op) == 2 and op[1] == 0xDF:  # Thumb SVC
+                        # ensure pc is past the SVC, then resume
+                        if probe == pc:
+                            self.write_register("pc", pc + 2)
+                        self.write_register("r0", 0)
+                        return
+            except Exception:  # noqa: BLE001
+                pass
+        # Opt-in bad-call recovery (HAL_RECOVER_BAD_CALLS=1): on A-profile
+        # ARM, an indirect call through a `_func_` hook bound to a garbage
+        # (data) address faults on the first fetch — delivered here as an
+        # exception, with lr still valid (the wrapper set it via `mov lr,pc`
+        # and the bad target ran nothing). Return to lr instead of aborting,
+        # capped per fault PC so a genuinely wedged address doesn't loop.
+        if (self._recover_bad_calls and self.arch_name == "arm"
+                and pc not in (-1, 0)):
+            lr_reg = self._reg_map.get("lr")
+            lr = (uc.reg_read(lr_reg) & ~1) if lr_reg else 0
+            self._bad_call_recover[pc] = self._bad_call_recover.get(pc, 0) + 1
+            if lr and lr != pc and self._bad_call_recover[pc] <= 4:
+                log.info("UnicornBackend: bad call (intr %d) at 0x%08x -> "
+                         "return lr=0x%08x", intno, pc, lr)
+                self.write_register("pc", lr)
+                return
         log.error("UnicornBackend: CPU exception/interrupt %d at pc=0x%x",
                   intno, pc)
         uc.emu_stop()
@@ -367,7 +637,15 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         """Intercept invalid memory accesses. On cortex-m, a fetch from
         an EXC_RETURN magic address is the ISR returning — we unwind
         the pushed exception frame and resume at the saved PC. Other
-        invalid accesses are logged and the emulator aborts."""
+        invalid accesses are logged and the emulator aborts.
+
+        With HAL_MAP_UNMAPPED=1, read/write to a gap is treated as zero-
+        memory: we map a 4 KB page on-demand and return True so unicorn
+        re-runs the load/store against it. This is the same catch-all
+        policy used for stubbed MMIO regions, extended to
+        arbitrary gaps so a stray ld/st through a garbage pointer doesn't
+        crash boot. Fetch_unmapped is still fatal — executing zero pages
+        would walk forever; the recover_bad_calls path handles those."""
         if (access == unicorn.UC_MEM_FETCH_UNMAPPED
                 and self._maybe_handle_exc_return(addr)):
             return True  # resolved — unicorn will not abort
@@ -380,6 +658,28 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             unicorn.UC_MEM_WRITE_UNMAPPED: "write",
             unicorn.UC_MEM_FETCH_UNMAPPED: "fetch",
         }.get(access, f"access({access})")
+        # On-demand zero-page mapping for read/write to gaps (opt-in).
+        # When HAL_MAP_UNMAPPED is set and the lazy map succeeds, this is
+        # a designed recovery -- log at WARNING, not ERROR. Genuine
+        # unrecoverable cases (write to read-only, fetch from unmapped,
+        # HAL_MAP_UNMAPPED unset) still log at ERROR before aborting.
+        import os as _os
+        if (_os.environ.get("HAL_MAP_UNMAPPED") == "1"
+                and access in (unicorn.UC_MEM_READ_UNMAPPED,
+                               unicorn.UC_MEM_WRITE_UNMAPPED)):
+            try:
+                page = 0x1000
+                base = addr & ~(page - 1)
+                self._uc.mem_map(base, page, 7)  # rwx
+                log.warning("UnicornBackend: lazily mapped zero page at 0x%x "
+                            "(rwx) -- unmapped %s at 0x%x size %d from "
+                            "pc=0x%x", base, kind, addr, size, pc)
+                return True
+            except Exception as _e:
+                log.error("UnicornBackend: unmapped %s at 0x%x (size %d, "
+                          "value 0x%x) from pc=0x%x; lazy map failed: %s",
+                          kind, addr, size, value, pc, _e)
+                return False
         log.error("UnicornBackend: unmapped %s at 0x%x (size %d, value 0x%x) "
                   "from pc=0x%x", kind, addr, size, value, pc)
         return False  # abort
@@ -466,9 +766,112 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         # instructions are at least 2-byte aligned so masking bit 0 is a no-op.
         pc = addr & ~1
         if pc in self._breakpoints:
+            # One-shot skip: an observe-only handler just ran at this bp and
+            # asked to resume the real function. Let this single instruction
+            # execute without stopping; the bp re-arms for the next hit.
+            if pc == self._skip_bp_once:
+                self._skip_bp_once = None
+                return
             self._stopped = True
             self._bp_hit_addr = pc
             uc.emu_stop()
+            return
+
+        # RAM-flag spin breaker (opt-in: HAL_BREAK_RAM_SPINS=1). A tight loop
+        # confined to a small PC window for many iterations that polls a RAM
+        # location (a flag set by an ISR/task/another SMP core we don't run).
+        # Poke the loaded memory non-zero so the firmware's own compare exits.
+        if self._break_ram_spins:
+            self._spin_pcs.add(pc)
+            self._spin_total += 1
+            if self._spin_total >= self._spin_limit:
+                if len(self._spin_pcs) <= self._spin_distinct_max:
+                    # Few distinct PCs over a long window => a spin (possibly
+                    # across a call). Poke the RAM the loop's loads read.
+                    self._break_ram_spin(uc, set(self._spin_pcs))
+                self._spin_pcs.clear()
+                self._spin_total = 0
+
+        # Generic non-MMIO loop breaker (opt-in via auto_recover_loops).
+        # The MMIO breaker handles status-poll
+        # spins; this handles the *non*-MMIO ones — `while(uwTick<t)`,
+        # `while(millis()<t)`, HAL_GetTick timeouts — that confine the PC to
+        # a tiny window. After `_loop_limit` instructions stuck in a <=64-byte
+        # window we force a return (pc <- lr) to escape the wait, capped by
+        # `_loop_recover_budget` so a genuinely long computation isn't
+        # repeatedly hijacked.
+        if not getattr(self, "auto_recover_loops", False):
+            return
+        lo = self._loop_lo
+        if lo <= pc <= lo + 64:
+            self._loop_count += 1
+            if self._loop_count > self._loop_limit and self._loop_recover_budget > 0:
+                lr_reg = self._reg_map.get("lr")
+                if lr_reg is not None:
+                    lr = uc.reg_read(lr_reg)
+                    self._loop_recover_budget -= 1
+                    log.info("UnicornBackend: non-MMIO loop at 0x%08x stuck "
+                             "%d insns -> return to lr=0x%08x",
+                             pc, self._loop_count, lr & ~1)
+                    self._loop_lo = -1
+                    self._loop_count = 0
+                    uc.reg_write(self._reg_map["pc"], lr & ~1 | (lr & 1))
+        else:
+            self._loop_lo = pc
+            self._loop_count = 1
+
+    def _break_ram_spin(self, uc: Any, pcs: set) -> None:
+        """A tight loop has spun far too long — a software delay
+        (`while(i<N){i++}`) or a wait on a flag set by a context we don't run
+        (ISR / task / another SMP core). Escape it by jumping to the loop's
+        natural exit: find the loop-back branch (the highest-address branch
+        whose target lies back inside the loop) and set PC to its fall-through
+        (branch+4). That's a static, valid continuation — exactly where the
+        loop goes when its condition finally fails — so unlike forcing pc<-lr
+        it can't land on a stale/garbage address. Poking the loaded memory was
+        unreliable: a delay loop's own `add;str` immediately overwrites it.
+
+        Cache the exit so a re-entered same loop escalates rather than looping
+        the breaker forever."""
+        try:
+            import capstone
+            import capstone.arm as cs_arm
+        except ImportError:
+            return
+        cs = getattr(self, "_cs_arm", None)
+        if cs is None:
+            cs = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
+            cs.detail = True
+            self._cs_arm = cs
+        lo, hi = min(pcs), max(pcs)
+        if hi - lo > 0x400:        # not a tight loop; don't guess
+            return
+        tail_branch = None
+        for pc in sorted(pcs, reverse=True):
+            try:
+                ins = next(cs.disasm(bytes(uc.mem_read(pc, 4)), pc), None)
+            except Exception:  # noqa: BLE001
+                continue
+            if ins is None or ins.id not in (cs_arm.ARM_INS_B,):
+                continue
+            tgt = next((o.imm for o in ins.operands
+                        if o.type == cs_arm.ARM_OP_IMM), None)
+            if tgt is not None and lo <= tgt <= pc:   # backward branch = loopback
+                tail_branch = pc
+                break
+        if tail_branch is None:
+            return
+        exit_pc = tail_branch + 4
+        skipped = getattr(self, "_skipped_spins", None)
+        if skipped is None:
+            skipped = self._skipped_spins = {}
+        skipped[tail_branch] = skipped.get(tail_branch, 0) + 1
+        try:
+            uc.reg_write(self._reg_map["pc"], exit_pc)
+            log.info("UnicornBackend: spin loop [0x%08x..0x%08x] -> skip to "
+                     "exit 0x%08x (x%d)", lo, hi, exit_pc, skipped[tail_branch])
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Memory
@@ -586,18 +989,213 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             raise RuntimeError("Call UnicornBackend.init() first")
         self._stopped = False
         self._bp_hit_addr = None
-        pc = self.read_register("pc")
-        # Unicorn Thumb mode needs the LSB set on the start address.
-        start = (pc | 1) if self._is_thumb else pc
-        # Cap emu_start upper bound by arch word size.
         until = (1 << (self._word_size * 8)) - 1
-        try:
-            self._uc.emu_start(start, until, timeout=0, count=0)
-        except unicorn.UcError:
-            if self._stopped:
-                pass  # stopped by breakpoint — normal
-            else:
-                raise
+        # Loop over emu_start so an emu_stop triggered by inject_irq
+        # from another thread doesn't bubble out to the dispatch loop.
+        # We only return when a real breakpoint hook fires
+        # (self._stopped sticks True) or stop() is called externally.
+        # A-profile arm (arm_vic) delivers async IRQs from a timer thread
+        # via _pending_irqs; that path must NOT call uc.emu_stop()
+        # cross-thread (deadlocks unicorn). Instead we run arm in bounded
+        # instruction chunks so this (dispatch) thread returns from
+        # emu_start on its own and drains the queue between chunks WITHOUT
+        # a cross-thread emu_stop. Other arches keep the unbounded run
+        # (count=0). Override via HAL_IRQ_CHUNK env var (set to e.g. 50000
+        # when debugging boot where the cold-boot completes in fewer than
+        # 2M insns and you need an earlier drain).
+        import os as __os
+        _chunk_env = __os.environ.get("HAL_IRQ_CHUNK")
+        if _chunk_env:
+            irq_chunk = int(_chunk_env, 0)
+        elif self.arch_name == "arm":
+            irq_chunk = 2_000_000
+        else:
+            irq_chunk = 0
+        while True:
+            # Drain any IRQs queued from another thread before
+            # resuming — the synthetic exception frame setup mutates
+            # PC/SP, only safe when emu_start is not running.
+            while self._pending_irqs:
+                self._apply_pending_irq(self._pending_irqs.pop(0))
+            pc = self.read_register("pc")
+            # Unicorn Thumb mode needs the LSB set on the start
+            # address.
+            start = (pc | 1) if self._is_thumb else pc
+            try:
+                self._uc.emu_start(start, until, timeout=0, count=irq_chunk)
+            except unicorn.UcError as _uc_err:
+                if self._stopped:
+                    return  # stopped by breakpoint hook — normal
+                # Bad-call recovery: an indirect call through an unsatisfiable
+                # _func_ hook landed in non-code -> return to lr (the wrapper
+                # set it with `mov lr, pc`). Capped per fault PC.
+                if (self._recover_bad_calls
+                        and _uc_err.errno in (
+                            unicorn.UC_ERR_INSN_INVALID,
+                            unicorn.UC_ERR_FETCH_UNMAPPED,
+                            unicorn.UC_ERR_FETCH_PROT)):
+                    fault_pc = self.read_register("pc")
+                    lr_reg = self._reg_map.get("lr")
+                    lr = (self._uc.reg_read(lr_reg) & ~1) if lr_reg else 0
+                    self._bad_call_recover[fault_pc] = (
+                        self._bad_call_recover.get(fault_pc, 0) + 1)
+                    n = self._bad_call_recover[fault_pc]
+                    # Spin detection: if the same (fault_pc, lr) keeps
+                    # appearing, the boot is wedged in an uninitialised-
+                    # dispatch loop. After 20 identical recoveries, escape
+                    # by walking the stack one frame up.
+                    last_pair = getattr(self, "_bad_call_last_pair", None)
+                    if last_pair == (fault_pc, lr):
+                        self._bad_call_same_count = (
+                            getattr(self, "_bad_call_same_count", 0) + 1)
+                    else:
+                        self._bad_call_same_count = 1
+                        self._bad_call_last_pair = (fault_pc, lr)
+                    spinning = self._bad_call_same_count >= 20
+                    if (lr and lr != fault_pc and n <= 100 and not spinning):
+                        # Successful bad-call recovery: log at WARNING.
+                        # Unrecoverable cases (spinning, cannot recover)
+                        # below still log at ERROR.
+                        log.warning("UnicornBackend: bad call at 0x%08x -> "
+                                    "return lr=0x%08x  (recovery #%d)",
+                                    fault_pc, lr, n)
+                        self.write_register("pc", lr)
+                        continue
+                    if spinning:
+                        log.error("UnicornBackend: spin detected at "
+                                  "fault=0x%08x lr=0x%08x (n=%d) -- "
+                                  "unwinding one frame", fault_pc, lr, n)
+                        # Reset spin counter so the next iter (after unwind)
+                        # doesn't re-trigger immediately.
+                        self._bad_call_same_count = 0
+                        self._bad_call_last_pair = None
+                        # Fall through to SP-peek (below) to find a deeper
+                        # return address that's NOT lr.
+                    # SP-scan recovery: either lr=0, or we're spinning at the
+                    # same lr (cap exceeded). Walk the stack for a saved
+                    # return address that ISN'T the current lr (so we unwind
+                    # past the spinning frame). We do NOT advance SP --
+                    # earlier versions did, and the cumulative SP creep ended
+                    # up pointing into unmapped/MMIO memory after a few dozen
+                    # unwinds. Leave SP alone; the function we return to
+                    # will manage its own frame via its prologue/epilogue.
+                    try:
+                        sp = self.read_register("sp")
+                        # sanity: if SP is already garbage, refuse SP-peek
+                        # rather than reading 0s from a lazy-mapped MMIO page.
+                        # Accepted ranges: lowram, sdram, sdram_bank1, and the
+                        # high_stack_ram window the target PLC task allocator
+                        # uses (the target's auto-memory YAML maps
+                        # 0xffff0000-0xffffffff as real RAM specifically so
+                        # high-SP stacks work).
+                        if not (0x00000000 <= sp < 0x10000000
+                                or 0x20000000 <= sp < 0x24000000
+                                or 0xffff0000 <= sp < 0x100000000):
+                            log.error("UnicornBackend: SP=0x%08x is outside "
+                                      "valid stack ranges; skipping SP-peek",
+                                      sp)
+                            raise RuntimeError("sp out of range")
+                        for ofs in range(0, 64 * 4, 4):
+                            word = int.from_bytes(
+                                self._uc.mem_read(sp + ofs, 4), "little")
+                            # accept word if it points into SDRAM code region
+                            # and isn't the faulting PC or current lr
+                            if (0x20000000 <= word < 0x24000000
+                                    and word != fault_pc
+                                    and word != fault_pc + 1
+                                    and word != lr
+                                    and (word & 1) == 0):  # ARM (not Thumb)
+                                log.error("UnicornBackend: stack-unwind at "
+                                          "0x%08x lr=0x%08x sp=0x%08x; peek "
+                                          "[sp+0x%x] = 0x%08x -> "
+                                          "return there (recovery #%d)",
+                                          fault_pc, lr, sp, ofs, word,
+                                          self._bad_call_recover[fault_pc])
+                                self.write_register("pc", word)
+                                break
+                        else:
+                            raise RuntimeError("no return-addr in 64 words")
+                        continue
+                    except Exception as _e:
+                        pass
+                    log.error("UnicornBackend: cannot recover from 0x%08x "
+                              "lr=0x%08x (n=%d)",
+                              fault_pc, lr,
+                              self._bad_call_recover[fault_pc])
+                    # Last-ditch boot rescue: if HAL_BOOT_RESCUE_PC is
+                    # set, jump there instead of dying. Intended use:
+                    # a planted `b .` idle loop, so the dispatch thread
+                    # stays alive and the TimerModel can drain pending
+                    # IRQs into the configured ArmVicController.isr_addr.
+                    import os as __os
+                    _rescue = __os.environ.get("HAL_BOOT_RESCUE_PC")
+                    if _rescue:
+                        try:
+                            rescue_pc = int(_rescue, 0)
+                            log.error("UnicornBackend: BOOT RESCUE -> "
+                                      "jumping PC to 0x%08x (idle loop)",
+                                      rescue_pc)
+                            self.write_register("pc", rescue_pc)
+                            # Also unmask IRQs (clear CPSR.I bit) so
+                            # queued TimerModel ticks can actually be
+                            # delivered.  The reset stub left CPSR.I=1
+                            # and we never reached the kernel code that
+                            # normally clears it.
+                            if self.arch_name == "arm":
+                                try:
+                                    cpsr = self.read_register("cpsr")
+                                    # Force CPSR -> SVC mode (0x13), I=0,
+                                    # F=0, T=0. Keep the upper condition
+                                    # flags (NZCV etc.).
+                                    new_cpsr = (cpsr & 0xfffffe00) | 0x13
+                                    self.write_register("cpsr", new_cpsr)
+                                    log.error("UnicornBackend: reset CPSR "
+                                              "(was 0x%x, now 0x%x: SVC+I0+F0)",
+                                              cpsr, new_cpsr)
+                                except Exception as _e:
+                                    log.error("UnicornBackend: CPSR "
+                                              "reset failed: %s", _e)
+                            continue
+                        except Exception as _e:
+                            log.error("UnicornBackend: rescue failed: %s", _e)
+                # emu_stop without a breakpoint hook firing: either
+                # inject_irq queued an IRQ on another thread, or
+                # something asked us to stop. If the former, loop and
+                # apply the IRQ. Otherwise honour the stop.
+                if not self._pending_irqs:
+                    # Print PC + LR so the user can find where boot died.
+                    try:
+                        fpc = self.read_register("pc")
+                        lr_reg = self._reg_map.get("lr")
+                        flr = (self._uc.reg_read(lr_reg) & ~1) if lr_reg else 0
+                        log.error("UnicornBackend: UcError %s at PC=0x%08x lr=0x%08x",
+                                  _uc_err, fpc, flr)
+                    except Exception:
+                        pass
+                    raise
+                # fall through to drain queue + re-enter emu_start
+                continue
+            # emu_start returned without UcError: same logic as
+            # above — drain pending or honour external stop.
+            if self._pending_irqs:
+                continue
+            # arm runs in bounded chunks: a clean return means the chunk's
+            # instruction count was reached, NOT that emulation is done.
+            # Keep running unless a breakpoint/stop() set self._stopped.
+            if irq_chunk and not self._stopped:
+                continue
+            return
+
+    def continue_past_breakpoint(self) -> None:
+        """Resume after an observe-only (non-intercept) bp_handler.
+
+        The breakpoint sits on the intercepted function's entry; to run the
+        real function we must let that one instruction execute without the
+        bp immediately re-stopping us. Arm a one-shot skip for the last-hit
+        address, then continue until the next breakpoint. The bp re-arms
+        automatically for subsequent calls."""
+        self._skip_bp_once = self._bp_hit_addr
+        self.cont()
 
     def stop(self) -> None:
         self._stopped = True
@@ -641,23 +1239,128 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         return None
 
     def inject_irq(self, irq_num: int) -> None:
-        """Deliver an external IRQ to a cortex-m CPU. Pushes a minimal
-        exception frame (r0–r3, r12, lr, pc, xpsr) onto the main stack,
-        sets LR to the thread-mode / MSP EXC_RETURN magic, and sets PC
-        to the ISR address from the vector table.
+        """Deliver an external IRQ.
 
-        Other archs don't have a comparable in-process interrupt model —
-        use QEMUBackend or Avatar2Backend for those.
+        Cortex-M3 / ARMv7-A fast-path: queue the IRQ for the dispatch
+        loop, then call ``emu_stop`` to break out of any in-flight
+        ``emu_start``. cont() drains the queue (synthesises the
+        exception entry on the main stack, sets banked LR_irq, jumps
+        PC to the architectural IRQ vector) immediately before
+        re-entering ``emu_start`` so all CPU-state mutation happens
+        single-threaded. Skips controller-MMIO writes — unicorn
+        doesn't model the NVIC or GIC.
+
+        For other arches, fall through to HalBackend.inject_irq, which
+        routes through the configured IrqController (CP0 Cause for
+        MIPS, OpenPIC IPIDR for PPC). MMIO writes go through unicorn's
+        normal write_memory and the next cont() will take the
+        exception when the firmware unmasks.
         """
-        if self.arch_name != "cortex-m3":
-            log.warning(
-                "UnicornBackend.inject_irq(%d): only cortex-m3 has an "
-                "in-process IRQ model today. Arch=%s is ignored.",
-                irq_num, self.arch_name,
-            )
+        if self.arch_name not in ("cortex-m3", "arm", "arm64", "mips",
+                                   "powerpc", "powerpc:MPC8XX", "ppc64"):
+            super().inject_irq(irq_num)
             return
         if self._uc is None:
             raise RuntimeError("Call UnicornBackend.init() first")
+        # A-profile arm with a *synthesising* controller (ArmVicController):
+        # the controller's trigger() owns the queue — it appends to
+        # _pending_irqs from the timer thread, and cont() drains it via
+        # _apply_pending_irq -> deliver() in bounded chunks. There is no
+        # controller MMIO to write (the SoC VIC isn't modelled), so just
+        # trigger (queue) and return: do NOT manually append or
+        # cross-thread emu_stop.
+        if self.arch_name == "arm":
+            ctrl = getattr(self, "_irq_controller", None)
+            if ctrl is not None and hasattr(ctrl, "deliver"):
+                ctrl.trigger(self, irq_num)
+                return
+        # On arm/arm64, the IrqController MMIO write (GICD_ISPENDR
+        # for arm/arm64, NVIC_ISPR for cortex-m3) is still useful —
+        # firmware that polls those registers should see the bit
+        # set. Cortex-m3's _apply_pending_irq always synthesises the
+        # exception, so skip the controller MMIO there. For arm /
+        # arm64 we emit both: real GIC writes happen through the
+        # controller, and the synthetic exception entry fires from
+        # cont().
+        if self.arch_name in ("arm", "arm64", "mips",
+                               "powerpc", "powerpc:MPC8XX", "ppc64"):
+            ctrl = getattr(self, "_irq_controller", None)
+            if ctrl is None:
+                from halucinator.backends.irq import IrqConfigError
+                raise IrqConfigError(
+                    f"UnicornBackend(arch={self.arch_name!r}) has no "
+                    "interrupt controller configured. Set "
+                    "machine.interrupt_controller in the YAML or call "
+                    "set_irq_controller() before inject_irq()."
+                )
+            try:
+                ctrl.trigger(self, irq_num)
+            except Exception as exc:  # noqa: BLE001
+                # MIPS: the controller does an RMW on CP0 'cause'
+                # which unicorn doesn't expose. Swallow the
+                # register-not-found error (the synthetic entry
+                # below still delivers) but let bounds and other
+                # config errors surface.
+                if self.arch_name == "mips" and "cause" in str(exc):
+                    pass
+                else:
+                    raise
+        # Cross-thread safe: list.append() + emu_stop are atomic from
+        # Python's perspective. The dispatch thread will see the
+        # pending entry on its next cont() call.
+        self._pending_irqs.append(int(irq_num))
+        try:
+            self._uc.emu_stop()
+        except Exception:  # noqa: BLE001 — uc raises if not running
+            pass
+
+    def _apply_pending_irq(self, irq_num: int) -> None:
+        """Set up the synthetic exception entry for a pended IRQ.
+        Must run on the dispatch thread (between emu_start chunks)
+        — Unicorn isn't safe against PC/SP writes mid-run."""
+        if self._uc is None:
+            return
+        if self.arch_name == "arm":
+            # A-profile ARM IRQ delivery. Preferred path: the refactored
+            # ExceptionDeliverer + DeliveryPlan (set via main._wire_irq).
+            # It subsumes both the ArmVicController.deliver synth path and
+            # the built-in _apply_pending_irq_armv7a GIC path (proven
+            # equivalent in test_arm_deliverer_equivalence.py). Only the
+            # FRAME/TRAMPOLINE models are handled by ArmExceptionDeliverer;
+            # SHADOW (ghidra) and the unconfigured case fall through to the
+            # legacy logic below.
+            from halucinator.backends.irq.delivery import DeliveryModel
+            deliverer = getattr(self, "_exception_deliverer", None)
+            plan = getattr(self, "_delivery_plan", None)
+            if (deliverer is not None and plan is not None
+                    and plan.model in (DeliveryModel.FRAME,
+                                       DeliveryModel.TRAMPOLINE)):
+                deliverer.deliver(self, irq_num, plan)
+                return
+            # Legacy: if the configured controller synthesises the
+            # exception itself (ArmVicController), route through it;
+            # otherwise the built-in ARMv7-A/GIC entry (VBAR+0x18 +
+            # GICC_IAR shadow).
+            ctrl = getattr(self, "_irq_controller", None)
+            if ctrl is not None and hasattr(ctrl, "deliver"):
+                # deliver() returns False when CPSR.I masks IRQs — we
+                # simply drop that tick (the next periodic tick lands
+                # once the firmware re-enables IRQs). We do NOT
+                # re-queue, which would busy-spin this chunk re-applying a
+                # tick that can never enter.
+                ctrl.deliver(self, irq_num)
+                return
+            self._apply_pending_irq_armv7a(irq_num)
+            return
+        if self.arch_name == "arm64":
+            self._apply_pending_irq_arm64(irq_num)
+            return
+        if self.arch_name == "mips":
+            self._apply_pending_irq_mips(irq_num)
+            return
+        if self.arch_name in ("powerpc", "powerpc:MPC8XX", "ppc64"):
+            self._apply_pending_irq_ppc(irq_num)
+            return
 
         # Vector table offset: caller plumbs it in via set_vtor(); fall
         # back to 0 for backward compatibility.
@@ -692,6 +1395,107 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     def set_vtor(self, vtor: int) -> None:
         """Remember the vector-table base so inject_irq can find ISRs."""
         self._vtor = vtor
+
+    # ARMv7-A CPSR mode bits.
+    _ARM_MODE_USER = 0x10
+    _ARM_MODE_FIQ  = 0x11
+    _ARM_MODE_IRQ  = 0x12
+    _ARM_MODE_SVC  = 0x13
+    _ARM_MODE_ABT  = 0x17
+    _ARM_MODE_UND  = 0x1B
+    _ARM_MODE_SYS  = 0x1F
+    _ARM_MODE_MASK = 0x1F
+    _ARM_CPSR_I    = 0x80   # IRQ mask
+    _ARM_CPSR_T    = 0x20   # Thumb
+
+    def _apply_pending_irq_armv7a(self, irq_num: int) -> None:
+        """Synthesise an ARMv7-A IRQ exception entry (legacy GIC path).
+
+        Thin wrapper over the shared ``ArmExceptionDeliverer``: builds a
+        FRAME ``DeliveryPlan`` from the vector base (``_vtor``) and the
+        configured GIC's ``gicc_base`` (for the GICC_IAR shadow), then
+        delegates. The only behaviour this wrapper adds over the deliverer
+        is the legacy *masked-IRQ re-queue*: when delivery is suppressed
+        (CPSR.I=1) it re-queues the tick and stops the run so the firmware
+        can unmask, rather than dropping it (the ArmVicController path
+        drops). That policy difference is intentionally preserved here.
+        """
+        from halucinator.backends.irq.delivery import (
+            ArmExceptionDeliverer, DeliveryModel, DeliveryPlan)
+        ctrl = getattr(self, "_irq_controller", None)
+        gicc_base = getattr(ctrl, "gicc_base", None) if ctrl else None
+        vbar = getattr(self, "_vtor", 0)
+        plan = DeliveryPlan(model=DeliveryModel.FRAME, vector_base=vbar,
+                            gicc_base=gicc_base)
+        delivered = ArmExceptionDeliverer().deliver(self, irq_num, plan)
+        if not delivered:
+            # IRQs masked — re-queue and let the firmware unmask itself;
+            # otherwise we'd nest exceptions.
+            self._pending_irqs.insert(0, irq_num)
+            self._uc.emu_stop()
+            return
+        log.info("inject_irq(%d): ARMv7-A entry @ 0x%x", irq_num, vbar + 0x18)
+
+    def _resolve_delivery_plan(self, build_legacy):
+        """Return the attached DeliveryPlan (new `irq_delivery` config) or,
+        when none was set, a plan built from the legacy controller fields
+        via ``build_legacy(ctrl)``. Centralises the new-vs-legacy choice so
+        each per-arch wrapper stays a one-liner."""
+        plan = getattr(self, "_delivery_plan", None)
+        if plan is not None:
+            return plan
+        ctrl = getattr(self, "_irq_controller", None)
+        return build_legacy(ctrl)
+
+    def _apply_pending_irq_arm64(self, irq_num: int) -> None:
+        """AArch64 IRQ entry — thin wrapper over Arm64ExceptionDeliverer."""
+        from halucinator.backends.irq.delivery import (
+            Arm64ExceptionDeliverer, DeliveryModel, DeliveryPlan)
+
+        def _legacy(ctrl):
+            simple = getattr(ctrl, "irq_simple_entry", None) if ctrl else None
+            return DeliveryPlan(
+                model=(DeliveryModel.TRAMPOLINE if simple is not None
+                       else DeliveryModel.FRAME),
+                vector_base=getattr(self, "_vtor", 0),
+                trampoline=simple,
+                gicc_base=getattr(ctrl, "gicc_base", None) if ctrl else None,
+            )
+        Arm64ExceptionDeliverer().deliver(self, irq_num,
+                                          self._resolve_delivery_plan(_legacy))
+
+    def _apply_pending_irq_mips(self, irq_num: int) -> None:
+        """MIPS IRQ delivery — thin wrapper over ShadowExceptionDeliverer.
+
+        Unicorn's MIPS model doesn't take CP0 exceptions reliably, so the
+        shadow deliverer writes the firmware's post-ack globals directly."""
+        from halucinator.backends.irq.delivery import (
+            DeliveryModel, DeliveryPlan, ShadowExceptionDeliverer)
+
+        def _legacy(ctrl):
+            return DeliveryPlan(
+                model=DeliveryModel.SHADOW,
+                irq_fired_addr=getattr(ctrl, "irq_fired_addr", None) if ctrl else None,
+                irq_number_addr=getattr(ctrl, "irq_number_addr", None) if ctrl else None,
+            )
+        ShadowExceptionDeliverer().deliver(self, irq_num,
+                                           self._resolve_delivery_plan(_legacy))
+
+    def _apply_pending_irq_ppc(self, irq_num: int) -> None:
+        """PowerPC IRQ delivery — thin wrapper over ShadowExceptionDeliverer
+        (same SHADOW pattern as MIPS; Unicorn doesn't model the OpenPIC /
+        SRR0/SRR1 entry reliably for our use-case)."""
+        from halucinator.backends.irq.delivery import (
+            DeliveryModel, DeliveryPlan, ShadowExceptionDeliverer)
+
+        def _legacy(ctrl):
+            return DeliveryPlan(
+                model=DeliveryModel.SHADOW,
+                irq_fired_addr=getattr(ctrl, "irq_fired_addr", None) if ctrl else None,
+                irq_number_addr=getattr(ctrl, "irq_number_addr", None) if ctrl else None,
+            )
+        ShadowExceptionDeliverer().deliver(self, irq_num,
+                                           self._resolve_delivery_plan(_legacy))
 
     def _maybe_handle_exc_return(self, addr: int) -> bool:
         """Called from the invalid-fetch hook. If the fetch address looks

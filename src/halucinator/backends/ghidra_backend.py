@@ -86,6 +86,12 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
         self._language: Optional[Any] = None
         self._stopped = True
         self._bp_hit_addr: Optional[int] = None
+        # IRQ queue populated from another thread (peripheral_server's
+        # zmq handler). cont() drains the queue between emulator.run
+        # chunks so the synthetic exception frame setup is
+        # single-threaded — Ghidra's setContextRegister can only run
+        # while the emulator is in STOPPED state.
+        self._pending_irqs: List[int] = []
 
         # Arch-specific ABI binding.
         abi_cls = ABI_MIXINS.get(arch, ARM32HalMixin)
@@ -190,6 +196,8 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
 
         if self.arch in ("cortex-m3", "arm"):
             self._patch_arm_setISAMode()
+            self._patch_arm_unimplemented_callothers()
+        elif self.arch == "arm64":
             self._patch_arm_unimplemented_callothers()
 
     def shutdown(self) -> None:
@@ -330,33 +338,26 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
             raise RuntimeError("Call GhidraBackend.init() first")
         self._stopped = False
         from ghidra.util.task import TaskMonitor  # type: ignore
-        if self._watchpoints:
-            # Step-mode: run one instruction at a time and check the
-            # tracked write set against every active write watchpoint.
-            # Slower, but gives us halt-on-access semantics without a
-            # dedicated pcode op hook — EmulatorHelper has no such API.
-            self._emulator.enableMemoryWriteTracking(True)
-            while not self._stopped:
-                self._emulator.step(TaskMonitor.DUMMY)
-                state = str(self._emulator.getEmulateExecutionState())
-                if state != "STOPPED" and state != "BREAKPOINT":
-                    break
-                exec_addr = self._emulator.getExecutionAddress()
-                pc = (int(exec_addr.getUnsignedOffset())
-                      if exec_addr is not None else 0)
-                if pc in self._breakpoints:
-                    self._bp_hit_addr = pc
-                    return
-                if self._check_watchpoints():
-                    return
-            # fall through to error logging
-            hit = False
-        else:
-            hit = self._emulator.run(TaskMonitor.DUMMY)
+        # cortex-m3 firmwares can pend an IRQ from another thread,
+        # which we must apply between instructions (Ghidra can't write
+        # registers while the emulator is running). Watchpoints also
+        # require single-stepping. In both cases we run in step-mode
+        # and poll the queue every N instructions.
+        irq_poll = (self.arch in ("cortex-m3", "arm", "arm64", "mips",
+                                   "powerpc", "powerpc:MPC8XX", "ppc64"))
+        if self._watchpoints or irq_poll:
+            self._emulator.enableMemoryWriteTracking(bool(self._watchpoints))
+            self._step_with_polling()
+            return
+        # Fast path: no IRQ source attached, no watchpoints. run() to
+        # the next breakpoint or fault.
+        hit = self._emulator.run(TaskMonitor.DUMMY)
         exec_addr = self._emulator.getExecutionAddress()
         pc = int(exec_addr.getUnsignedOffset()) if exec_addr is not None else 0
         self._bp_hit_addr = pc
         if hit:
+            return
+        if self._stopped:
             return
         state = str(self._emulator.getEmulateExecutionState())
         err = str(self._emulator.getLastError() or "")
@@ -364,6 +365,60 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
             "GhidraBackend: cont() stopped at pc=0x%x state=%s%s",
             pc, state, f" err={err!r}" if err else "",
         )
+
+    # Number of instructions to step between IRQ-queue polls. Larger
+    # batches are faster; smaller batches make IRQ delivery latency
+    # tighter. 256 is roughly the firmware-polling-loop length.
+    _STEP_BATCH = 256
+
+    def _step_with_polling(self) -> None:
+        """Step the emulator instruction-by-instruction, draining the
+        IRQ queue and checking breakpoints / watchpoints between
+        chunks. Returns on a real breakpoint or watchpoint hit, on
+        external stop(), or when the firmware enters an
+        unrecoverable state."""
+        from ghidra.util.task import TaskMonitor  # type: ignore
+        while not self._stopped:
+            # Apply any IRQs queued from another thread before
+            # stepping further — write_register requires the emulator
+            # to be in STOPPED state, which it is between step() calls.
+            while self._pending_irqs:
+                self._apply_pending_irq(self._pending_irqs.pop(0))
+            for _ in range(self._STEP_BATCH):
+                if not self._emulator.step(TaskMonitor.DUMMY):
+                    # If the firmware just ran `bx lr` with LR holding
+                    # an EXC_RETURN magic, Ghidra raises a decode
+                    # FAULT at PC=0xFFFFFFFx. Pop the synthetic
+                    # exception frame and resume.
+                    exec_addr = self._emulator.getExecutionAddress()
+                    pc = (int(exec_addr.getUnsignedOffset())
+                          if exec_addr is not None else 0)
+                    if self._maybe_handle_exc_return(pc):
+                        # Clear the latched fault state and continue
+                        # stepping at the restored PC.
+                        try:
+                            self._emulator.setHalt(False)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        break
+                    state = str(self._emulator.getEmulateExecutionState())
+                    err = str(self._emulator.getLastError() or "")
+                    log.error(
+                        "GhidraBackend: step() returned False "
+                        "state=%s%s", state,
+                        f" err={err!r}" if err else "",
+                    )
+                    return
+                exec_addr = self._emulator.getExecutionAddress()
+                pc = (int(exec_addr.getUnsignedOffset())
+                      if exec_addr is not None else 0)
+                if pc in self._breakpoints:
+                    self._bp_hit_addr = pc
+                    return
+                if self._watchpoints and self._check_watchpoints():
+                    return
+                if self._pending_irqs:
+                    break  # back to outer loop to drain
 
     def _check_watchpoints(self) -> bool:
         """Return True if any write-watchpoint fired since tracking was
@@ -413,26 +468,162 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
         """Remember the vector-table base so inject_irq can find ISRs."""
         self._vtor = vtor
 
-    def inject_irq(self, irq_num: int) -> None:
-        """Deliver an external IRQ to a cortex-m CPU.
+    # ARMv7-A CPSR / mode constants.
+    _ARM_MODE_IRQ = 0x12
+    _ARM_MODE_MASK = 0x1F
+    _ARM_CPSR_I = 0x80
+    _ARM_CPSR_T = 0x20
 
-        Mirrors UnicornBackend.inject_irq: push an 8-word exception
-        frame (r0–r3, r12, lr, pc, xpsr) onto the main stack, set LR to
-        the thread-mode/MSP EXC_RETURN magic, and jump PC to the ISR
-        address from the vector table.
+    def _apply_pending_irq_armv7a(self, irq_num: int) -> None:
+        """Synthesise an ARMv7-A IRQ entry. Mirror of UnicornBackend's
+        version, but using Ghidra's writeRegister API.
 
-        Ghidra's PCode emulator doesn't model Cortex-M exception
-        delivery natively, so this is a software-synthesized transition
-        that the ISR code sees as if it were hardware-driven."""
-        if self.arch not in ("cortex-m3",):
-            log.warning(
-                "GhidraBackend.inject_irq(%d): only cortex-m3 has an "
-                "in-process IRQ model; arch=%s is ignored",
-                irq_num, self.arch,
-            )
+        On entry sets:
+          R14_irq  = PC + 4  (ARM-mode return correction)
+          SPSR_irq = CPSR
+          CPSR.M   = IRQ
+          CPSR.I   = 1
+          PC       = vbar + 0x18
+        """
+        if self._emulator is None:
             return
+        cpsr = self.read_register("cpsr")
+        if cpsr & self._ARM_CPSR_I:
+            self._pending_irqs.insert(0, irq_num)
+            try:
+                self._emulator.setHalt(True)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        pc = self.read_register("pc")
+        return_pc = pc + 4
+
+        new_cpsr = cpsr & ~(self._ARM_MODE_MASK | self._ARM_CPSR_T)
+        new_cpsr |= self._ARM_MODE_IRQ | self._ARM_CPSR_I
+
+        # Ghidra ARM model: SP/LR/SPSR are banked per mode and Sleigh
+        # exposes them as separate named registers. Switch CPSR mode
+        # first so subsequent register writes target the right bank.
+        from java.math import BigInteger  # type: ignore
+        cpsr_reg = self._resolve_register("cpsr")
+        self._emulator.writeRegister(cpsr_reg, BigInteger.valueOf(new_cpsr))
+
+        # Banked LR_irq / SPSR_irq go by their explicit Sleigh names
+        # in the ARM language. Fall back gracefully if the names
+        # don't resolve on this build.
+        for name, val in (("lr_irq", return_pc), ("spsr_irq", cpsr)):
+            r = self._resolve_register(name)
+            if r is not None:
+                self._emulator.writeRegister(r, BigInteger.valueOf(int(val)))
+
+        # GICC_IAR shadow write so the firmware ISR reads back the
+        # acknowledged IRQ number on backends that don't model the
+        # GIC CPU interface.
+        ctrl = getattr(self, "_irq_controller", None)
+        gicc_base = getattr(ctrl, "gicc_base", None) if ctrl else None
+        if gicc_base is not None:
+            try:
+                self.write_memory(gicc_base + 0x0C, 1,
+                                  int(irq_num).to_bytes(4, "little"),
+                                  4, raw=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        vbar = getattr(self, "_vtor", 0)
+        # Plain writeRegister bypasses the TMode dance — we already
+        # cleared T in CPSR.
+        pc_reg = self._resolve_register("pc")
+        self._emulator.writeRegister(pc_reg,
+                                     BigInteger.valueOf(vbar + 0x18))
+        log.info(
+            "GhidraBackend.inject_irq(%d): ARMv7-A entry @ 0x%x, return=0x%x",
+            irq_num, vbar + 0x18, return_pc,
+        )
+
+    def inject_irq(self, irq_num: int) -> None:
+        """Deliver an external IRQ.
+
+        Cortex-M3 fast-path: queue the IRQ for the dispatch thread
+        and request the running emulator halt. cont() drains the
+        queue (synthesises the exception frame, sets LR to
+        EXC_RETURN, jumps PC to vector[16+N]) before re-running, so
+        register writes happen while the emulator is in STOPPED
+        state. Skips the controller-MMIO write — Ghidra's PCode
+        emulator doesn't model the NVIC peripheral.
+
+        Other arches fall through to HalBackend.inject_irq, which
+        routes through the configured IrqController via memory or
+        register writes; those go through the standard PCode emulator
+        memory state and the firmware sees them on the next cont().
+        """
+        if self.arch not in ("cortex-m3", "arm", "arm64", "mips",
+                              "powerpc", "powerpc:MPC8XX", "ppc64"):
+            super().inject_irq(irq_num)
+            return
+        # On non-cortex-m archs, require an IrqController so the
+        # error message points at the YAML the user needs to
+        # declare. Check this before we touch _emulator so the
+        # error is independent of init() ordering.
+        if self.arch != "cortex-m3":
+            ctrl = getattr(self, "_irq_controller", None)
+            if ctrl is None:
+                from halucinator.backends.irq import IrqConfigError
+                raise IrqConfigError(
+                    f"GhidraBackend(arch={self.arch!r}) has no "
+                    "interrupt controller configured. Set "
+                    "machine.interrupt_controller in the YAML.")
         if self._emulator is None:
             raise RuntimeError("Call GhidraBackend.init() first")
+        # On non-cortex-m archs, also issue the IrqController MMIO
+        # write so firmware that polls the controller registers
+        # sees the bit set. The synthetic entry below transfers
+        # control either way.
+        if self.arch != "cortex-m3":
+            try:
+                ctrl.trigger(self, irq_num)
+            except Exception as exc:  # noqa: BLE001
+                # MIPS controller's RMW on CP0 'cause' may fail
+                # under Ghidra; the synthetic shadow-write below
+                # delivers anyway.
+                if self.arch == "mips" and "cause" in str(exc):
+                    pass
+                else:
+                    raise
+        # Cross-thread safe: list.append is atomic in CPython.
+        self._pending_irqs.append(int(irq_num))
+        # setHalt asks the running emulator to break out of run().
+        try:
+            self._emulator.setHalt(True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _apply_pending_irq(self, irq_num: int) -> None:
+        """Synthesise an exception entry for a queued IRQ. Must run
+        on the dispatch thread, while the Ghidra emulator is STOPPED
+        — setContextRegister and writeRegister both require the
+        emulator to be paused."""
+        if self._emulator is None:
+            return
+        # If the IrqController carries shadow-write addresses,
+        # prefer them over the per-arch synthetic exception entry
+        # — the shadow path bypasses Ghidra's banked-register
+        # quirks (which keep arm/arm64 unreliable). The firmware
+        # globals live at known offsets in our test corpus.
+        ctrl = getattr(self, "_irq_controller", None)
+        if (ctrl is not None
+            and getattr(ctrl, "irq_fired_addr", None) is not None
+            and getattr(ctrl, "irq_number_addr", None) is not None):
+            self._apply_pending_irq_shadow_write(irq_num)
+            return
+        if self.arch == "arm":
+            self._apply_pending_irq_armv7a(irq_num)
+            return
+        if self.arch == "arm64":
+            self._apply_pending_irq_arm64(irq_num)
+            return
+        if self.arch in ("mips", "powerpc", "powerpc:MPC8XX", "ppc64"):
+            self._apply_pending_irq_shadow_write(irq_num)
+            return
         vtor = getattr(self, "_vtor", 0)
         isr_slot = vtor + (16 + irq_num) * 4
         try:
@@ -466,6 +657,73 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
             irq_num, isr_addr, isr_slot,
         )
 
+    def _apply_pending_irq_arm64(self, irq_num: int) -> None:
+        """Synthesise an AArch64 IRQ entry. Mirrors the unicorn
+        path: jump to ``irq_simple_entry`` (firmware-side AAPCS
+        trampoline) with x30 = interrupted PC. The IrqController
+        carries the trampoline address via ``irq_simple_entry``."""
+        if self._emulator is None:
+            return
+        ctrl = getattr(self, "_irq_controller", None)
+        irq_simple = (getattr(ctrl, "irq_simple_entry", None)
+                      if ctrl else None)
+        if irq_simple is None:
+            log.warning("GhidraBackend.inject_irq(%d): arm64 controller "
+                        "has no irq_simple_entry — IRQ won't deliver",
+                        irq_num)
+            return
+        gicc_base = getattr(ctrl, "gicc_base", None) if ctrl else None
+        if gicc_base is not None:
+            try:
+                self.write_memory(gicc_base + 0x0C, 1,
+                                  int(irq_num).to_bytes(4, "little"),
+                                  4, raw=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return_pc = self.read_register("pc")
+        from java.math import BigInteger  # type: ignore
+        for name, val in (("x30", return_pc), ("pc", int(irq_simple))):
+            r = self._resolve_register(name)
+            if r is not None:
+                self._emulator.writeRegister(r, BigInteger.valueOf(int(val)))
+        log.info(
+            "GhidraBackend.inject_irq(%d): AArch64 trampoline @ 0x%x, "
+            "return=0x%x", irq_num, irq_simple, return_pc,
+        )
+
+    def _apply_pending_irq_shadow_write(self, irq_num: int) -> None:
+        """Deliver an IRQ via shadow-write — same pattern as the
+        unicorn MIPS / PPC paths. Bypass any synthetic exception
+        entry and just write the post-ack flag + number directly
+        into the firmware's globals; main's polling loop sees
+        them on its next iteration."""
+        ctrl = getattr(self, "_irq_controller", None)
+        if ctrl is None:
+            return
+        irq_number_addr = getattr(ctrl, "irq_number_addr", None)
+        irq_fired_addr = getattr(ctrl, "irq_fired_addr", None)
+        if irq_number_addr is None or irq_fired_addr is None:
+            log.warning(
+                "GhidraBackend.inject_irq(%d): %s controller has no "
+                "irq_fired_addr/irq_number_addr — IRQ won't deliver",
+                irq_num, self.arch)
+            return
+        try:
+            self.write_memory(int(irq_number_addr), 1,
+                              int(irq_num).to_bytes(4, "big"),
+                              4, raw=True)
+            self.write_memory(int(irq_fired_addr), 1,
+                              (1).to_bytes(4, "big"),
+                              4, raw=True)
+            log.info(
+                "GhidraBackend.inject_irq(%d): %s shadow write -> "
+                "irq_number@0x%x irq_fired@0x%x",
+                irq_num, self.arch, irq_number_addr, irq_fired_addr)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "GhidraBackend.inject_irq(%d): %s shadow write failed: %r",
+                irq_num, self.arch, exc)
+
     def _maybe_handle_exc_return(self, pc: int) -> bool:
         """If PC now points at an EXC_RETURN magic value (as happens
         when an ISR does `bx lr`), pop the exception frame we pushed in
@@ -482,15 +740,21 @@ class GhidraBackend(ARM32HalMixin, HalBackend):
             frame = struct.unpack("<8I", bytes(raw))
         except Exception:  # noqa: BLE001
             return False
-        self.write_register("r0", frame[0])
-        self.write_register("r1", frame[1])
-        self.write_register("r2", frame[2])
-        self.write_register("r3", frame[3])
-        self.write_register("r12", frame[4])
-        self.write_register("lr", frame[5])
-        self.write_register("pc", frame[6])
-        self.write_register("cpsr", frame[7])
-        self.write_register("sp", sp + 32)
+        # On exc_return Ghidra has already faulted on the
+        # 0xFFFFFFFx fetch — the emulator is in FAULT state, which
+        # rejects setContextRegister. Use the raw writeRegister path
+        # for everything (TMode stays Thumb from before the ISR).
+        from java.math import BigInteger  # type: ignore
+        for name, val in (
+            ("r0", frame[0]), ("r1", frame[1]), ("r2", frame[2]),
+            ("r3", frame[3]), ("r12", frame[4]), ("lr", frame[5]),
+            ("pc", frame[6] & ~1),
+            ("cpsr", frame[7]), ("sp", sp + 32),
+        ):
+            reg = self._resolve_register(name)
+            if reg is None:
+                continue
+            self._emulator.writeRegister(reg, BigInteger.valueOf(int(val)))
         log.info("GhidraBackend: exc_return — popped frame, resuming at 0x%x",
                  frame[6])
         return True

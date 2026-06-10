@@ -128,10 +128,41 @@ class HalBackend(ABC):
     # ------------------------------------------------------------------
 
     def inject_irq(self, irq_num: int) -> None:
-        """Inject interrupt *irq_num*. Not all backends support this."""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support inject_irq"
-        )
+        """Inject interrupt *irq_num*.
+
+        The base implementation routes through the configured
+        IrqController (NVIC / GIC / MIPS Cause / OpenPIC). Backends
+        that have a faster or more accurate native path (e.g. avatar2
+        + qemu's `avatar-armv7m-inject-irq` QMP command on Cortex-M)
+        override this method to short-circuit, and fall back to
+        super().inject_irq for ISAs the native path doesn't cover.
+        """
+        controller = getattr(self, "_irq_controller", None)
+        if controller is None:
+            from halucinator.backends.irq import IrqConfigError
+            raise IrqConfigError(
+                f"{self.__class__.__name__}.inject_irq: no interrupt "
+                f"controller configured. Declare one in the YAML "
+                f"machine.interrupt_controller block, or use a backend "
+                f"that overrides inject_irq for this arch."
+            )
+        controller.trigger(self, irq_num)
+
+    def set_irq_controller(self, controller: Any) -> None:
+        """Attach an IrqController instance. Called by main.py after
+        the backend is constructed and the YAML config has been parsed."""
+        self._irq_controller = controller
+
+    def set_delivery_plan(self, plan: Any) -> None:
+        """Attach the CPU-exception DeliveryPlan (the 'where-to-land'
+        data). Only consulted by in-process backends whose CPU model
+        doesn't take exceptions natively; harmless on QEMU/avatar2."""
+        self._delivery_plan = plan
+
+    def set_exception_deliverer(self, deliverer: Any) -> None:
+        """Attach the per-arch ExceptionDeliverer. Backends that take
+        exceptions natively never read this."""
+        self._exception_deliverer = deliverer
 
     def shutdown(self) -> None:
         """Tear down the backend. Override if cleanup is needed."""
