@@ -139,6 +139,11 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
             "HALUCINATOR_RENODE", "renode"
         )
         self._gdb = _GDBClient(gdb_host, gdb_port, arch=arch)
+        # Renode emits the stop reply twice on a single breakpoint hit (and
+        # again after some commands). Give wait_for_stop a drain window to
+        # swallow the duplicate so it can't desync the next request/response.
+        # QEMU needs none — see _GDBClient.stop_drain_timeout.
+        self._gdb.stop_drain_timeout = 0.25
         self._monitor = _MonitorClient(monitor_host, monitor_port)
         self._process: Optional[subprocess.Popen] = None
         self._bp_map: Dict[int, int] = {}

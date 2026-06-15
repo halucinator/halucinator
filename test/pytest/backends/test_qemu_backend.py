@@ -226,8 +226,13 @@ class TestQEMUBackend:
         b._gdb.read_register.return_value = 0x08001234  # LR
         b._gdb.wait_for_stop.return_value = "T05"
         b.execute_return(0)
-        b._gdb.write_register.assert_any_call("r0", 0)
-        b._gdb.write_register.assert_any_call("pc", 0x08001234)
+        # execute_return now batches the return value + pc into a single
+        # write_registers call (one GDB round-trip) instead of two separate
+        # write_register calls.
+        b._gdb.write_registers.assert_called_once()
+        regs = b._gdb.write_registers.call_args.args[0]
+        assert regs["r0"] == 0
+        assert regs["pc"] == 0x08001234
 
 
 class TestInjectIrqGracefulDegradation:
