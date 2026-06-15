@@ -154,6 +154,21 @@ class _GDBClient:
         # register/memory dumps. We now recv() in 4 KiB chunks and frame
         # packets out of this buffer.
         self._rxbuf: bytes = b""
+        # Per-stop register-file cache. read_register() serves every register
+        # from one cached 'g' packet instead of a fresh GDB round-trip per
+        # register — a bp handler reading get_arg(0..3) was costing 4 full
+        # register dumps. Invalidated whenever the CPU may have changed regs
+        # (cont/step/stop/write_register). Closes most of the speed gap vs
+        # avatar2, which caches its register file the same way.
+        self._g_cache: Optional[bytes] = None
+        # Seconds wait_for_stop spends draining trailing/duplicate stop
+        # replies after a stop. Renode emits the stop reply twice on a bp
+        # hit, so RenodeBackend bumps this. QEMU sends exactly one stop reply
+        # per stop, so the default is 0.0 — draining for a fixed window on
+        # *every* breakpoint hit otherwise dominates wall-clock (a 0.25s
+        # drain × hundreds of intercepts was the bulk of the qemu-vs-avatar2
+        # gap). When 0.0, only already-buffered packets are swept (no block).
+        self.stop_drain_timeout: float = 0.0
 
     def connect(self) -> None:
         if self.unix_path:
@@ -406,9 +421,12 @@ class _GDBClient:
         return vals
 
     def _read_g_packet(self) -> bytes:
+        if self._g_cache is not None:
+            return self._g_cache
         resp = self._cmd(b"g")
         try:
-            return bytes.fromhex(resp.decode())
+            self._g_cache = bytes.fromhex(resp.decode())
+            return self._g_cache
         except ValueError:
             log.error("GDB g packet returned non-hex reply: %r", resp[:80])
             raise
@@ -471,14 +489,16 @@ class _GDBClient:
                 return i
         return 0
 
-    def write_register(self, name: str, value: int) -> None:
-        """Write a single register. Tries 'P' first; falls back to read-modify-
-        write via 'g'/'G' for stubs (like QEMU's) that don't implement 'P'."""
+    def _reg_off_size_payload(self, name: str,
+                              value: int) -> Tuple[str, int, int, bytes, int]:
+        """Resolve a register write to (key, byte_offset, byte_size, payload,
+        regnum). Shared by write_register and write_registers."""
         key = self._alias_reg(name.lower())
         if self._reg_layout and key in self._reg_layout:
             off, size = self._reg_layout[key]
             order = "big" if self._big_endian_arch() else "little"
             payload = value.to_bytes(size, order, signed=False)
+            regnum = self._regnum_of(key)
         else:
             idx = self._ARM_REG_INDEX.get(key)
             if idx is None:
@@ -486,14 +506,34 @@ class _GDBClient:
             off = idx * 4
             size = 4
             payload = value.to_bytes(4, "little")
+            regnum = idx
+        return key, off, size, payload, regnum
 
-        regnum = self._regnum_of(key) if self._reg_layout else self._ARM_REG_INDEX[key]
+    def _patch_g_cache(self, off: int, size: int, payload: bytes) -> None:
+        """Keep the per-stop register cache coherent after a successful write,
+        instead of invalidating it. A subsequent read of any register at this
+        stop then stays a cache hit (no extra full-'g' round-trip)."""
+        if self._g_cache is not None and off + size <= len(self._g_cache):
+            buf = bytearray(self._g_cache)
+            buf[off:off + size] = payload
+            self._g_cache = bytes(buf)
+        else:
+            # Can't patch (cold cache or write past the cached image) — drop it.
+            self._g_cache = None
+
+    def write_register(self, name: str, value: int) -> None:
+        """Write a single register. Tries 'P' first; falls back to read-modify-
+        write via 'g'/'G' for stubs (like QEMU's) that don't implement 'P'."""
+        key, off, size, payload, regnum = self._reg_off_size_payload(name, value)
         hex_val = payload.hex()
         resp = self._cmd(f"P{regnum:x}={hex_val}".encode())
         if resp == b"OK":
+            # P succeeded — patch the cache in place rather than invalidate.
+            self._patch_g_cache(off, size, payload)
             return
         if resp and not resp.startswith(b"E") and resp != b"":
             log.warning("write_register %s: unexpected response %r", name, resp)
+            self._g_cache = None
             return
         # Empty reply -> 'P' unsupported; fall back to 'G'
         # read-modify-write.
@@ -506,6 +546,45 @@ class _GDBClient:
         if resp != b"OK":
             log.warning("write_register(G) %s: unexpected response %r",
                         name, resp)
+            self._g_cache = None
+        else:
+            self._g_cache = bytes(all_bytes)
+
+    def write_registers(self, regs: Dict[str, int]) -> None:
+        """Write several registers, collapsing to a single 'G' round-trip when
+        a warm register cache is available to patch. This is the fast path for
+        execute_return (set return value + pc in one go).
+
+        Cold cache (or no discovered layout): fall back to individual 'P'
+        writes — each keeps the cache coherent and costs the same as fetching
+        the full 'g' just to do one 'G'."""
+        if not regs:
+            return
+        if self._g_cache is None or not self._reg_layout:
+            for name, value in regs.items():
+                self.write_register(name, value)
+            return
+        base = bytearray(self._g_cache)
+        try:
+            for name, value in regs.items():
+                _key, off, size, payload, _regnum = \
+                    self._reg_off_size_payload(name, value)
+                if off + size > len(base):
+                    base.extend(b"\x00" * (off + size - len(base)))
+                base[off:off + size] = payload
+        except ValueError:
+            # Unknown register name — bail to per-register writes for clarity.
+            for name, value in regs.items():
+                self.write_register(name, value)
+            return
+        resp = self._cmd(b"G" + base.hex().encode())
+        if resp == b"OK":
+            self._g_cache = bytes(base)
+        else:
+            # 'G' rejected — invalidate and retry one at a time via 'P'/'G'.
+            self._g_cache = None
+            for name, value in regs.items():
+                self.write_register(name, value)
 
     # ------------------------------------------------------------------
     # Memory access
@@ -584,13 +663,16 @@ class _GDBClient:
             log.warning("remove_watchpoint 0x%x: %r", addr, resp)
 
     def cont(self) -> None:
+        self._g_cache = None          # regs change once the CPU runs
         self._send_pkt(b"c")
 
     def step(self) -> None:
+        self._g_cache = None
         self._send_pkt(b"s")
 
     def stop(self) -> None:
         """Send Ctrl-C (interrupt)."""
+        self._g_cache = None
         self._send_raw(b"\x03")
 
     def wait_for_stop(self, timeout: float = 30.0) -> Optional[str]:
@@ -617,17 +699,21 @@ class _GDBClient:
             self._sock.settimeout(prev_to)
 
         # Drain any trailing packets that arrived alongside the stop (some
-        # GDB stubs — Renode in particular — emit the stop reply twice
-        # on a single bp hit and again after subsequent commands). 250ms
-        # is comfortably longer than any real packet latency but short
-        # enough that the caller's next command isn't delayed noticeably.
-        drain_to = 0.25
-        self._sock.settimeout(drain_to)
+        # GDB stubs — Renode in particular — emit the stop reply twice on a
+        # single bp hit and again after subsequent commands). The drain
+        # window is per-backend (self.stop_drain_timeout): Renode sets it
+        # positive; QEMU leaves it 0.0 because it sends exactly one stop
+        # reply, and blocking for a fixed window on every single breakpoint
+        # hit was the dominant cost vs avatar2. With 0.0 we still sweep any
+        # packet already framed/pending (non-blocking) so a same-instant
+        # duplicate can't desync the stream, but we never wait.
+        drain_to = self.stop_drain_timeout
+        self._sock.settimeout(drain_to if drain_to > 0 else 0.0)
         try:
             while True:
                 try:
                     extra = self._recv_pkt()
-                except socket.timeout:
+                except (socket.timeout, BlockingIOError):
                     break
                 log.debug("wait_for_stop: drained trailing packet %r",
                           extra[:40])
@@ -916,6 +1002,11 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
 
     def write_register(self, register: str, value: int) -> None:
         self._gdb.write_register(register, value)
+
+    def write_registers(self, regs: Dict[str, int]) -> None:
+        """Batched register write — collapses execute_return's return-value +
+        pc updates into a single GDB round-trip (see _GDBClient)."""
+        self._gdb.write_registers(regs)
 
     # ------------------------------------------------------------------
     # Execution control

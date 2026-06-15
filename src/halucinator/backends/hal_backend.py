@@ -241,6 +241,14 @@ class _ABIBase:
         raw = bytes(self.read_memory(addr, 1, max_len, raw=True))
         return raw.decode("latin-1").split("\x00")[0]
 
+    def write_registers(self, regs: Dict[str, int]) -> None:
+        """Write several registers. Default: one write_register call each.
+        Backends with a faster batched path (e.g. QEMUBackend collapsing them
+        into a single GDB round-trip) override this. Used by execute_return to
+        set the return value and pc together."""
+        for name, value in regs.items():
+            self.write_register(name, value)
+
 
 class ARM32HalMixin(_ABIBase):
     """
@@ -275,9 +283,10 @@ class ARM32HalMixin(_ABIBase):
         self.write_register("lr", ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("lr")}
         if ret_value is not None:
-            self.write_register("r0", ret_value)
-        self.write_register("pc", self.read_register("lr"))
+            regs["r0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
@@ -318,9 +327,10 @@ class ARM64HalMixin(_ABIBase):
         self.write_register("x30", ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("x30")}
         if ret_value is not None:
-            self.write_register("x0", ret_value)
-        self.write_register("pc", self.read_register("x30"))
+            regs["x0"] = ret_value & 0xFFFFFFFFFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
@@ -360,9 +370,10 @@ class MIPSHalMixin(_ABIBase):
         self.write_register("ra", ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("ra")}
         if ret_value is not None:
-            self.write_register("v0", ret_value & 0xFFFFFFFF)
-        self.write_register("pc", self.read_register("ra"))
+            regs["v0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
@@ -393,9 +404,10 @@ class PowerPCHalMixin(_ABIBase):
         self.write_register("lr", ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("lr")}
         if ret_value is not None:
-            self.write_register("r3", ret_value & 0xFFFFFFFF)
-        self.write_register("pc", self.read_register("lr"))
+            regs["r3"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
@@ -412,9 +424,10 @@ class PowerPC64HalMixin(PowerPCHalMixin):
         return self.read_memory(sp + (idx - 8) * 8, 8, 1)
 
     def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("lr")}
         if ret_value is not None:
-            self.write_register("r3", ret_value & 0xFFFFFFFFFFFFFFFF)
-        self.write_register("pc", self.read_register("lr"))
+            regs["r3"] = ret_value & 0xFFFFFFFFFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
@@ -455,13 +468,13 @@ class X86HalMixin(_ABIBase):
         self.write_memory(sp, 4, ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
-        if ret_value is not None:
-            self.write_register("eax", ret_value & 0xFFFFFFFF)
         # Emulate `ret`: pop the return address and jump to it.
         sp = self.read_register("esp")
         ret_addr = self.read_memory(sp, 4, 1)
-        self.write_register("esp", sp + 4)
-        self.write_register("pc", ret_addr)
+        regs = {"esp": sp + 4, "pc": ret_addr}
+        if ret_value is not None:
+            regs["eax"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
         self.cont()
 
 
