@@ -49,7 +49,9 @@ class Interrupts:
         """
         Sets an interrupt using QMP Interface.
         Always marks the interrupt active; only fires if enabled.
-        DO NOT use when executing from context of a BP Handler.
+        DO NOT use when executing from context of a BP Handler, or from a
+        forwarded-MMIO hw_read/hw_write handler — use
+        ``peripheral_server.inject_irq_deferred`` there instead (issue #31).
         """
         log.debug("Set Active QMP: %s", hex(irq_num))
         cls.active[irq_num] = True

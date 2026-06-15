@@ -1,0 +1,20 @@
+# Copyright 2026 Christopher Wright
+
+machine:
+  arch: cortex-m3
+  cpu_model: cortex-m3
+  entry_addr: 0x08000401
+  init_sp: 0x20008000
+  vector_base: 0x08000000
+  gdb_exe: gdb-multiarch
+  interrupt_controller:
+    type: cortex_m
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write
