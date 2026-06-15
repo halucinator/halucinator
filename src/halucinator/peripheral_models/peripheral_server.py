@@ -8,6 +8,8 @@ from HALucinator over ZMQ
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from functools import wraps
 from typing import Any, Callable, Optional, Tuple, Type, TypeVar, cast
 
@@ -31,6 +33,16 @@ __tx_socket__: Optional[zmq.Socket] = None  # updated alongside __TX_SOCKET__
 
 __PROCESS = None
 __QEMU = None
+
+# Deferred IRQ delivery (issue #31). IRQs requested from a context where
+# the vCPU is mid-execution — a forwarded-MMIO hw_read/hw_write handler —
+# cannot be injected inline: the QMP path deadlocks on the QEMU global
+# lock and the GDB path is refused ("target is running"). The worker
+# thread below drains a queue and performs the actual inject once the
+# originating MMIO access has returned and the vCPU is idle again.
+__IRQ_QUEUE: "queue.Queue[Any]" = queue.Queue()
+__IRQ_WORKER: Optional[threading.Thread] = None
+__IRQ_WORKER_STOP = object()  # sentinel pushed onto the queue to end the loop
 
 OUTPUT_DIRECTORY: Optional[str] = None
 
@@ -145,11 +157,82 @@ def start(rx_port: int = 5555, tx_port: int = 5556, qemu: Any = None) -> None:
     __TX_SOCKET__.bind(hal2io_pipe)
     log.debug("Bound to %s", str(hal2io_pipe))
 
+    start_irq_worker()
+
     # __process = Process(target=run_server).start()
 
 
+def _irq_worker_loop() -> None:
+    """Drain __IRQ_QUEUE and perform the actual (potentially blocking)
+    inject from a thread that does not hold the QEMU global lock."""
+    while True:
+        item = __IRQ_QUEUE.get()
+        try:
+            if item is __IRQ_WORKER_STOP:
+                return
+            try:
+                inject_irq(item)
+            except Exception:  # pylint: disable=broad-except
+                # Never let a single failed delivery kill the worker — the
+                # next queued IRQ should still get a chance.
+                log.exception("Deferred inject_irq(%s) failed", item)
+        finally:
+            __IRQ_QUEUE.task_done()
+
+
+def start_irq_worker() -> None:
+    """Start the deferred-IRQ delivery thread (idempotent)."""
+    global __IRQ_WORKER
+    if __IRQ_WORKER is not None and __IRQ_WORKER.is_alive():
+        return
+    __IRQ_WORKER = threading.Thread(
+        target=_irq_worker_loop, name="hal-irq-delivery", daemon=True
+    )
+    __IRQ_WORKER.start()
+    log.info("Started deferred IRQ delivery thread")
+
+
+def stop_irq_worker() -> None:
+    """Signal the deferred-IRQ delivery thread to exit."""
+    global __IRQ_WORKER
+    worker = __IRQ_WORKER
+    if worker is not None and worker.is_alive():
+        __IRQ_QUEUE.put(__IRQ_WORKER_STOP)
+        worker.join(timeout=2.0)
+    __IRQ_WORKER = None
+
+
+def inject_irq_deferred(irq_num: int = 1) -> None:
+    """Queue *irq_num* for asynchronous injection on the IRQ worker thread.
+
+    SAFE to call from any context, including a peripheral hw_read/hw_write
+    handler (forwarded-MMIO context) where the vCPU holds the QEMU global
+    lock and a GDB ``cont`` is outstanding. Injecting inline from there
+    deadlocks (QMP) or is rejected (GDB "target is running") — see issue
+    #31. Deferring lets the originating MMIO access return first, so the
+    inject runs while the vCPU is idle (e.g. parked in WFI) and is woken
+    cleanly.
+
+    Falls back to immediate injection when the worker thread isn't
+    running (early init / unit tests), which is correct from the clean
+    contexts those callers use.
+    """
+    if __QEMU is None:
+        return
+    if __IRQ_WORKER is None or not __IRQ_WORKER.is_alive():
+        inject_irq(irq_num)
+        return
+    __IRQ_QUEUE.put(int(irq_num))
+
+
 def trigger_interrupt(irq_num: int, source: Optional[str] = None) -> None:
-    """Trigger an interrupt by number on the running backend."""
+    """Trigger an interrupt by number on the running backend.
+
+    Injects immediately on the calling thread. Safe from clean contexts
+    (external devices, the ZMQ server thread). To assert an IRQ from a
+    forwarded-MMIO hw_read/hw_write handler, use ``inject_irq_deferred``
+    instead (issue #31).
+    """
     log.info("Triggering interrupt %s (source=%s)", irq_num, source)
     inject_irq(irq_num)
 
@@ -282,3 +365,4 @@ def stop() -> None:
     """
     global __STOP_SERVER  # pylint: disable=global-statement
     __STOP_SERVER = True
+    stop_irq_worker()
