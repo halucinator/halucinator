@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterator, Optional
 
 from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
 from avatar2.archs.mips import MIPS_BE
+from avatar2.archs.x86 import X86
 
 import halucinator
 
@@ -82,6 +83,16 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
             "qemu_env_var": "HALUCINATOR_QEMU_PPC64",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "ppc64-softmmu/qemu-system-ppc64"
+            ),
+        },
+        # 32-bit x86 / i386, little-endian. Target for an i386 VxWorks RTU
+        # image (a fully-symbolized ELF EXEC).
+        "x86": {
+            "avatar_arch": X86,
+            "qemu_target": lambda: _qemu_target("X86QemuTarget"),
+            "qemu_env_var": "HALUCINATOR_QEMU_X86",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "i386-softmmu/qemu-system-i386"
             ),
         },
     }

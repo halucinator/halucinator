@@ -1,0 +1,8 @@
+# Copyright 2026 Christopher Wright
+
+memories:
+  ram:
+    {base_addr: 0x00100000, file: firmware/test_irq.bin,
+     permissions: rwx, size: 0x00020000}
+  halucinator:
+    {base_addr: 0x10000000, size: 0x10000000, permissions: rw-}

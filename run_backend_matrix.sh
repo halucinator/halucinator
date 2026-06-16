@@ -41,6 +41,8 @@ FIRMWARES=(
   "mips_irq|/root/halucinator|MIPS IRQ test PASSED|180"
   "ppc_irq|/root/halucinator|PPC IRQ test PASSED|180"
   "ppc64_irq|/root/halucinator|PPC64 IRQ test PASSED|180"
+  "x86_irq|/root/halucinator|X86 i386 IRQ test PASSED|180"
+  "x86_lapic_irq|/root/halucinator|X86 i386 LAPIC IRQ test PASSED|180"
 )
 
 # firmware/backend pairs the local image can't run end-to-end. Reported
@@ -154,6 +156,8 @@ for FW_SPEC in "${FIRMWARES[@]}"; do
     mips_irq)               RUNCMD="bash test/multi_arch_irq/mips/run_tests.bash" ;;
     ppc_irq)                RUNCMD="bash test/multi_arch_irq/ppc/run_tests.bash" ;;
     ppc64_irq)              RUNCMD="bash test/multi_arch_irq/ppc64/run_tests.bash" ;;
+    x86_irq)                RUNCMD="bash test/multi_arch_irq/x86/run_tests.bash" ;;
+    x86_lapic_irq)          RUNCMD="HAL_EMULATOR=qemu bash test/multi_arch_irq/x86_lapic/run_tests.bash" ;;
   esac
   for EMU in "${BACKENDS[@]}"; do
     LOG=".matrix_logs/${NAME}__${EMU}.log"

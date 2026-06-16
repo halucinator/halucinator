@@ -418,6 +418,53 @@ class PowerPC64HalMixin(PowerPCHalMixin):
         self.cont()
 
 
+class X86HalMixin(_ABIBase):
+    """
+    32-bit x86 / i386 System V cdecl ABI: all args on the stack, the
+    return address is the word at [esp], the return value is in eax.
+
+    Stack layout at function entry (after the `call` pushed the return
+    address):  [esp] = return addr, [esp+4] = arg0, [esp+8] = arg1, ...
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+        "eip", "eflags", "cs", "ds", "es", "fs", "gs", "ss",
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        sp = self.read_register("esp")
+        return self.read_memory(sp + (idx + 1) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        # cdecl: caller pushes args right-to-left. We write them above the
+        # current return address without moving esp (callee reads them in
+        # place); the caller is responsible for stack cleanup.
+        sp = self.read_register("esp")
+        for i, v in enumerate(args):
+            self.write_memory(sp + (i + 1) * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        sp = self.read_register("esp")
+        return self.read_memory(sp, 4, 1)
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        sp = self.read_register("esp")
+        self.write_memory(sp, 4, ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        if ret_value is not None:
+            self.write_register("eax", ret_value & 0xFFFFFFFF)
+        # Emulate `ret`: pop the return address and jump to it.
+        sp = self.read_register("esp")
+        ret_addr = self.read_memory(sp, 4, 1)
+        self.write_register("esp", sp + 4)
+        self.write_register("pc", ret_addr)
+        self.cont()
+
+
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
@@ -429,4 +476,5 @@ ABI_MIXINS: Dict[str, type] = {
     "powerpc":   PowerPCHalMixin,
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
+    "x86":       X86HalMixin,
 }

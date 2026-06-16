@@ -732,6 +732,9 @@ def _emulate_with_qemu_backend(
         config=qemu_target.generate_qemu_config(),
     )
     cmd_line = qemu_target.assemble_cmd_line()
+    _qdbg = os.environ.get("HAL_QEMU_LOG")
+    if _qdbg:
+        cmd_line[1:1] = ["-d", "int,cpu_reset,guest_errors", "-D", _qdbg]
     if print_qemu_command:
         print("QEMU Command")
         print(" ".join(cmd_line))
