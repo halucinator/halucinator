@@ -172,7 +172,18 @@ def setup_memory(
         memory(HALMemoryConfigdict):
     """
     if memory.emulate is not None:
-        emulate = getattr(peripheral_emulators, memory.emulate)
+        if "." in memory.emulate:
+            # Fully-qualified class path (module.path.ClassName) — lets a
+            # device-specific peripheral model live in its own subpackage
+            # (e.g. peripheral_models.bpv5.*) without polluting the generic
+            # module's namespace. Mirrors how `class:` resolves bp_handlers.
+            import importlib
+            mod_path, _, cls_name = memory.emulate.rpartition(".")
+            emulate = getattr(importlib.import_module(mod_path), cls_name)
+        else:
+            # Bare name: resolve on the generic peripheral_models module
+            # (backward-compatible with existing configs).
+            emulate = getattr(peripheral_emulators, memory.emulate)
     else:
         emulate = None
     log.info(
@@ -908,13 +919,24 @@ def _qemu_backend_dispatch_loop(backend: "HalBackend") -> None:
 
 
 def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
-    """Resolve an `emulate:` peripheral name to an instance. Searches the
-    at91 module (At91SysCtrl/At91Emac/At91Dbgu), then the generic module
-    (GenericPeripheral/HaltPeripheral). Returns None if the name is unknown
+    """Resolve an `emulate:` peripheral name to an instance. A fully-qualified
+    class path (``module.path.ClassName``) is imported directly — letting a
+    device-specific model live in its own subpackage (e.g.
+    ``peripheral_models.bpv5.*``) without polluting the generic module. A bare
+    name searches the at91 module (At91SysCtrl/At91Emac/At91Dbgu) then the
+    generic module (GenericPeripheral/HaltPeripheral). Returns None if unknown
     (region falls back to plain RAM)."""
-    from halucinator.peripheral_models import at91, generic
-    cls = (getattr(at91, name, None)
-           or getattr(generic, name, None))
+    if "." in name:
+        import importlib
+        mod_path, _, cls_name = name.rpartition(".")
+        try:
+            cls = getattr(importlib.import_module(mod_path), cls_name, None)
+        except ImportError:
+            cls = None
+    else:
+        from halucinator.peripheral_models import at91, generic
+        cls = (getattr(at91, name, None)
+               or getattr(generic, name, None))
     if cls is None:
         log.warning("Unknown emulate peripheral %r; region %s left as RAM",
                     name, memory.name)
