@@ -1,0 +1,9 @@
+# Copyright 2026 Christopher Wright
+
+# Symbol -> address map (from `llvm-nm -n firmware/test_irq.elf`).
+symbols:
+  0x00100000: _start
+  0x0010000e: uart_init
+  0x00100018: uart_write
+  0x0010002a: IRQ_Handler
+  0x0010003f: main

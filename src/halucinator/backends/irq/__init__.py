@@ -173,9 +173,21 @@ def _instantiate(spec: IrqControllerSpec) -> IrqController:
             irq_simple_entry=opts.pop("irq_simple_entry", None),
             options=opts,
         )
+    if spec.type in ("x86_pic", "x86", "i8259"):
+        from .x86_pic import X86PicController
+        opts = dict(spec.options or {})
+        return X86PicController(
+            isr_addr=opts.pop("isr_addr", None),
+            int_ent=opts.pop("int_ent", None),
+            int_exit=opts.pop("int_exit", None),
+            stub_addr=opts.pop("stub_addr", 0x7000),
+            isr_arg=opts.pop("isr_arg", 0),
+            vector=opts.pop("vector", 0x20),
+            options=opts,
+        )
     raise IrqConfigError(
         f"Unknown interrupt_controller type: {spec.type!r}. "
-        f"Supported: cortex_m, gicv2, gicv3, arm_vic, mips, openpic."
+        f"Supported: cortex_m, gicv2, gicv3, arm_vic, mips, openpic, x86_pic."
     )
 
 

@@ -1,0 +1,20 @@
+# Copyright 2026 Christopher Wright
+
+machine:
+  arch: x86
+  cpu_model: qemu32
+  machine: configurable
+  entry_addr: 0x00100000
+  init_sp: 0x001109e0
+  gdb_exe: gdb-multiarch
+  # No interrupt_controller block: on the QEMU/avatar path the IRQ is
+  # delivered by the real LAPIC via the hal-x86-inject-irq QMP command
+  # (apic_deliver_irq), not a halucinator in-process controller.
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

@@ -1,0 +1,22 @@
+# Copyright 2026 Christopher Wright
+
+machine:
+  arch: x86
+  cpu_model: qemu32
+  entry_addr: 0x00100000
+  init_sp: 0x001100b0
+  gdb_exe: gdb-multiarch
+  # In-process x86 PC interrupt delivery. X86Pic synthesises the
+  # EIP/CS/EFLAGS frame and vectors straight at the firmware's
+  # IRQ_Handler (no IDT needed for the unicorn path).
+  interrupt_controller:
+    type: x86_pic
+    isr_addr: 0x0010002a   # IRQ_Handler
+
+intercepts:
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_init
+  symbol: uart_init
+- class: halucinator.bp_handlers.generic.test_uart.TestUART
+  function: uart_write
+  symbol: uart_write

@@ -47,6 +47,7 @@ _LANGUAGE_MAP: Dict[str, str] = {
     "powerpc":        "PowerPC:BE:32:default",
     "powerpc:MPC8XX": "PowerPC:BE:32:MPC8270",
     "ppc64":          "PowerPC:BE:64:default",
+    "x86":            "x86:LE:32:default",
 }
 
 

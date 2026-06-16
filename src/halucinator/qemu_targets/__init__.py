@@ -4,3 +4,4 @@ from .arm64_qemu import ARM64QemuTarget
 from .mips_qemu import MIPSQemuTarget
 from .powerpc_qemu import PowerPCQemuTarget
 from .powerpc64_qemu import PowerPC64QemuTarget
+from .x86_qemu import X86QemuTarget

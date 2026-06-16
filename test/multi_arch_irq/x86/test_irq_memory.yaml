@@ -1,0 +1,12 @@
+# Copyright 2026 Christopher Wright
+
+# Flat i386 image: rwx RAM at 1 MiB (code, .bss, 64 KiB stack up to
+# __stack_top=0x001100b0). `low` is mapped so the iret's segment
+# descriptor fetch (no GDT loaded) reads zero memory and the
+# UnicornBackend's flat-segment recovery resumes at the popped EIP.
+memories:
+  low:
+    {base_addr: 0x00000000, size: 0x00100000, permissions: rwx}
+  ram:
+    {base_addr: 0x00100000, file: firmware/test_irq.bin,
+     permissions: rwx, size: 0x00100000}

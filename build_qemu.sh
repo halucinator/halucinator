@@ -65,7 +65,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$1" == "" ] ; then
-    TARGET_LIST=("ppc-softmmu" "arm-softmmu" "aarch64-softmmu" "mips-softmmu" "ppc64-softmmu")
+    TARGET_LIST=("ppc-softmmu" "arm-softmmu" "aarch64-softmmu" "mips-softmmu" "ppc64-softmmu" "i386-softmmu")
 else
     TARGET_LIST=$@
 fi

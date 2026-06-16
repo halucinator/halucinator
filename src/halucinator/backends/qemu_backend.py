@@ -422,8 +422,21 @@ class _GDBClient:
             return False
         return any(r in self._reg_layout for r in ("msr", "cause"))
 
+    # x86's GDB i386/amd64 register set has no 'pc'/'sp' — halucinator uses
+    # those generic names (e.g. to set the entry point and initial stack).
+    # Alias them to the arch's real register when the canonical name isn't
+    # present in the discovered layout.
+    _REG_ALIASES = {"pc": ("eip", "rip"), "sp": ("esp", "rsp")}
+
+    def _alias_reg(self, key: str) -> str:
+        if self._reg_layout and key not in self._reg_layout:
+            for cand in self._REG_ALIASES.get(key, ()):
+                if cand in self._reg_layout:
+                    return cand
+        return key
+
     def read_register(self, name: str) -> int:
-        key = name.lower()
+        key = self._alias_reg(name.lower())
         if self._reg_layout and key in self._reg_layout:
             off, size = self._reg_layout[key]
             data = self._read_g_packet()[off:off + size]
@@ -461,7 +474,7 @@ class _GDBClient:
     def write_register(self, name: str, value: int) -> None:
         """Write a single register. Tries 'P' first; falls back to read-modify-
         write via 'g'/'G' for stubs (like QEMU's) that don't implement 'P'."""
-        key = name.lower()
+        key = self._alias_reg(name.lower())
         if self._reg_layout and key in self._reg_layout:
             off, size = self._reg_layout[key]
             order = "big" if self._big_endian_arch() else "little"
@@ -810,7 +823,12 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
                 gdb_arg = f"-gdb unix:{self.gdb_unix_socket},server,nowait"
             else:
                 gdb_arg = f"-gdb tcp::{self._gdb.port}"
-            cmd = [self.qemu_path] + self.qemu_args + [
+            # Opt-in QEMU debug logging (CPU exceptions / resets) to a file,
+            # for diagnosing guest faults that close the GDB connection.
+            _dbg = os.environ.get("HAL_QEMU_LOG")
+            dbg_args = (["-d", "int,cpu_reset,guest_errors,unimp", "-D", _dbg]
+                        if _dbg else [])
+            cmd = [self.qemu_path] + self.qemu_args + dbg_args + [
                 "-S",  # start stopped
                 gdb_arg,
                 qmp_arg,
@@ -968,6 +986,8 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
         "hal-arm-inject-irq": "avatar-arm-inject-irq",
         "hal-mips-inject-irq": "avatar-mips-inject-irq",
         "hal-ppc-inject-irq": "avatar-ppc-inject-irq",
+        # x86/i386 is hal-only (no deprecated avatar-* predecessor).
+        "hal-x86-inject-irq": None,
     }
 
     @staticmethod
@@ -1029,6 +1049,15 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
         if arch in ("arm", "arm64"):
             self._qmp_inject(
                 "hal-arm-inject-irq",
+                {"num-irq": int(irq_num), "num-cpu": 0},
+            )
+            return
+        # x86/i386: deliver `irq_num` as a fixed interrupt vector to the
+        # CPU's local APIC via hal-x86-inject-irq. The firmware enables
+        # its LAPIC and has an IDT entry for the vector.
+        if arch == "x86":
+            self._qmp_inject(
+                "hal-x86-inject-irq",
                 {"num-irq": int(irq_num), "num-cpu": 0},
             )
             return

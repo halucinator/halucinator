@@ -1,0 +1,6 @@
+# Copyright 2026 Christopher Wright
+
+symbols:
+  0x00100000: _start
+  0x0010000e: uart_init
+  0x00100018: uart_write
