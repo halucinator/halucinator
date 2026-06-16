@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Christopher Wright
+
 # Smoke test: boot the Bus Pirate v5 firmware under HALucinator, drive it
 # through the VT100 detection handshake using the bpv5_terminal external
 # device, and verify the firmware reaches the HiZ> command shell and
@@ -22,11 +24,19 @@ set -e
 set +m  # disable job-control notifications ("Terminated: 15" on cleanup)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-EMULATOR="${HAL_EMULATOR:-avatar2}"
-TIMEOUT="${BPV5_SMOKE_TIMEOUT:-300}"
+# Default backend: explicit HAL_EMULATOR wins; else unicorn on macOS
+# (qemu/avatar2 ship Linux binaries), avatar2 elsewhere.
+if [[ -n "$HAL_EMULATOR" ]]; then
+    EMULATOR="$HAL_EMULATOR"
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+    EMULATOR="unicorn"
+else
+    EMULATOR="unicorn"
+fi
+TIMEOUT="${BPV5_SMOKE_TIMEOUT:-${BPV5_TIMEOUT:-300}}"
 EXIT_MARKER="${BPV5_SMOKE_EXIT_MARKER:-work with pins}"
 
 # --- cleanup -------------------------------------------------------------
@@ -37,28 +47,34 @@ pkill -9 -f gdb-multiarch     2>/dev/null || true
 sleep 1
 rm -f bpv5_hal.log bpv5_dev.log
 
+# --- launch the device FIRST --------------------------------------------
+# Ordering matters on the in-process unicorn backend: it boots to the
+# banner in well under a second, so if halucinator publishes the banner
+# before the device's ZMQ SUB socket is connected, those bytes are lost
+# to the PUB/SUB slow-joiner window and the device never sees a first
+# tx_buf (so it never sends its --prelude). Starting the device first and
+# giving its SUB a moment to bind closes that race. (qemu/avatar2 boot
+# slowly enough that the original order also worked.)
+echo "=== Launching bpv5_terminal in scripted mode ==="
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src:."
+python3 -m halucinator.external_devices.bpv5_terminal \
+        --script 'h\r\n' \
+        --script-delay 3 \
+        --exit-on "${EXIT_MARKER}" \
+        --max-runtime "${TIMEOUT}" \
+        >bpv5_dev.log 2>&1 &
+DEV_PID=$!
+
+# Let the device's SUB socket connect before halucinator publishes.
+sleep 3
+
 # --- launch halucinator --------------------------------------------------
 echo "=== Launching halucinator (--emulator $EMULATOR) ==="
 HAL_EMULATOR="$EMULATOR" "$SCRIPT_DIR/run.sh" >bpv5_hal.log 2>&1 &
 HAL_PID=$!
 
-# Give halucinator a head start so its ZMQ sockets are bound by the time
-# the device subscribes. The device sends its --prelude on first received
-# tx_buf so it's safe even if this is short, but a couple of seconds keeps
-# the logs tidier.
-sleep 2
-
-# --- launch the device in scripted mode ----------------------------------
-# Rely on the device's own --max-runtime — no external `timeout` (the
-# coreutils binary isn't present by default on macOS).
-echo "=== Launching bpv5_terminal in scripted mode ==="
-export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src:."
-if python3 -m test.bpv5.bpv5_terminal \
-        --script 'h\r\n' \
-        --script-delay 2 \
-        --exit-on "${EXIT_MARKER}" \
-        --max-runtime "${TIMEOUT}" \
-        >bpv5_dev.log 2>&1; then
+# --- wait for the device to finish (marker seen or --max-runtime) --------
+if wait "$DEV_PID"; then
     DEV_RC=0
 else
     DEV_RC=$?

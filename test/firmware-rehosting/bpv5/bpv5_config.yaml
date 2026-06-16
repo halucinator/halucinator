@@ -1,0 +1,810 @@
+# Copyright 2026 Christopher Wright
+
+machine:
+  arch: cortex-m3
+  cpu_model: cortex-m3
+  entry_addr: 0x100001f7
+  init_sp: 0x20042000
+
+intercepts:
+  - class: halucinator.bp_handlers.SkipFunc
+    function: dummy_delay
+    symbol: busy_wait_us
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: dummy_delay_ms
+    symbol: busy_wait_ms
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_sleep_ms
+    symbol: sleep_ms
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_sleep_us
+    symbol: sleep_us
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.core.RP2040Init
+    function: init_spinlocks
+    symbol: runtime_init_early_resets
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_post_clock_resets
+    symbol: runtime_init_post_clock_resets
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_clocks
+    symbol: runtime_init_clocks
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_usb_power_down
+    symbol: runtime_init_usb_power_down
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_claim
+    symbol: hw_claim_or_assert
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_claim_unused
+    symbol: hw_claim_unused_from_range
+    registration_args:
+      ret_value: 0
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_lock
+    symbol: hw_claim_lock
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_unlock
+    symbol: hw_claim_unlock
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_claim_clear
+    symbol: hw_claim_clear
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_exc
+    symbol: irq_set_exclusive_handler
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_shared
+    symbol: irq_add_shared_handler
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_irq_en
+    symbol: irq_set_enabled
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rom_reset_wait
+    addr: 0x19a
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rom_reset_wait2
+    addr: 0x196
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_put_get
+    addr: 0x1770
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_do_cmd
+    addr: 0x20000350
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_write_ram
+    addr: 0x20000250
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_boot2_copy
+    addr: 0x2000029c
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_flash_xip_boot2
+    addr: 0x200002cc
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_board_id
+    symbol: pico_get_unique_board_id
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: fix_rev
+    symbol: mcu_detect_revision
+    registration_args:
+      ret_value: 10
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_init
+    symbol: spi_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_spi_busy
+    symbol: spi_busy_wait_internal
+    registration_args:
+      silent: true
+  # --- Modeled SPI NOR flash target (replaces the SPI spoof) -------------
+  # HLE at the hwspi leaf helpers: CS via select/deselect, byte exchange via
+  # hwspi_write_read (used by spi_write) and hwspi_read (used by spi_read).
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: select
+    symbol: hwspi_select
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: deselect
+    symbol: hwspi_deselect
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: write_read
+    symbol: hwspi_write_read
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: read
+    symbol: hwspi_read
+  # --- Modeled 24Cxx I2C EEPROM target (PIO-HLE at the leaf helpers) ------
+  # I2C is PIO-bit-banged: hook the five software leaf helpers that BOTH the
+  # interactive CLI mode (hwi2c_*) and the i2c_search_addr scan call. The
+  # Python EEPROM model supplies the ACK/NACK handshake + MISO bytes; the PIO
+  # MMIO state machine is never touched. Default device: 24C02 @ 7-bit 0x50.
+  - class: halucinator.bp_handlers.bpv5.i2c.I2cEepromTarget
+    function: start
+    symbol: pio_i2c_start_timeout
+  - class: halucinator.bp_handlers.bpv5.i2c.I2cEepromTarget
+    function: restart
+    symbol: pio_i2c_restart_timeout
+  - class: halucinator.bp_handlers.bpv5.i2c.I2cEepromTarget
+    function: stop
+    symbol: pio_i2c_stop_timeout
+  - class: halucinator.bp_handlers.bpv5.i2c.I2cEepromTarget
+    function: write
+    symbol: pio_i2c_write_timeout
+  - class: halucinator.bp_handlers.bpv5.i2c.I2cEepromTarget
+    function: read
+    symbol: pio_i2c_read_timeout
+  # The I2C command executor and the address scan gate the transaction on
+  # ui_help_sanity_check (VOUT-present + pull-up-detected preflight). With the
+  # PSU/AMUX spoofed off (skip_amux) the voltage reads 0 and the check aborts
+  # the line with "No voltage detected on VOUT/VREF" / "Pull-up not detected".
+  # Force the preflight to pass (returns 1 on success) so the modeled bus
+  # transaction proceeds — the analog rails are out of scope for I2C HLE.
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: i2c_preflight_ok
+    symbol: ui_help_sanity_check
+    registration_args:
+      ret_value: 1
+      silent: true
+  # --- Modeled DS18B20 1-WIRE target (PIO-HLE at the leaf helpers) -------
+  # Skip the PIO bring-up: onewire_init loads a PIO program + configures the
+  # SM via PIO MMIO (0x50200000, in the logger catch-all) and would spin. We
+  # HLE all three leaf I/O helpers, so the PIO config struct it builds is
+  # never dereferenced — skipping it is safe. (Mirrors skip_spi_init.)
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_onewire_init
+    symbol: onewire_init
+    registration_args:
+      silent: true
+  # onewire_wait_for_idle busy-polls the PIO SM program-counter (an unmodeled
+  # PIO MMIO reg) until the bit-bang program returns to idle — it would spin
+  # forever. Our HLE leaf helpers complete synchronously, so the wait is a
+  # no-op. (hw1wire_write/read and the demos call this after each byte.)
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_onewire_wait_idle
+    symbol: onewire_wait_for_idle
+    registration_args:
+      silent: true
+  # 1-WIRE is PIO bit-banged; HLE at the software leaf primitives:
+  #   onewire_reset  -> presence pulse (0 = present)
+  #   onewire_tx_byte(b) -> feed byte to DS18B20 state machine
+  #   onewire_rx_byte()  -> next DS18B20 response byte
+  # Drives the CLI '['/']' framing, bare-value writes, 'r'/'r:N' reads, and
+  # the firmware ds18b20/scan demos (all route through these three helpers).
+  - class: halucinator.bp_handlers.bpv5.onewire.Ds18b20Target
+    function: reset
+    symbol: onewire_reset
+  - class: halucinator.bp_handlers.bpv5.onewire.Ds18b20Target
+    function: tx_byte
+    symbol: onewire_tx_byte
+  - class: halucinator.bp_handlers.bpv5.onewire.Ds18b20Target
+    function: rx_byte
+    symbol: onewire_rx_byte
+  # --- Modeled JTAG scan-chain target ("bluetag jtag -c N" IDCODE scan) --
+  # JTAG/SWD is bit-banged against SIO GPIO (no per-bit helper to hook), so
+  # we HLE at the device-discovery seam. jtagScan brute-forces pin
+  # permutations; for each it runs bypassTest and only commits when it
+  # matches the expected pattern (in r4). We:
+  #   * bypassTest  -> return r4 so the first candidate pinout is accepted;
+  #   * detectDevices -> return a positive TAP count;
+  #   * getDeviceIDs  -> write the modeled IDCODE into the ctx struct
+  #     (ctx+0x3c, count at ctx+0x38).
+  # The firmware's own jtagScan/displayDeviceDetails then renders
+  # "[ Device 0 ]  0x4BA00477" through the CLI. See bp_handlers/bpv5/jtag.py.
+  - class: halucinator.bp_handlers.bpv5.jtag.JtagTarget
+    function: bypass
+    symbol: bypassTest
+  - class: halucinator.bp_handlers.bpv5.jtag.JtagTarget
+    function: detect
+    symbol: detectDevices
+  - class: halucinator.bp_handlers.bpv5.jtag.JtagTarget
+    function: get_ids
+    symbol: getDeviceIDs
+  # --- Modeled UART serial peer (HLE at the hwuart leaf helpers) ---------
+  # hwuart_write/hwuart_read are both the mode vtable entries AND the leaf
+  # MMIO helpers (real RP2040 UART1 @ 0x40034000). TX byte is read from
+  # b->out_data ([arg0+0x14]); RX byte is written into b->in_data
+  # ([arg0+0x18]). Hooking both bypasses the PL011 entirely; the Python peer
+  # supplies the incoming bytes. skip_uart_init bypasses the real PL011 setup
+  # (mirrors skip_spi_init) so setup_exc doesn't spin on UART status regs.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_uart_init
+    symbol: uart_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: seed_fr
+    symbol: hwuart_setup_exc
+    class_args:
+      mode: loopback
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: write
+    symbol: hwuart_write
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: read
+    symbol: hwuart_read
+  # --- Modeled raw digital-I/O (DIO) pin target (HLE at the bio leaves) --
+  # DIO (m menu #9) is raw per-pin GPIO over SIO (0xd0000000) + a 74-shift
+  # register. We HLE at the bio software leaf helpers so we never depend on
+  # SIO atomic OUT_SET/OUT_CLR/OE alias semantics (the RAM-backed SIO region
+  # doesn't honour them):
+  #   bio_get(pin)->level   -> answer from the per-pin model (the '@' read);
+  #   bio_put(pin,level)    -> record a driven level (the 'A'/'a' write);
+  #   bio_output/bio_input  -> track pin direction.
+  # Verified live: the interactive DIO commands 'A <IOx>' / 'a <IOx>' (output
+  # HIGH/LOW) and '@ <IOx>' (input/read) funnel straight through these bio
+  # leaves, so they are the real seam (the dio_write/dio_read mode-vtable
+  # symbols are an unused-on-this-path alternate). The existing skip_bio_init
+  # stays: our model supplies the pin state directly, so the real bio_init
+  # pin/shift bring-up remains correctly bypassed.
+  # Default: BIO5 is an externally-driven HIGH input ('@ 5' reads 1); 'A 4'
+  # then '@ 4' demonstrates write-then-read-back. See bp_handlers/bpv5/dio.py.
+  - class: halucinator.bp_handlers.bpv5.dio.DioPinTarget
+    function: get
+    symbol: bio_get
+  - class: halucinator.bp_handlers.bpv5.dio.DioPinTarget
+    function: put
+    symbol: bio_put
+  - class: halucinator.bp_handlers.bpv5.dio.DioPinTarget
+    function: output
+    symbol: bio_output
+  - class: halucinator.bp_handlers.bpv5.dio.DioPinTarget
+    function: input
+    symbol: bio_input
+  # --- Modeled 2WIRE smartcard/memory target (PIO-HLE at the leaf helpers) -
+  # 2WIRE (menu #7) is PIO bit-banged: hw2wire_write -> pio_hw2wire_put16(byte)
+  # and hw2wire_read -> pio_hw2wire_get16(&dst). The start/stop framing helpers
+  # (pio_hw2wire_start/stop, the CLI '['/']') push command words into the PIO
+  # FIFO and busy-poll status, so they would hang and must be hooked too. Skip
+  # the PIO bring-up: pio_hw2wire_init loads a PIO program + configures the SM
+  # via PIO MMIO (0x50200000, logger catch-all) and pio_hw2wire_reset touches
+  # more PIO MMIO — both would spin. Our HLE leaf helpers complete
+  # synchronously, so skipping them is safe (mirrors skip_onewire_init).
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_hw2wire_init
+    symbol: pio_hw2wire_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_hw2wire_reset
+    symbol: pio_hw2wire_reset
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.twowire.TwoWireTarget
+    function: start
+    symbol: pio_hw2wire_start
+  - class: halucinator.bp_handlers.bpv5.twowire.TwoWireTarget
+    function: stop
+    symbol: pio_hw2wire_stop
+  - class: halucinator.bp_handlers.bpv5.twowire.TwoWireTarget
+    function: put16
+    symbol: pio_hw2wire_put16
+  - class: halucinator.bp_handlers.bpv5.twowire.TwoWireTarget
+    function: get16
+    symbol: pio_hw2wire_get16
+  # --- Modeled 3WIRE Microwire EEPROM target (PIO-HLE at the leaf helper) ---
+  # 3WIRE (menu #8) is half-duplex on one data line: every byte flows through
+  # the single full-duplex helper pio_hw3wire_get16(uint8_t *buf) — *buf is the
+  # TX byte on entry and the RX byte on return. hw3wire_write puts the data
+  # byte in *buf; hw3wire_read puts 0xFF (a read time-slot). hw3wire_start/stop
+  # toggle CS via bio_put (raw GPIO, no PIO poll) so they don't hang, but we
+  # hook them as the CS framing seam to reset transaction state. Skip the PIO
+  # bring-up (pio_hw3wire_init loads a PIO program via pio_add_program + PIO
+  # MMIO) — mirrors skip_onewire_init / skip_hw2wire_init.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_hw3wire_init
+    symbol: pio_hw3wire_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.twowire.ThreeWireTarget
+    function: cs
+    symbol: hw3wire_start
+  - class: halucinator.bp_handlers.bpv5.twowire.ThreeWireTarget
+    function: cs_off
+    symbol: hw3wire_stop
+  - class: halucinator.bp_handlers.bpv5.twowire.ThreeWireTarget
+    function: xfer
+    symbol: pio_hw3wire_get16
+  # --- Modeled NEC INFRARED transmitter/receiver (PIO-HLE at the protocol
+  #     helpers) ----------------------------------------------------------
+  # IR is PIO bit-banged through the irio_pio_* carrier program. We HLE at the
+  # NEC protocol leaves the mode vtable dispatches to:
+  #   * TX: infrared_write advances r0+=0x14 and tail-calls vtable[+0x08] =
+  #     nec_write(uint32_t *cmd). nec_write reads [r0] (byte0=addr, byte1=cmd),
+  #     encodes the NEC wire frame and shifts it out the PIO TXF. We hook
+  #     nec_write, capture address/command, and skip the PIO store.
+  #   * RX: infrared_periodic/infrared_macro call vtable[+0x18] =
+  #     nec_get_frame(uint32_t *out) (non-blocking). We write a modeled wire
+  #     frame to *out and return 2 (present); the firmware's own decode+printf
+  #     renders the Address/Command CLI line.
+  # The PIO setup/wait/drain leaves spin on PIO FSTAT MMIO (0x50300000, in the
+  # logger catch-all) or require real PIO config; SkipFunc them (mirrors
+  # skip_spi_init / skip_onewire_init). With both NEC leaves HLE'd the PIO
+  # FIFOs are never touched, so skipping init/wait/drain is safe.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_tx_init
+    symbol: nec_tx_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_rx_init
+    symbol: nec_rx_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_tx_deinit
+    symbol: nec_tx_deinit
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_rx_deinit
+    symbol: nec_rx_deinit
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_tx_wait_idle
+    symbol: nec_tx_wait_idle
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_nec_rx_drain_fifo
+    symbol: nec_rx_drain_fifo
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.infrared.InfraredNecTarget
+    function: tx_frame
+    symbol: nec_write
+    class_args:
+      address: 0x04
+      command: 0x08
+  - class: halucinator.bp_handlers.bpv5.infrared.InfraredNecTarget
+    function: rx_frame
+    symbol: nec_get_frame
+  # --- Modeled addressable-LED strip sink (PIO-HLE, output-only) ---------
+  # LED mode (#10) streams pixel words to a PIO state machine. Per
+  # INTERFACES.md it is output-only, so there is no target device — we HLE the
+  # software leaf write helpers and CAPTURE every emitted pixel/frame word.
+  #
+  # Skip the PIO bring-up: hwled_setup_exc dispatches to ws2812_setup_exc /
+  # apa102_setup_exc which call pio_add_program + pio_sm_* and configure the SM
+  # via PIO MMIO (0x50200000, in the logger catch-all) — it would touch
+  # unmodeled PIO registers. We fully HLE the per-pixel write helpers, so the
+  # PIO config struct setup_exc would build (at 0x2003ac04) is never
+  # dereferenced; skipping it is safe. (Mirrors skip_spi_init / skip_onewire_init.)
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_hwled_setup_exc
+    symbol: hwled_setup_exc
+    registration_args:
+      silent: true
+  # hwled_wait_idle is the post-execute PIO drain the command loop calls
+  # between running the compiled op list and rendering the CLI echo. It loads
+  # the PIO config struct at 0x2003ac04 (zeroed because hwled_setup_exc is
+  # skipped) and busy-polls the PIO SM PC up to 0xFFFFFF iterations before
+  # giving up with "Timeout, error!". Our HLE write completes synchronously, so
+  # the drain is a no-op — but if left to run it spins for ~16M iterations and
+  # delays (and prefaces with an error) the firmware's transaction render.
+  # Skip it. (Directly mirrors skip_onewire_wait_idle.)
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_hwled_wait_idle
+    symbol: hwled_wait_idle
+    registration_args:
+      silent: true
+  # Neutralise the PIO-touching per-strip start/stop ops. hwled_start /
+  # hwled_stop still RUN (so the firmware stores + renders the "RESET" start /
+  # stop transaction labels on the CLI), but the op they dispatch to
+  # (ws2812_start/stop, apa102_start/stop) pokes the PIO SM control register
+  # via the bring-up struct at 0x2003ac04 — which is zeroed because
+  # hwled_setup_exc is skipped, so the real op would write to a bogus/read-only
+  # address and spin. SkipFunc them: output-only capture happens at the write
+  # leaf, so the SM flush/sync is unnecessary.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_ws2812_start
+    symbol: ws2812_start
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_ws2812_stop
+    symbol: ws2812_stop
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_apa102_start
+    symbol: apa102_start
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_apa102_stop
+    symbol: apa102_stop
+    registration_args:
+      silent: true
+  # Capture the colour word the firmware emits per pixel. ws2812_write /
+  # apa102_write take the word in r0; we log the on-wire bytes and skip the
+  # real PIO FIFO write. hwled_write reads the parsed CLI value from
+  # [ctx+0x14] (a cross-check); hwled_start/stop delimit the CLI '['/']' frame.
+  # The WS2812 firmware does NO RGB->GRB reorder — the user supplies 0xGGRRBB
+  # and the PIO shifts the top 24 bits out MSB-first (= G,R,B on the wire).
+  - class: halucinator.bp_handlers.bpv5.led.LedStripSink
+    function: start
+    symbol: hwled_start
+  - class: halucinator.bp_handlers.bpv5.led.LedStripSink
+    function: stop
+    symbol: hwled_stop
+  - class: halucinator.bp_handlers.bpv5.led.LedStripSink
+    function: hwled_write
+    symbol: hwled_write
+  - class: halucinator.bp_handlers.bpv5.led.LedStripSink
+    function: ws2812_write
+    symbol: ws2812_write
+  - class: halucinator.bp_handlers.bpv5.led.LedStripSink
+    function: apa102_write
+    symbol: apa102_write
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_panic
+    symbol: hard_assertion_failure
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_bio_init
+    symbol: bio_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_storage_init
+    symbol: storage_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_psucmd_init
+    symbol: psucmd_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_psucmd_disable
+    symbol: psucmd_disable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_init
+    symbol: shift_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_wait
+    symbol: shift_clear_set_wait
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_shift_en
+    symbol: shift_output_enable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_adc_init
+    symbol: adc_init
+    registration_args:
+      silent: true
+  # --- ST7789 LCD: skipped in the DEFAULT config (fast boot) ----------------
+  # The LCD bring-up + glyph rasterizer are SkipFunc'd here, exactly as the
+  # upstream #29 demo did. This keeps boot fast on EVERY backend — critically
+  # avatar2, where intercepting the per-pixel SPI-FIFO push (the firmware
+  # streams ~48k RGB565 pixels for the boot splash) is a GDB round-trip each
+  # and never finishes inside the smoke-test timeout.
+  #
+  # The PIXEL-FAITHFUL framebuffer (St7789Framebuffer, decodes the real RAMWR
+  # stream into a PNG) is NOT in this config — it lives in the overlay
+  # `bpv5_config_lcdfb.yaml`, which `run_lcdfb_test.bash` layers on top to
+  # un-skip the rasterizer + hook __spi_write_blocking_veneer. That test runs
+  # on unicorn (in-process, per-pixel is cheap), so the heavy capture never
+  # touches the avatar2 CI path. (HALucinator applies -c files in order and a
+  # later duplicate intercept wins, so the overlay cleanly overrides these.)
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_init
+    symbol: lcd_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_configure
+    symbol: lcd_configure
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_backlight
+    symbol: lcd_backlight_enable
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_write_string
+    symbol: lcd_write_string
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_lcd_update
+    symbol: disp_default_lcd_update
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_rgb_init
+    symbol: rgb_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_pullups_init
+    symbol: pullups_init
+    registration_args:
+      silent: true
+  # --- Onboard SPI-NAND storage — MODELED at the FatFs ABI seam ---
+  # Replaces the boot-time skip_storage_mount (which faked mount success
+  # without ever exercising FatFs). storage_mount now RUNS for real and calls
+  # our intercepted f_mount -> FR_OK, so the firmware records the volume mounted
+  # and computes a capacity from the seeded BPB fields. storage_init stays
+  # SkipFunc'd (it's the SSP-NAND GPIO/pin bring-up; the FatFs HLE doesn't need
+  # the real NAND/dhara layer beneath it). The trio f_opendir/f_readdir/
+  # f_closedir serves the CLI `ls` (disk_ls_handler -> storage_ls) a modeled
+  # directory; f_open/f_gets/f_read/f_close serve the CLI `cat` and
+  # storage_load_config a modeled file. See bp_handlers/bpv5/nand.py.
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_mount
+    symbol: f_mount
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_opendir
+    symbol: f_opendir
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_readdir
+    symbol: f_readdir
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_closedir
+    symbol: f_closedir
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_open
+    symbol: f_open
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_gets
+    symbol: f_gets
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_read
+    symbol: f_read
+  - class: halucinator.bp_handlers.bpv5.nand.NandStorage
+    function: f_close
+    symbol: f_close
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_multicore_launch
+    symbol: multicore_launch_core1
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_icm
+    symbol: icm_core0_send_message_synchronous
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_conf
+    symbol: binmode_load_save_config
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_setup
+    symbol: binmode_setup
+    registration_args:
+      silent: true
+  # BINLOOP (#13) — binmode: kept SkipFunc'd (intractable for a console-visible
+  # proof — see below). RE finding (bp_handlers/bpv5/scope.py + an empirical test):
+  #  * binmode's service loop runs ENTIRELY on core1 (core1_entry @0x10000330),
+  #    which is never launched headless (multicore_launch_core1 is SkipFunc'd).
+  #  * binmode I/O is on USB CDC interface 1 (tud_cdc_n_*(1,...)) — a SEPARATE
+  #    USB serial channel from the terminal's interface 0 — so the binmode/SUMP
+  #    identity ("RP2040 NNMhz", emitted by sump_rx/cdc_sump_task) is never
+  #    reachable on the console the test terminal is wired to.
+  #  * Un-skipping binmode_service makes the REAL service run logicanalyzer_setup
+  #    at boot, which CLAIMS the single-owner "big buffer" — then Scope's
+  #    scope_setup fails ("the big buffer is already allocated", scope mode
+  #    broken). So leaving it skipped is REQUIRED for Scope to work.
+  # Net: binmode stalls at core1_entry (0x10000330, never launched) / its I/O on
+  # CDC interface 1; landing it would need a core1 model + an interface-1 capture.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_binmode_service
+    symbol: binmode_service
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_mutex_enter
+    symbol: mutex_enter_blocking
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_mutex_exit
+    symbol: mutex_exit
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_mutex_try
+    symbol: mutex_try_enter_block_until
+    registration_args:
+      ret_value: 1
+      silent: true
+  # --- Modeled analog subsystem: ADC + AMUX + PSU (replaces skip_amux) -----
+  # Every voltage the firmware prints flows through amux_sweep(), which fills a
+  # global millivolt results struct (@0x20039510) that the `v` (measure pins),
+  # `W` (PSU enable readback), psu_measure, and ui_help_sanity_check all read.
+  # The stock config SkipFunc'd amux_sweep (it busy-polls unmodeled ADC MMIO),
+  # leaving the struct all-zero -> "No voltage detected on VOUT/VREF". We HLE
+  # amux_sweep instead, publishing MODELED rails (VOUT/VREF=3.3 V, an IO ramp)
+  # straight into the struct, so the firmware's own rendering reports real
+  # voltages and the sanity check (VOUT > 789 mV) passes naturally.
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: sweep
+    symbol: amux_sweep
+    class_args:
+      vout_mv: 3300
+      vref_mv: 3300
+      # Distinct per-pin ramp so a captured `v` reading is obviously modeled.
+      pin_mv: [400, 800, 1200, 1600, 2000, 2400, 2800, 3200]
+  # PSU set-point capture: the CLI `W <volts>` runs psucmd_enable -> psu_enable
+  # (r0 = the float target voltage). We capture it so VOUT reads back the set
+  # voltage, and we let the supply report enabled.
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: psu_enable
+    symbol: psu_enable
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: psu_disable
+    symbol: psu_disable
+  # The `W` summary (and any value_voltage()-based readout) reads per-channel
+  # ASCII voltage strings from a cache (@0x2003dc18) normally refreshed by the
+  # periodic monitor() — which doesn't run on these paths under emulation (its
+  # timer/core1 driver isn't live), so the cache would stay stale "0.0". Refresh
+  # it just-in-time on monitor_get_voltage_ptr (observe-only: publish our modeled
+  # mV struct + ASCII cache, then let the real getter return the ptr/validity
+  # over fresh data). (The bare-`v` pin table renders via ui_info_print_pin_voltage
+  # reading the mV struct directly, so it works from the sweep HLE + divider model
+  # alone; this getter hook covers the cache-based readers.)
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: get_voltage_ptr
+    symbol: monitor_get_voltage_ptr
+  # --- RP2040 SIO hardware-divider model ----------------------------------
+  # The `v` table (and other firmware integer divides) compute mV->volts via
+  # the SIO hardware divider (0xd0000000+0x60). That MMIO window is plain RAM
+  # under emulation, so the divider never computes -> every divide returns 0
+  # (the modeled voltages rendered as "0.0V" despite a correct mV struct). HLE
+  # the unsigned + signed divmod helpers so division actually works.
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: divmod_u32
+    symbol: divmod_u32u32
+  - class: halucinator.bp_handlers.bpv5.adcpsu.AdcPsuModel
+    function: divmod_s32
+    symbol: divmod_s32s32_unsafe
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_alarm_pool
+    symbol: alarm_pool_add_alarm_at_force_in_context
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_usbmsdrive_readonly
+    symbol: prepare_usbmsdrive_readonly
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_insert_usbmsdrive
+    symbol: insert_usbmsdrive
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_tud_task
+    symbol: tud_task
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_tud_flush
+    symbol: tud_cdc_n_write_flush
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_vprintf
+    symbol: SEGGER_RTT_vprintf
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
+    function: rx_fifo_try_get
+    symbol: rx_fifo_try_get
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
+    function: write
+    symbol: tud_cdc_n_write
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
+    function: write_flush
+    symbol: tud_cdc_n_write_flush
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: skip_usb_conn
+    symbol: tud_cdc_n_connected
+    registration_args:
+      ret_value: 1
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.libc.Bpv5Printf
+    function: printf
+    symbol: SEGGER_RTT_printf
+    registration_args:
+      fmt_idx: 1
+  - class: halucinator.bp_handlers.bpv5.libc.Bpv5Printf
+    function: printf
+    symbol: printf_
+  - class: halucinator.bp_handlers.PrintString
+    function: puts
+    symbol: stdio_puts
+    registration_args:
+      arg_num: 0
+  - class: halucinator.bp_handlers.ReturnZero
+    function: dummy_usb
+    symbol: tusb_init
+  - class: halucinator.bp_handlers.SkipFunc
+    function: rtt_init
+    symbol: SEGGER_RTT_Init
+  # --- Scope (#14): the oscilloscope DISPLAY mode -------------------------
+  # "Scope" is display-mode index 1 (NOT a `m`-menu bus mode); the CLI enters
+  # it with `d 2` (ui_display_enable_args validates N<=3, uses N-1 to index the
+  # display-mode table @0x20001990 stride 0x40: 0=Default,1=Scope,2=Disabled).
+  # On `d 2` the firmware runs scope_cleanup, scope_setup (allocs the sample
+  # buffers via the real mem_alloc -> returns 1), scope_setup_exc (records the
+  # buffer ptrs + enables the panel), then printf("Display mode: Scope").
+  # The free-running acquisition/render pipeline (scope_periodic -> ADC+DMA ->
+  # DMA-done IRQ -> scope_lcd_update framebuffer plot) does NOT fire headless
+  # (no live core1/DMA/sample IRQ). We let scope_setup_exc RUN for real and only
+  # neuter lcd_enable (raw SPI/SIO ST7789 power-on that faults headless) so the
+  # mode is entered cleanly and the firmware prints its identity line. The
+  # modeled DC waveform (raw 0x800 -> ~3.3 V) is logged for the readout proof.
+  # NOTE: HALucinator caches one shared instance per handler CLASS (the first
+  # intercept's class_args win), so the modeled level/waveform is set ONCE here.
+  - class: halucinator.bp_handlers.bpv5.scope.ScopeModel
+    function: setup_exc
+    symbol: scope_setup_exc
+    class_args:
+      level_raw: 0x800   # mid-scale ADC count -> ~3.3 V (mV = raw*6600>>12)
+      waveform: dc
+  - class: halucinator.bp_handlers.bpv5.scope.ScopeModel
+    function: lcd_enable
+    symbol: lcd_enable
+  # scope_periodic runs every core0 loop while Scope is the active display mode;
+  # we inject the modeled waveform into the firmware's recorded sample buffer.
+  - class: halucinator.bp_handlers.bpv5.scope.ScopeModel
+    function: periodic
+    symbol: scope_periodic

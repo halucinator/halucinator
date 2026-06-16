@@ -1,6 +1,44 @@
+<!-- Copyright 2026 Christopher Wright -->
+
 # Bus Pirate v5 (RP2040) Emulation Example
 
 This example demonstrates how to re-host the Bus Pirate v5 (bpv5) firmware using HALucinator. The bpv5 is based on the Raspberry Pi RP2040 microcontroller.
+
+## Status & companion docs
+
+**Full device: all interfaces working.** The firmware boots to an interactive
+colour `HiZ>` shell on unicorn (macOS), and every bus mode + always-on
+peripheral is driven end-to-end against a **modeled target device** — 15/15
+scripted tests pass on one merged config (tag `bpv5-full-device-20260614`).
+
+| Working interface | Modeled target → result through the CLI |
+|---|---|
+| SPI (#6)      | W25Q128 NOR flash → `RX: 0xEF 0x40 0x18` (JEDEC) |
+| I2C (#5)      | 24C02 EEPROM → `RX: 0x00 ACK 0x01 NACK` |
+| 1-WIRE (#2)   | DS18B20 → `Temperature: 25.062` (CRC8 valid) |
+| UART (#3)     | serial peer → `RX: 0x41`; NMEA GPS → `fix quality: 1` |
+| 2WIRE (#7) / 3WIRE (#8) | smartcard/Microwire → `00 01 02 03` / `93 C4 6E 5A` |
+| JTAG (#12)    | ARM scan chain → `Device 0: 0x4BA00477` |
+| INFRARED (#11)| NEC remote → TX `0x0804` + RX decode `Addr 4 Cmd 8` |
+| DIO (#9)      | per-pin GPIO → drive + read-back |
+| LED (#10)     | WS2812 strip → pixel `0x80FF00` captured |
+| LCD           | ST7789 → captured drawn text (`Vout`, `IO0..IO7`, …) |
+| ADC/PSU/AMUX  | `v`/`W` → modeled voltages (Vout 3.3 V) |
+| SPI-NAND      | FatFs → `ls`/`cat` a modeled filesystem |
+| Scope (#14)   | `d 2` → modeled DC waveform |
+
+BINLOOP (#13) is unreachable headless (core1-only service on a separate
+USB-CDC interface) and is documented, not faked — see `INTERFACES.md`.
+
+- **▶ [`DEMO.md`](DEMO.md) — start here:** the live web panel (terminal + LCD +
+  device tiles in one browser tab), how to launch the interactive terminal, and
+  a type-this-expect-this walkthrough for every interface.
+- [`INTERFACES.md`](INTERFACES.md) — every bus mode + peripheral, its
+  controller/MMIO, firmware entry points, and how each is modeled.
+
+Each interface is high-level-emulated (HLE) at its software leaf helper
+(SPI uses the real PL022 SSP; every PIO-bit-banged mode hooks the per-byte/
+per-frame C helper and answers from a Python model).
 
 ## Provenance
 The third-party binaries shipped here are redistributed under their upstream
@@ -54,21 +92,33 @@ following changes were made to the HALucinator core:
     visible symptom.
 
 ## How to Run
-Ensure you are inside the HALucinator Docker container. Run halucinator
-and the external terminal device as two processes — matching the
-two-window pattern of the STM32 UART example.
+Run halucinator and the external terminal device as two processes —
+matching the two-window pattern of the STM32 UART example.
 
-In the first window, start halucinator (default backend is `avatar2`;
-override with `HAL_EMULATOR=unicorn|qemu|ghidra|renode`):
+The default backend is **`unicorn`** everywhere — it's in-process, needs no
+Docker container or QEMU build, and boots this firmware to `HiZ>` in a couple
+of seconds. Override with `HAL_EMULATOR=unicorn|avatar2|qemu|ghidra|renode`
+(`avatar2`/`qemu` need the Linux QEMU binaries; the CI smoke job uses `avatar2`).
+
+> **Ordering note (unicorn):** the in-process unicorn backend boots to the
+> banner in under a second, so start the **terminal device first**, give
+> its ZMQ SUB socket a moment to connect, *then* launch halucinator.
+> Otherwise the banner is published into the PUB/SUB slow-joiner window
+> and lost — the device never sees a first `tx_buf`, so it never sends its
+> `--prelude` boot keystroke. `run_tests.bash` does this ordering for you.
+> (qemu/avatar2 boot slowly enough that either order works.)
+
+In the first window, attach the terminal device:
 
 ```bash
-bash test/bpv5/run.sh
+PYTHONPATH=.:src python3 -m halucinator.external_devices.bpv5_terminal
 ```
 
-In the second window, attach the terminal device:
+In the second window (after the device prints `subscribed to ...`),
+start halucinator:
 
 ```bash
-PYTHONPATH=.:src python3 -m test.bpv5.bpv5_terminal
+bash test/firmware-rehosting/bpv5/run.sh        # uses unicorn by default
 ```
 
 The output will show the Bus Pirate banner and initialization sequence,
@@ -81,5 +131,6 @@ For a non-interactive smoke test (used by CI) that runs both processes
 together and asserts the firmware reaches the help output:
 
 ```bash
-HAL_EMULATOR=avatar2 bash test/bpv5/run_tests.bash
+bash test/firmware-rehosting/bpv5/run_tests.bash               # unicorn on macOS
+HAL_EMULATOR=avatar2 bash test/firmware-rehosting/bpv5/run_tests.bash   # Linux/Docker
 ```

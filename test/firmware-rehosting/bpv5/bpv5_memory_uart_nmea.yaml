@@ -1,0 +1,58 @@
+# Copyright 2026 Christopher Wright
+
+memories:
+  bootrom:
+    base_addr: 0x0
+    size: 0x4000
+    file: b2.bin
+    permissions: r-x
+  flash:
+    base_addr: 0x10000000
+    size: 0x1000000
+    file: bus_pirate5_rev10.bin
+    permissions: r-x
+  ram:
+    base_addr: 0x20000000
+    size: 0x42000
+    permissions: rwx
+  halucinator:
+    base_addr: 0x30000000
+    size: 0x1000000
+    permissions: rwx
+  # io_ram is split around the UART0 page (0x40034000) so the modeled
+  # Rp2040Uart1Source peripheral can own that page WITHOUT overlapping a RAM
+  # region. (The unicorn backend maps a region only over pages no *other*
+  # region claims; a peripheral that fully overlaps a RAM region would end up
+  # backed by neither and fault UC_ERR_READ_UNMAPPED. A clean carve-out — three
+  # disjoint regions — avoids that.)
+  io_ram_lo:
+    base_addr: 0x40000000
+    size: 0x34000
+    permissions: rwx
+  io_ram_hi:
+    base_addr: 0x40035000
+    size: 0xfcb000
+    permissions: rwx
+  sio_ram:
+    base_addr: 0xd0000000
+    size: 0x1000000
+    permissions: rwx
+  ssi_ram:
+    base_addr: 0x18000000
+    size: 0x00010000
+    permissions: rwx
+peripherals:
+  logger:
+    base_addr: 0x50000000
+    size: 0x10000000
+    emulate: GenericPeripheral
+    permissions: rw-
+  # RP2040 UART1 (PL011) modeled as a raw-MMIO NMEA/GPS RX source. Overlaps
+  # the RAM-backed io_ram region (io_ram maps the page first; this peripheral's
+  # MMIO read/write hook overlays it). The 'gps' command reads DR (+0x00) / FR
+  # (+0x18) here directly. Size is one 0x1000 page (must be page-aligned).
+  uart1_gps:
+    base_addr: 0x40034000
+    size: 0x1000
+    emulate: halucinator.peripheral_models.bpv5.uart_source.Rp2040Uart1Source
+    permissions: rw-

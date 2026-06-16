@@ -1,3 +1,5 @@
+# Copyright 2026 Christopher Wright
+
 machine:
   arch: cortex-m3
   cpu_model: cortex-m3
@@ -25,7 +27,7 @@ intercepts:
     symbol: sleep_us
     registration_args:
       silent: true
-  - class: test.bpv5.bpv5_handlers.RP2040Init
+  - class: halucinator.bp_handlers.bpv5.core.RP2040Init
     function: init_spinlocks
     symbol: runtime_init_early_resets
   - class: halucinator.bp_handlers.SkipFunc
@@ -141,6 +143,65 @@ intercepts:
     function: skip_spi_busy
     symbol: spi_busy_wait_internal
     registration_args:
+      silent: true
+  # --- Modeled SPI NOR flash target (replaces the SPI spoof) -------------
+  # HLE at the hwspi leaf helpers: CS via select/deselect, byte exchange via
+  # hwspi_write_read (used by spi_write) and hwspi_read (used by spi_read).
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: select
+    symbol: hwspi_select
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: deselect
+    symbol: hwspi_deselect
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: write_read
+    symbol: hwspi_write_read
+  - class: halucinator.bp_handlers.bpv5.core.SpiFlashTarget
+    function: read
+    symbol: hwspi_read
+  # --- NMEA / GPS stretch: raw-MMIO UART1 RX source ----------------------
+  # The 'gps' command (nmea_decode_handler) reads the PL011 DR/FR directly,
+  # NOT via hwuart_read, so a leaf-function hook can't feed it. UART1 is
+  # modeled as a peripheral region (bpv5_memory_uart_nmea.yaml @ 0x40034000,
+  # class Rp2040Uart1Source). skip_uart_init bypasses the real PL011 setup.
+  # arm_nmea (entry hook on nmea_decode_handler) starts the sentence stream
+  # only inside the decode loop, so the mode-setup RX-drain sees an empty
+  # FIFO (the disarmed source reports RXFE-set) and exits cleanly.
+  - class: halucinator.bp_handlers.SkipFunc
+    function: skip_uart_init
+    symbol: uart_init
+    registration_args:
+      silent: true
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: arm_nmea
+    symbol: nmea_decode_handler
+    class_args:
+      mode: nmea
+  # NUL-terminate the assembled sentence buffer (firmware leaves it
+  # unterminated, which makes minmea_check / the GGA scan read past the end).
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: terminate_gps
+    symbol: process_gps
+  # The RP2040 SIO hardware divider (0xd0000060) is RAM-backed/unmodeled, so
+  # div_s32s32 returns garbage and minmea's float-field scan fails. HLE the
+  # signed divide in Python so minmea_scan parses the GGA fields.
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: div_s32
+    symbol: div_s32s32
+  # newlib strtol's reentrancy state isn't faithful under emulation, so the
+  # GGA integer fields (fix quality, satellite count) decode as INT_MAX. HLE
+  # strtol so the integers parse correctly.
+  - class: halucinator.bp_handlers.bpv5.uart.UartPeerTarget
+    function: strtol
+    symbol: strtol
+  # The gps decoder aborts early unless the VOUT/VREF preflight passes (the PSU
+  # is spoofed off, so it reads 0V). Force the voltage check OK so the decoder
+  # proceeds into its UART RX read loop.
+  - class: halucinator.bp_handlers.ReturnConstant
+    function: vout_ok
+    symbol: ui_help_check_vout_vref
+    registration_args:
+      ret_value: 1
       silent: true
   - class: halucinator.bp_handlers.SkipFunc
     function: skip_panic
@@ -307,13 +368,13 @@ intercepts:
     symbol: SEGGER_RTT_vprintf
     registration_args:
       silent: true
-  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
     function: rx_fifo_try_get
     symbol: rx_fifo_try_get
-  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
     function: write
     symbol: tud_cdc_n_write
-  - class: test.bpv5.bpv5_handlers.BusPirateConsole
+  - class: halucinator.bp_handlers.bpv5.core.BusPirateConsole
     function: write_flush
     symbol: tud_cdc_n_write_flush
   - class: halucinator.bp_handlers.ReturnConstant

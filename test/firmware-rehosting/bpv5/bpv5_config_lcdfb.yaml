@@ -1,0 +1,48 @@
+# Copyright 2026 Christopher Wright
+
+# bpv5 LCD pixel-framebuffer OVERLAY.
+#
+# Layer this on TOP of bpv5_config.yaml to enable the pixel-faithful ST7789
+# capture (St7789Framebuffer): it decodes the firmware's real RAMWR pixel
+# stream into a 320x240 RGB565 framebuffer and dumps a PNG. Used only by
+# run_lcdfb_test.bash, which runs on the unicorn backend (in-process, so the
+# per-pixel intercept is cheap). It is deliberately NOT in the default config —
+# under avatar2 the ~48k per-pixel intercepts are GDB round-trips that never
+# finish inside the boot/smoke-test timeout.
+#
+# HALucinator applies -c files in order and a later duplicate intercept WINS,
+# so these entries override the default config's skip_lcd_* for the same
+# symbols:
+#   - lcd_init/configure/backlight   -> St7789Framebuffer no-ops (instead of skip)
+#   - lcd_write_string / disp_default_lcd_update -> run_real pass-through, so the
+#     real rasterizer executes and streams pixels (instead of being skipped)
+#   - __spi_write_blocking_veneer    -> St7789Framebuffer.pixel (the capture; new)
+#
+# Usage:
+#   halucinator ... -c test/firmware-rehosting/bpv5/bpv5_config.yaml -c test/firmware-rehosting/bpv5/bpv5_config_lcdfb.yaml ...
+
+intercepts:
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: init
+    symbol: lcd_init
+    class_args:
+      # Snapshot the PNG every N painted pixels so the file is always fresh.
+      # (One instance per handler class, so this applies to all entries below.)
+      dump_every: 2000
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: configure
+    symbol: lcd_configure
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: backlight
+    symbol: lcd_backlight_enable
+  # un-skip the rasterizer path so real pixels stream to the veneer
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: run_real
+    symbol: lcd_write_string
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: run_real
+    symbol: disp_default_lcd_update
+  # capture every RGB565 pixel the firmware streams to the ST7789
+  - class: halucinator.bp_handlers.bpv5.lcdfb.St7789Framebuffer
+    function: pixel
+    symbol: __spi_write_blocking_veneer

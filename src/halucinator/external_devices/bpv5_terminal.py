@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
+# Copyright 2026 Christopher Wright
+
 """bpv5_terminal — interactive terminal device for the Bus Pirate v5 demo.
 
 Two-process model, following the same pattern as ``hal_dev_uart`` and the
 STM32 UART example:
 
     # window 1
-    halucinator -c test/bpv5/bpv5_memory.yaml \\
-                -c test/bpv5/bpv5_config.yaml \\
-                -c test/bpv5/bpv5_addrs.yaml \\
+    halucinator -c test/firmware-rehosting/bpv5/bpv5_memory.yaml \\
+                -c test/firmware-rehosting/bpv5/bpv5_config.yaml \\
+                -c test/firmware-rehosting/bpv5/bpv5_addrs.yaml \\
                 -n bpv5
 
     # window 2 (this script)
-    python3 -m test.bpv5.bpv5_terminal
+    python3 -m halucinator.external_devices.bpv5_terminal
 
 This device:
 
@@ -85,6 +87,9 @@ def main() -> int:  # pylint: disable=too-many-statements,too-many-branches
                    help="don't respond to ESC[6n; firmware falls back to ASCII")
     p.add_argument("--no-auto-yn", action="store_true",
                    help="don't auto-answer the (Y/n) prompt with y")
+    p.add_argument("--no-local-echo", action="store_true",
+                   help="don't locally echo typed keys (the firmware doesn't "
+                        "echo injected input, so local echo is on by default)")
     p.add_argument("--script", default="",
                    help=r"non-interactive: bytes to send after the ESC[6n probe "
                         r"(use \r \n \xHH for control bytes)")
@@ -204,6 +209,9 @@ def main() -> int:  # pylint: disable=too-many-statements,too-many-branches
 
     io.register_topic("Peripheral.UTTYModel.tx_buf", on_tx_buf)
     io.start()
+    if not args.script:
+        sys.stderr.write("[bpv5_terminal] interactive — press Ctrl-C or Ctrl-D "
+                         "to quit\n")
     sys.stderr.write(
         f"[bpv5_terminal] subscribed to Peripheral.UTTYModel.tx_buf\n"
         f"[bpv5_terminal] launch halucinator with rx_port={args.tx_port}, "
@@ -225,23 +233,70 @@ def main() -> int:  # pylint: disable=too-many-statements,too-many-branches
             )
     else:
         # Interactive: raw-mode stdin → ZMQ.
+        #
+        # IMPORTANT: the firmware periodically emits ESC[6n (cursor-position
+        # query). A real terminal auto-answers with ESC[<row>;<col>R — that
+        # reply lands on OUR stdin and, if forwarded verbatim, gets injected
+        # into the firmware's command line and corrupts the user's keystrokes
+        # (typing `m` does nothing). We already answer ESC[6n ourselves in
+        # watch_for_prompts(), so strip the terminal's own CPR replies here.
+        # Arrow keys (ESC[A..D) and other real keypresses are NOT matched and
+        # pass through untouched.
+        CPR_RE = re.compile(rb"\x1b\[[0-9]*(?:;[0-9]*)?R")
+        DANGLING_RE = re.compile(rb"\x1b(?:\[[0-9;]*)?$")  # partial seq at end
+        pending = b""
         old_settings = None
         if HAS_TTY and sys.stdin.isatty():
             old_settings = termios.tcgetattr(sys.stdin)
             tty.setraw(sys.stdin)
+            # tty.setraw() clears OPOST (all output post-processing), which
+            # disables ONLCR — so the firmware's bare '\n' no longer maps to
+            # CR-LF and each line "stair-steps" rightward. We only need RAW
+            # *input* (char-at-a-time, no echo, '\r' preserved for Enter);
+            # re-enable output processing so multi-line firmware output (the
+            # boot log, help text, etc.) renders with proper line returns.
+            attrs = termios.tcgetattr(sys.stdin)
+            attrs[1] |= (termios.OPOST | termios.ONLCR)   # oflag
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
         try:
             while not state["done"]:
                 if not sys.stdin.isatty():
                     time.sleep(0.5)
                     continue
                 if select.select([sys.stdin], [], [], 0.1)[0]:
-                    ch = sys.stdin.buffer.read(1)
-                    if not ch:
+                    chunk = os.read(sys.stdin.fileno(), 256)
+                    if not chunk:
                         break
-                    if ch == b"\x04":  # Ctrl-D
-                        sys.stderr.write("\n[bpv5_terminal] EOF\n")
+                    pending += chunk
+                    pending = CPR_RE.sub(b"", pending)       # drop CPR replies
+                    # hold a possibly-incomplete escape seq for the next read
+                    # so we never split a CPR across two reads
+                    m = DANGLING_RE.search(pending)
+                    out, pending = (pending[:m.start()], pending[m.start():]) \
+                        if m else (pending, b"")
+                    if b"\x03" in out or b"\x04" in out:  # Ctrl-C / Ctrl-D quit
+                        sys.stderr.write("\n[bpv5_terminal] quit\n")
                         break
-                    send_bytes_(ch)
+                    if out:
+                        send_bytes_(out)
+                        # Local echo: the firmware reads injected input via the
+                        # rx_fifo bridge and does NOT echo it back (a real unit
+                        # echoes from its USB-CDC read loop, which we bypass), so
+                        # in raw mode nothing would appear as you type. Echo
+                        # printable keys + CR/backspace ourselves. Control and
+                        # escape bytes (arrow keys, etc.) are not echoed.
+                        if not args.no_local_echo:
+                            echo = bytearray()
+                            for b in out:
+                                if b in (0x0d, 0x0a):
+                                    echo += b"\r\n"
+                                elif b in (0x08, 0x7f):
+                                    echo += b"\b \b"
+                                elif 0x20 <= b < 0x7f:
+                                    echo.append(b)
+                            if echo:
+                                sys.stdout.buffer.write(bytes(echo))
+                                sys.stdout.buffer.flush()
         finally:
             if old_settings is not None:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
