@@ -6,7 +6,11 @@
 
 
 import os
-from distutils.core import setup
+
+# setuptools (not distutils): distutils was removed from the stdlib in
+# Python 3.12, and the MCP server's venv runs on 3.12. setuptools.setup
+# is a drop-in for the distutils.core.setup call used below.
+from setuptools import setup
 
 
 def get_packages(rel_dir):
@@ -30,6 +34,7 @@ setup(name='halucinator',
       packages=get_packages('halucinator'),
       entry_points ={'console_scripts': [
             'halucinator = halucinator.main:main',
+            'halucinator-mcp = halucinator.mcp.server:main',
             'qemulog2trace = tools.qemu_to_trace:main',
             'hal_make_addr= halucinator.util.elf_sym_hal_getter:main',
             'hal_dev_uart=halucinator.external_devices.uart:main',
@@ -40,6 +45,12 @@ setup(name='halucinator',
             'hal_dev_802_15_4=halucinator.external_devices.IEEE802_15_4:main',
             'hal_dev_irq_trigger=halucinator.external_devices.trigger_interrupt:main'
         ]},
+      extras_require={
+            # MCP server (`halucinator-mcp`). Upper-bounded below 2.0: the
+            # FastMCP API the server uses is 1.x. Verified against mcp 1.27.
+            # Needs Python >=3.10 (the SDK's floor).
+            'mcp': ['mcp[cli]>=1.2,<2', 'capstone>=4.0'],
+      },
       requires=['avatar2',
                 'zeromq',
                 'PyYAML',
