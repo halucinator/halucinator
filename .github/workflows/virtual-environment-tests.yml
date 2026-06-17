@@ -145,6 +145,10 @@ jobs:
         pip install -e deps/avatar2/
         pip install -r src/requirements.txt
         pip install -e src
+        # MCP server extra (mcp[cli] + capstone). The CI runners are Python
+        # 3.10 (jammy) / 3.12 (noble), both >= the SDK's 3.10 floor, so the
+        # MCP tests under test/pytest/mcp_server/ run on both.
+        pip install -e 'src/[mcp]'
         pip install pytest-cov pytest-timeout
 
     - name: Build QEMU (cached)
@@ -311,6 +315,13 @@ jobs:
         set -x
         source $(pwd)/virtualenvs/halucinator/bin/activate
         halucinator --help
+
+    - name: smoke-test halucinator-mcp entry point
+      run: |
+        set -e
+        set -x
+        source $(pwd)/virtualenvs/halucinator/bin/activate
+        halucinator-mcp --help
 
     - name: test make_bin
       run: |
