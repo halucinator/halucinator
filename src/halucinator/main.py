@@ -1085,6 +1085,22 @@ def _in_process_dispatch_loop(backend: "HalBackend") -> None:
         pc = backend.read_register("pc") & ~1  # mask Thumb bit on ARM
         bp_id = intercepts.addr2bp_lut.get(pc)
         if bp_id is None:
+            # An asynchronous IRQ (e.g. a TimerModel tick injected from a
+            # background thread) breaks out of emu_start via a cross-thread
+            # emu_stop(). On cortex-m3 the IRQ is applied and the CPU is now
+            # mid-ISR at a PC that is not a registered breakpoint — that is
+            # NOT "ran off the rails", it is normal interrupt-driven
+            # execution. Re-enter cont() so the ISR (and the periodic
+            # control loop it drives) keeps running, instead of exiting.
+            # We only do this when an IRQ controller is configured and the
+            # PC lands in mapped code; a genuine runaway (unmapped fetch)
+            # still surfaces as a UcError from cont().
+            if getattr(backend, "_irq_controller", None) is not None:
+                try:
+                    backend.cont()
+                    continue
+                except Exception:  # noqa: BLE001 — real fault: let it surface
+                    raise
             log.info("%s stopped at 0x%x with no handler; exiting",
                      type(backend).__name__, pc)
             return
