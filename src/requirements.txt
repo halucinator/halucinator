@@ -14,3 +14,7 @@ yamllint==1.26.3
 black==26.3.1
 cle
 setuptools<81
+# NOTE: the MCP server's deps (mcp[cli], capstone) are intentionally NOT
+# listed here — they require Python >=3.10, and listing them would break
+# `pip install -r requirements.txt` on the 3.9 baseline. Install them via the
+# extra instead: `pip install -e 'src/[mcp]'` (see src/halucinator/mcp/README.md).

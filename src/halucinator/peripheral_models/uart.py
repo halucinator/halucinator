@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import defaultdict, deque
 from dataclasses import asdict as _asdict, dataclass
 from typing import Any, DefaultDict, Deque, Dict
@@ -18,6 +20,12 @@ log = logging.getLogger(__name__)
 @peripheral_server.peripheral_model
 class UARTPublisher(object):
     rx_buffers: DefaultDict[int, Deque[str]] = defaultdict(deque)
+    # Set by an emulation supervisor (e.g. the MCP session) to break any
+    # thread parked in a blocking read() so the run can be torn down — a
+    # firmware that reads a UART id no input ever arrives on would otherwise
+    # spin here forever, surviving stop()/shutdown() and leaking into the
+    # next run. Left clear during normal operation (reads block as before).
+    abort_blocking: threading.Event = threading.Event()
 
     @classmethod
     @peripheral_server.tx_msg
@@ -41,7 +49,9 @@ class UARTPublisher(object):
         log.debug("In: UARTPublisher.read id:%s count:%i, block:%s" %
                   (hex(uart_id), count, str(block)))
         while block and (len(cls.rx_buffers[uart_id]) < count):
-            pass
+            if cls.abort_blocking.is_set():
+                break
+            time.sleep(0.0005)
         log.debug("Done Blocking: UARTPublisher.read")
         buffer = cls.rx_buffers[uart_id]
         chars_available = len(buffer)
@@ -67,9 +77,12 @@ class UARTPublisher(object):
         log.debug("In: UARTPublisher.read id:%s count:%i, block:%s" %
                   (hex(uart_id), count, str(block)))
         while block and (len(cls.rx_buffers[uart_id]) < count) :
+            if cls.abort_blocking.is_set():
+                break
             if len(cls.rx_buffers[uart_id]) > 0:
                 if cls.rx_buffers[uart_id][-1] == '\n':
                     break
+            time.sleep(0.0005)
 
         log.debug("Done Blocking: UARTPublisher.read")
         log.debug("rx_buffers %s" % cls.rx_buffers[uart_id])

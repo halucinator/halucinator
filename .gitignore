@@ -49,6 +49,11 @@ htmlcov/
 virtualenvs/
 venv/
 .venv/
+.venv-mcp/
+
+# Local MCP client wiring (machine-specific absolute paths) + session scratch
+.mcp.json
+tmp/mcp_session/
 
 # VSCode extension session artifacts dropped into example/demo dirs
 # (project config, Ghidra project, disassembly listing, handler cache)
