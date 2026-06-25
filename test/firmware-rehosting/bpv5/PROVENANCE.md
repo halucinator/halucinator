@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Christopher Wright -->
+
 # Bus Pirate v5 (RP2040) firmware — provenance & licensing
 
 This directory ships two third-party binary blobs that the HALucinator demo

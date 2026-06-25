@@ -1,3 +1,5 @@
+# Copyright 2026 Christopher Wright
+
 memories:
   bootrom:
     base_addr: 0x0
