@@ -19,25 +19,32 @@ if TYPE_CHECKING:
 
 class Counter(BPHandler):
     '''
-        Returns an increasing value for each addresss accessed
+        Returns an increasing value in r0 on each access -- (previous + increment)
+        & mask, starting from `start`. Models a free-running counter/timer whose
+        backing store does not advance in the re-host (so elapsed-time / timeout
+        loops never progress): each call advances it by `increment`. The `mask`
+        wraps it to a register width (e.g. 0xffff for a 16-bit counter).
 
         Halucinator configuration usage:
         - class: halucinator.bp_handlers.Counter
           function: <func_name> (Can be anything)
           addr: <addr>
-          registration_args:{increment:1} (Optional)
+          registration_args: { increment: 1, mask: 0xffffffff, start: 0 }  (all optional)
     '''
 
     def __init__(self) -> None:
         self.increment: Dict[int, int] = {}
         self.counts: Dict[int, int] = {}
+        self.mask: Dict[int, int] = {}
 
-    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str, increment: int = 1) -> HandlerFunction:
+    def register_handler(self, qemu: "HalBackend", addr: int, func_name: str,
+                         increment: int = 1, mask: int = 0xFFFFFFFF, start: int = 0) -> HandlerFunction:
         '''
 
         '''
-        self.increment[addr] = increment
-        self.counts[addr] = 0
+        self.increment[addr] = int(increment)
+        self.counts[addr] = int(start)
+        self.mask[addr] = int(mask)
 
         return cast(HandlerFunction, Counter.get_value)
 
@@ -46,5 +53,6 @@ class Counter(BPHandler):
         '''
             Gets the counter value
         '''
-        self.counts[addr] += self.increment[addr]
+        mask = self.mask.get(addr, 0xFFFFFFFF)
+        self.counts[addr] = (self.counts[addr] + self.increment[addr]) & mask
         return True, self.counts[addr]

@@ -490,6 +490,44 @@ class SetMemory(BPHandler):
         return False, 0
 
 
+class RegMemWrite(BPHandler):
+    """
+    Write a value to [register + offset], then let execution continue.
+
+    For loop-/poll-breaking points where the address to poke is computed from a
+    LIVE register (e.g. a `this`/`r4` pointer + a field offset) -- which
+    SetMemory / ForceMemValue (fixed address only) cannot express. Used by the
+    X-bus model to instantly ACK a remote I/O exchange ([r4+0x3e]=3 at the
+    XbExchg::RemoteExchange ack-poll) and to mark a phantom I/O device absent
+    ([r0+0x21c]=0xff at IoDeviceNoConf::StateMachine).
+
+    Halucinator configuration usage:
+    - class: halucinator.bp_handlers.RegMemWrite
+      function: <func_name> (Can be anything)
+      registration_args: { reg: r4, offset: 0x3e, value: 3, size: 1, silent: true }
+      addr: <addr>
+    """
+
+    def __init__(self) -> None:
+        self.params: Dict[int, Any] = {}
+
+    def register_handler(  # pylint: disable=too-many-arguments
+        self, qemu: "HalBackend", addr: int, func_name: str,
+        reg: str = "r0", offset: int = 0, value: int = 0, size: int = 1, silent: bool = True
+    ) -> HandlerFunction:  # pylint: disable=unused-argument
+        self.params[addr] = (reg, int(offset), int(value), int(size), silent, func_name)
+        return cast(HandlerFunction, RegMemWrite.write)
+
+    @bp_handler
+    def write(self, qemu: "HalBackend", addr: int) -> HandlerReturn:
+        reg, offset, value, size, silent, func_name = self.params[addr]
+        base = qemu.read_register(reg)
+        qemu.write_memory((base + offset) & 0xFFFFFFFF, size, value)
+        if not silent:
+            hal_log.info("RegMemWrite: %s [%s+0x%x]=0x%x", func_name, reg, offset, value)
+        return False, None
+
+
 class LogAndSkip(BPHandler):
     """Log entry (with r0..r3 + lr) then SkipFunc-return immediately.
 
@@ -1001,9 +1039,9 @@ class IrqReturnArm(BPHandler):
 class IntLvlVecChkArm(BPHandler):
     """ARM xxxIntLvlVecChk(level_p, vec_p) -- return the pending IRQ.
 
-    Per NDSS BAR 2021 paper sec III.D, VxWorks calls this BSP-defined
-    routine from inside its IRQ handler to ask the AIC "which level
-    and which vector caused the interrupt?". The function takes two
+    VxWorks calls this BSP-defined routine from inside its IRQ handler
+    to ask the AIC "which level and which vector caused the interrupt?".
+    The function takes two
     pointer args (r0=level_p, r1=vec_p) and writes the answers.
 
     Our handler returns the level/vec from the latest IRQ injected by

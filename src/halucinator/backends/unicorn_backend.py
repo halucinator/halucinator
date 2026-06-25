@@ -290,6 +290,16 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         self._recover_bad_calls = (
             _os.environ.get("HAL_RECOVER_BAD_CALLS") == "1")
         self._bad_call_recover: Dict[int, int] = {}
+        # MMU flat-fallback (opt-in HAL_MMU_FLAT_FALLBACK=1): on an ARM data/
+        # prefetch abort whose faulting address IS backed in physical memory
+        # (uc.mem_read succeeds — i.e. the MMU translation failed but the page
+        # is present), emulate the faulting load/store flat (VA==PA) and step
+        # past it. Lets MMU-library code that walks page tables not yet mapped
+        # in the active context proceed, where unicorn's CP15/TTBR handling
+        # would otherwise data-abort-loop forever. See _mmu_flat_complete.
+        self._mmu_flat_fallback = (
+            _os.environ.get("HAL_MMU_FLAT_FALLBACK") == "1")
+        self._mmu_flat_count: Dict[int, int] = {}
         self._bp_callbacks: Dict[int, Callable] = {}  # bp_id → callback
         # Pending IRQ injected from another thread (peripheral_server zmq
         # handler). cont() drains the queue before re-entering emu_start
@@ -626,6 +636,123 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                     self._last_movpc_pc = addr & ~1
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _indirect_trace)
 
+        # HAL_PIN_REGS="0xADDR=0xVALUE[,0xADDR=0xVALUE...]": model read-only
+        # hardware/boot-ROM latch registers that live in RAM space but the
+        # firmware never writes (e.g. an RTOS kernel "system-ready" flag
+        # in RAM, many readers, no writer). A boot seed gets clobbered by
+        # the firmware's .bss-clearing memset; this hook re-pins the value on
+        # every read so the load always returns it, exactly like a HW control
+        # register. (Unicorn's read hook fires before the load samples memory,
+        # so writing here makes the subsequent load return the pinned value.)
+        _pin = _os.environ.get("HAL_PIN_REGS")
+        if _pin and arch_str == "arm":
+            pins = {}
+            for tok in _pin.split(","):
+                tok = tok.strip()
+                if not tok or "=" not in tok:
+                    continue
+                a_s, v_s = tok.split("=", 1)
+                try:
+                    pins[int(a_s, 0)] = int(v_s, 0)
+                except ValueError:
+                    log.warning("HAL_PIN_REGS: bad token %r", tok)
+            if pins:
+                lo = min(pins); hi = max(pins) + 4
+                log.info("HAL_PIN_REGS: pinning %d register(s): %s",
+                         len(pins), ", ".join("0x%08x=0x%08x" % (a, v)
+                                              for a, v in pins.items()))
+                # Optional PC gate: HAL_PIN_PC_LO/HI restrict pinning to reads
+                # whose PC is in [LO,HI). Needed for phase-dependent flags that
+                # must be FALSE during init and TRUE only at a specific point
+                # (e.g. the multitasking-start dispatch) -- pinning globally
+                # corrupts the init logic that expects the flag clear.
+                _pc_lo = _os.environ.get("HAL_PIN_PC_LO")
+                _pc_hi = _os.environ.get("HAL_PIN_PC_HI")
+                pc_lo = int(_pc_lo, 0) if _pc_lo else None
+                pc_hi = int(_pc_hi, 0) if _pc_hi else None
+                pc_reg = self._reg_map.get("pc")
+                # HAL_PIN_ARM_PC=0xADDR: latch the pins ON the first time this PC
+                # executes, and keep them on thereafter. Models a boot-ROM/HW
+                # flag that transitions to "ready" at a single point (the
+                # scheduler-start entry) and stays set -- cleaner than a PC
+                # range for a flag that must be false through ALL of init and
+                # true through ALL of multitasking.
+                _arm = _os.environ.get("HAL_PIN_ARM_PC")
+                arm_pc = int(_arm, 0) if _arm else None
+                pin_state = {"armed": arm_pc is None}
+                self._pin_arm_pc = arm_pc
+                self._pin_state = pin_state
+                if arm_pc is not None:
+                    # Armed from _code_hook (fires per-instruction) -- a tight
+                    # begin/end UC_HOOK_CODE doesn't reliably fire.
+                    def _arm_hook(uc, addr, size, ud):
+                        if (addr & ~1) == arm_pc and not pin_state["armed"]:
+                            pin_state["armed"] = True
+                            log.info("HAL_PIN_REGS: armed at 0x%08x", addr)
+                    self._uc.hook_add(unicorn.UC_HOOK_CODE, _arm_hook)
+                def _pin_read(uc, access, addr, size, value, ud):
+                    if not pin_state["armed"]:
+                        return
+                    if pc_lo is not None:
+                        try:
+                            pc = uc.reg_read(pc_reg)
+                        except Exception:
+                            return
+                        if not (pc_lo <= pc < pc_hi):
+                            return
+                    for pa, pv in pins.items():
+                        if addr <= pa < addr + size or pa <= addr < pa + 4:
+                            try:
+                                uc.mem_write(pa, pv.to_bytes(4, "little"))
+                            except Exception:
+                                pass
+                self._uc.hook_add(unicorn.UC_HOOK_MEM_READ, _pin_read,
+                                  begin=lo, end=hi - 1)
+
+        # Diagnostic: HAL_WATCH_WRITE="0xADDR[,0xADDR...]" logs PC + value on every
+        # write to those addresses ("who writes this field?"). For finding skipped
+        # object-init writes (e.g. a TCB OBJ_CORE self-ptr never set).
+        _ww = _os.environ.get("HAL_WATCH_WRITE")
+        if _ww and arch_str == "arm":
+            _waddrs = set(int(x, 0) for x in _ww.split(",") if x.strip())
+            _wlo = min(_waddrs); _whi = max(_waddrs) + 4
+            _wpc = self._reg_map.get("pc")
+            def _watch_write(uc, access, addr, size, value, ud):
+                if any(a <= addr < a + size or addr <= a < addr + 4 for a in _waddrs):
+                    try:
+                        pc = uc.reg_read(_wpc)
+                    except Exception:
+                        pc = 0
+                    log.error("WATCH-WRITE: [0x%08x]<=0x%08x (size %d) PC=0x%08x",
+                              addr, value, size, pc)
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _watch_write,
+                              begin=_wlo, end=_whi - 1)
+
+        # Diagnostic: HAL_STEP_TRACE="0xLO-0xHI[:path]" single-step-logs every
+        # instruction whose PC is in [LO,HI): PC | sp | r0-r3 | sl | ip | lr.
+        # For pinning frame/register state to the exact instruction (e.g. a
+        # context-switch TCB load or a trap-style ldm epilogue).
+        _st = _os.environ.get("HAL_STEP_TRACE")
+        if _st and arch_str == "arm":
+            _spec = _st.split(":", 1)
+            _lo, _hi = (int(x, 0) for x in _spec[0].split("-"))
+            _stf = open(_spec[1] if len(_spec) > 1 else "/tmp/hal_step_trace.txt", "w")
+            _st_n = {"n": 0}
+            _rmap = self._reg_map
+            def _step_trace(uc, addr, size, ud):
+                if not (_lo <= addr < _hi) or _st_n["n"] >= 200000:
+                    return
+                _st_n["n"] += 1
+                try:
+                    vals = tuple(uc.reg_read(_rmap.get(r)) for r in
+                                 ("sp", "r0", "r1", "r2", "r3", "r10", "r12", "lr"))
+                    _stf.write("0x%08x sp=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x "
+                               "sl=0x%08x ip=0x%08x lr=0x%08x\n" % ((addr,) + vals))
+                    _stf.flush()
+                except Exception:
+                    pass
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _step_trace)
+
     def dump_pc_sample(self, top: int = 10) -> None:
         hist = getattr(self, "_pc_hist", None)
         if not hist:
@@ -692,9 +819,151 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                          "return lr=0x%08x", intno, pc, lr)
                 self.write_register("pc", lr)
                 return
+        # Opt-in MMU flat-fallback (HAL_MMU_FLAT_FALLBACK=1): on the first ARM
+        # data/prefetch abort, DISABLE the MMU (clear SCTLR.M) so the rest of
+        # the run is flat (VA==PA). unicorn's CP15/TTBR handling is unreliable
+        # for this firmware (TTBR0 reads 0), translation-faulting on pages that
+        # are physically present; since the firmware's mappings are identity,
+        # running flat is equivalent and avoids both data- and prefetch-abort
+        # loops. We do this LATE (on the fault, after usrMmuInit/vmLib is up),
+        # not by skipping usrMmuInit, so vmLib stays initialised. Falls back to
+        # per-instruction flat-completion of the load/store if SCTLR can't be
+        # cleared on this unicorn build.
+        if (self._mmu_flat_fallback and self.arch_name == "arm"
+                and intno in (3, 4) and pc not in (-1, 0)):
+            if self._mmu_disable(uc):
+                return  # MMU now off -> faulting instr re-executes flat
+            if intno == 4 and self._mmu_flat_complete(uc, pc):
+                return
         log.error("UnicornBackend: CPU exception/interrupt %d at pc=0x%x",
                   intno, pc)
         uc.emu_stop()
+
+    def _mmu_disable(self, uc) -> bool:
+        """Clear SCTLR.M (and TLB-relevant bits) to turn off ARM MMU
+        translation so execution proceeds flat (VA==PA). Idempotent: once
+        done, returns True on subsequent calls without re-touching CP15.
+        Returns False if CP15 SCTLR isn't accessible on this unicorn build."""
+        if getattr(self, "_mmu_off", False):
+            return True
+        from unicorn import arm_const
+        # CP15 SCTLR = coproc 15, crn=c1, crm=c0, opc1=0, opc2=0.
+        spec = (15, 0, 0, 1, 0, 0, 0)
+        try:
+            sctlr = uc.reg_read(arm_const.UC_ARM_REG_CP_REG, spec)
+        except Exception:  # noqa: BLE001
+            return False
+        if not (sctlr & 0x1):
+            # MMU already off — nothing to do, but a fault still happened, so
+            # this isn't our case; let the caller try other handlers.
+            return False
+        try:
+            uc.reg_write(arm_const.UC_ARM_REG_CP_REG, spec + (sctlr & ~0x1,))
+        except Exception:  # noqa: BLE001
+            return False
+        # Verify it took.
+        try:
+            if uc.reg_read(arm_const.UC_ARM_REG_CP_REG, spec) & 0x1:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        self._mmu_off = True
+        log.info("UnicornBackend: MMU flat-fallback -> disabled MMU "
+                 "(SCTLR.M cleared 0x%x -> 0x%x); running flat from here",
+                 sctlr, sctlr & ~0x1)
+        return True
+
+    # capstone ARM register name -> unicorn UC_ARM_REG_* id
+    @staticmethod
+    def _arm_reg_id(name: str):
+        from unicorn import arm_const
+        alias = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12",
+                 "r13": "sp", "r14": "lr", "r15": "pc"}
+        n = alias.get(name.lower(), name.lower())
+        return getattr(arm_const, "UC_ARM_REG_" + n.upper(), None)
+
+    def _mmu_flat_complete(self, uc, pc: int) -> bool:
+        """Emulate a single faulting ARM load/store flat (VA==PA) and advance
+        PC by 4. Returns True if it handled the instruction. Only acts when the
+        faulting address is backed in physical memory (uc.mem_read works), which
+        is the 'MMU translation missing but page present' case. Unhandled forms
+        (LDM/STM, etc.) return False so the caller aborts as before."""
+        try:
+            import capstone
+            import capstone.arm as cs_arm
+        except ImportError:
+            return False
+        cs = getattr(self, "_cs_arm", None)
+        if cs is None:
+            cs = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM)
+            cs.detail = True
+            self._cs_arm = cs
+        try:
+            ins = next(cs.disasm(bytes(uc.mem_read(pc, 4)), pc), None)
+        except Exception:  # noqa: BLE001
+            return False
+        if ins is None:
+            return False
+        # Map the instruction to (access size, is_load, signed).
+        I = cs_arm
+        sizes = {
+            I.ARM_INS_LDR: (4, True, False), I.ARM_INS_STR: (4, False, False),
+            I.ARM_INS_LDRB: (1, True, False), I.ARM_INS_STRB: (1, False, False),
+            I.ARM_INS_LDRH: (2, True, False), I.ARM_INS_STRH: (2, False, False),
+            I.ARM_INS_LDRSB: (1, True, True), I.ARM_INS_LDRSH: (2, True, True),
+        }
+        if ins.id not in sizes:
+            return False
+        size, is_load, signed = sizes[ins.id]
+        # Operands: a register operand (dest for load / src for store) and a
+        # memory operand {base, index, lshift, disp}.
+        reg_op = None
+        mem_op = None
+        for o in ins.operands:
+            if o.type == I.ARM_OP_REG and reg_op is None:
+                reg_op = o
+            elif o.type == I.ARM_OP_MEM:
+                mem_op = o
+        if reg_op is None or mem_op is None:
+            return False
+        m = mem_op.mem
+        base_id = self._arm_reg_id(cs.reg_name(m.base)) if m.base else None
+        if base_id is None:
+            return False
+        addr = uc.reg_read(base_id) & 0xFFFFFFFF
+        if m.index:
+            idx_id = self._arm_reg_id(cs.reg_name(m.index))
+            if idx_id is None:
+                return False
+            idxval = uc.reg_read(idx_id) & 0xFFFFFFFF
+            addr += (idxval << m.lshift) if m.lshift else idxval
+        addr = (addr + m.disp) & 0xFFFFFFFF
+        # Only act if the physical page is present (translation-missing case).
+        try:
+            data = bytes(uc.mem_read(addr, size))
+        except Exception:  # noqa: BLE001
+            return False  # genuinely unmapped -> real fault
+        rid = self._arm_reg_id(cs.reg_name(reg_op.reg))
+        if rid is None:
+            return False
+        if is_load:
+            val = int.from_bytes(data, "little")
+            if signed and (val & (1 << (size * 8 - 1))):
+                val -= 1 << (size * 8)
+            uc.reg_write(rid, val & 0xFFFFFFFF)
+        else:
+            val = uc.reg_read(rid) & ((1 << (size * 8)) - 1)
+            uc.mem_write(addr, val.to_bytes(size, "little"))
+        # Pre/post-indexed writeback updates the base register with `addr`
+        # (pre) — capstone exposes writeback via ins.writeback.
+        if getattr(ins, "writeback", False):
+            uc.reg_write(base_id, addr)
+        uc.reg_write(self._reg_map["pc"], pc + 4)
+        self._mmu_flat_count[pc] = self._mmu_flat_count.get(pc, 0) + 1
+        if self._mmu_flat_count[pc] <= 3:
+            log.info("UnicornBackend: MMU flat-fallback %s @0x%08x addr=0x%08x "
+                     "(x%d)", ins.mnemonic, pc, addr, self._mmu_flat_count[pc])
+        return True
 
     # ------------------------------------------------------------------
     # x86 port I/O (IN / OUT) — catch-all so the PC chipset doesn't fault

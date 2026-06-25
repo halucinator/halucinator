@@ -14,7 +14,7 @@ import os
 import sys
 import argparse
 import signal
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 # avatar2 is imported best-effort. The pluggable-backend refactor means
 # the unicorn/ghidra/renode paths don't touch avatar2 at all, and avatar2
@@ -907,6 +907,27 @@ def _qemu_backend_dispatch_loop(backend: "HalBackend") -> None:
             backend.cont()
 
 
+def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
+    """Resolve an `emulate:` peripheral name to an instance. Searches the
+    at91 module (At91SysCtrl/At91Emac/At91Dbgu), then the generic module
+    (GenericPeripheral/HaltPeripheral). Returns None if the name is unknown
+    (region falls back to plain RAM)."""
+    from halucinator.peripheral_models import at91, generic
+    cls = (getattr(at91, name, None)
+           or getattr(generic, name, None))
+    if cls is None:
+        log.warning("Unknown emulate peripheral %r; region %s left as RAM",
+                    name, memory.name)
+        return None
+    kwargs: Dict[str, Any] = {}
+    # Pull peripheral-specific kwargs from the YAML `properties` block
+    # (HalMemConfig.properties is the generic per-peripheral dict slot).
+    extra = getattr(memory, "properties", None)
+    if isinstance(extra, dict):
+        kwargs.update(extra)
+    return cls(memory.name, memory.base_addr, memory.size, **kwargs)
+
+
 def _emulate_with_unicorn_backend(
     config: Any,
     target_name: Optional[str],
@@ -940,7 +961,11 @@ def _emulate_with_unicorn_backend(
     backend: "HalBackend" = UnicornBackend(arch=arch)
 
     # Register memory regions from config, loading any firmware file bytes
-    # into the region on add.
+    # into the region on add. Regions with an `emulate:` peripheral get
+    # their hw_read/hw_write bound to the unicorn MMIO hooks (the avatar2
+    # path does this via avatar-rmemory; the in-process path wires it here).
+    auto_peripherals: List[Any] = []
+    mmio_db = os.path.join(outdir, "mmio_trace.sqlite")
     for memory in config.memories.values():
         region = MemoryRegion(
             name=memory.name,
@@ -949,8 +974,25 @@ def _emulate_with_unicorn_backend(
             permissions=memory.permissions or "rwx",
             file=memory.file,
         )
-        log.info("Adding Memory: %s Addr: 0x%08x Size: 0x%08x",
-                 memory.name, memory.base_addr, memory.size)
+        emulate_name = getattr(memory, "emulate", None)
+        if emulate_name:
+            periph = _instantiate_peripheral(emulate_name, memory, mmio_db)
+            if periph is not None:
+                region.read_hook = (
+                    lambda off, sz, _p=periph, _b=backend: _p.hw_read(
+                        off, sz, pc=_b.regs.pc))
+                region.write_hook = (
+                    lambda off, sz, val, _p=periph, _b=backend: _p.hw_write(
+                        off, sz, val, pc=_b.regs.pc))
+                auto_peripherals.append(periph)
+                if periph.__class__.__name__ == "AutoPeripheral":
+                    backend.skip_svc = True
+                    # NB: backend.auto_recover_loops stays OFF — forcing a
+                    # return out of a non-MMIO loop can land on a stale LR and
+                    # fault; the MMIO breaker + skip_svc keep firmware running.
+        log.info("Adding Memory: %s Addr: 0x%08x Size: 0x%08x%s",
+                 memory.name, memory.base_addr, memory.size,
+                 f" (emulate={emulate_name})" if emulate_name else "")
         backend.add_memory_region(region)
 
     backend.init()
@@ -1043,11 +1085,15 @@ def _in_process_dispatch_loop(backend: "HalBackend") -> None:
             backend.execute_return(ret_value)  # sets pc=lr, blocks until
                                                 # next breakpoint
         else:
-            # Not yet supported: single-step past bp then continue.
-            # For now treat as terminal.
-            log.warning("Non-intercept bp_handler return on unicorn "
-                        "not yet supported; stopping.")
-            return
+            # Observe/patch-and-continue handler (do_intercept=False): the
+            # firmware should keep executing the real instruction at this PC.
+            # Step past the breakpoint once, then continue to the next one.
+            cont_past = getattr(backend, "continue_past_breakpoint", None)
+            if cont_past is None:
+                log.warning("Non-intercept bp_handler return not supported on "
+                            "%s; stopping.", type(backend).__name__)
+                return
+            cont_past()
 
 
 def _renode_mmio_setup(
