@@ -17,6 +17,7 @@ mkdir -p /tmp/drone_pythonpath
 ln -sfn "$SCRIPT_DIR" /tmp/drone_pythonpath/project
 
 PYTHONPATH=/tmp/drone_pythonpath PYTHONUNBUFFERED=1 halucinator \
+    --emulator "${HAL_EMULATOR:-avatar2}" \
     -c drone_config.yaml \
     -c drone_addrs.yaml \
     -c drone_memory.yaml \

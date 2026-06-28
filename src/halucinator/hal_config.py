@@ -303,11 +303,17 @@ class HALMachineConfig:
         arch_info = HALUCINATOR_TARGETS[self.arch]
         if "qemu_env_var" in arch_info.keys():
             var = arch_info["qemu_env_var"]
-            if os.environ.get(var) is not None:
-                if not os.path.exists(os.environ.get(var)):
-                    log.error("Path ENV VAR $%s is invalid", var)
+            env_val = os.environ.get(var)
+            # Treat an empty value as unset and fall through to the default
+            # path. The multi_arch run harnesses pass these through as
+            # ``HALUCINATOR_QEMU_<ARCH>="${HALUCINATOR_QEMU_<ARCH>}"``, which
+            # expands to "" when the var isn't exported — that must not be
+            # mistaken for an explicit (invalid) path.
+            if env_val:
+                if not os.path.exists(env_val):
+                    log.error("Path ENV VAR $%s is invalid: %r", var, env_val)
                     sys.exit(1)
-                return os.environ.get(var)
+                return env_val
 
         if os.path.exists(arch_info["qemu_default_path"]):
             log.info("Using QEMU from default path: %s", arch_info["qemu_default_path"])
