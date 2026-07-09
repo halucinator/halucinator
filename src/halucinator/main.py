@@ -1065,6 +1065,11 @@ def _in_process_dispatch_loop(backend: "HalBackend") -> None:
         if bp_id is None:
             log.info("%s stopped at 0x%x with no handler; exiting",
                      type(backend).__name__, pc)
+            _lb = getattr(backend, "_last_blocks", None)
+            if _lb:
+                log.error("DERAIL block path (last %d blocks -> the returning fn is the last "
+                          "in-code one): %s", len(_lb),
+                          " -> ".join("0x%08x" % p for p in _lb))
             return
 
         info = intercepts.bp2handler_lut[bp_id]
