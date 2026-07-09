@@ -290,6 +290,15 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         self._recover_bad_calls = (
             _os.environ.get("HAL_RECOVER_BAD_CALLS") == "1")
         self._bad_call_recover: Dict[int, int] = {}
+        # PC-write emulation (opt-in HAL_EMULATE_PC_WRITE=1): some firmware runs
+        # downloaded native-ARM code (e.g. an M340 MAST program) whose `mov pc, Rm`
+        # returns unicorn surfaces here as a spurious exception instead of just
+        # branching. Emulate the write — set pc = Rm (the program's register, read
+        # pre-exception-entry) — and continue. Uncapped (unlike _recover_bad_calls)
+        # because a periodic scan revisits the same return sites every cycle.
+        self._emulate_pc_write = (
+            _os.environ.get("HAL_EMULATE_PC_WRITE") == "1")
+        self._pc_write_emulated = 0
         # MMU flat-fallback (opt-in HAL_MMU_FLAT_FALLBACK=1): on an ARM data/
         # prefetch abort whose faulting address IS backed in physical memory
         # (uc.mem_read succeeds — i.e. the MMU translation failed but the page
@@ -571,6 +580,63 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                     self.dump_pc_sample()
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _pc_sample)
 
+        # HAL_DET_TICK="<irq>:<chunks>" -- drive the system clock IRQ DETERMINISTICALLY from
+        # instruction count (one tick every <chunks> emu_start chunks in cont()) instead of the
+        # wall-clock timer thread. Wall-clock ticks fire at nondeterministic instruction
+        # boundaries, so run-state/scan scheduling becomes timing-fragile (any bp-handler overhead
+        # perturbs it). Tying the tick to instruction count makes scheduling reproducible
+        # regardless of handler overhead -> the run-drive stays stable and can be observed.
+        self._det_irq = None
+        self._det_period = 0
+        self._det_chunks = 0
+        _det = _os.environ.get("HAL_DET_TICK")
+        if _det:
+            try:
+                _di, _dp = _det.split(":")
+                self._det_irq = int(_di, 0)
+                self._det_period = max(1, int(_dp, 0))
+            except Exception:  # noqa: BLE001
+                self._det_irq = None
+
+        # Diagnostic: HAL_LAST_PC=1 keeps a ring of the last basic-block start PCs
+        # (low per-block overhead) so that on a UcError the code path leading INTO
+        # the fault can be dumped -- essential when the faulting transfer is a
+        # `ldr pc,[..]` / stack-return (not caught by the bl/mov-pc call tracer).
+        if _os.environ.get("HAL_LAST_PC"):
+            import collections as _c2
+            _depth = int(_os.environ.get("HAL_LAST_PC_DEPTH", "24"))
+            self._last_blocks = _c2.deque(maxlen=_depth)
+
+            def _blk_ring(uc, addr, size, ud):
+                self._last_blocks.append(addr & ~1)
+            self._uc.hook_add(unicorn.UC_HOOK_BLOCK, _blk_ring)
+
+        # Diagnostic: HAL_WATCH_RANGE="0xLO-0xHI" logs writes into [LO,HI) whose VALUE looks like a
+        # bad pointer (into the task-object region 0x2071xxxx-0x2075xxxx, or below 0x20000000 =
+        # unmapped) -- i.e. the corruption that overwrites a state-handler/vtable pointer and
+        # derails the FSM. Value-filtered to skip the flood of normal object-field writes.
+        _wr = _os.environ.get("HAL_WATCH_RANGE")
+        if _wr:
+            try:
+                _rlo, _rhi = (int(x, 0) for x in _wr.split("-"))
+                _rpc = self._reg_map.get("pc")
+
+                def _rwatch(uc, access, waddr, wsize, wval, ud):
+                    if _rlo <= waddr < _rhi:
+                        v = wval & 0xFFFFFFFF
+                        if (0x20710000 <= v < 0x20760000) or v < 0x20000000:
+                            try:
+                                _p = uc.reg_read(_rpc)
+                            except Exception:  # noqa: BLE001
+                                _p = 0
+                            log.error("HAL_WATCH_RANGE: [0x%08x]<-0x%08x (sz%d) PC=0x%08x",
+                                      waddr, v, wsize, _p & 0xFFFFFFFF)
+                self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _rwatch, begin=_rlo, end=_rhi - 1)
+                log.error("HAL_WATCH_RANGE: watching bad-ptr writes into [0x%08x,0x%08x)",
+                          _rlo, _rhi)
+            except Exception as _e:  # noqa: BLE001
+                log.error("HAL_WATCH_RANGE: bad spec %r: %s", _wr, _e)
+
         # Diagnostic: HAL_CALL_TRACE=<path> logs every bl/blx target seen
         # (call graph). For ARM only -- decodes the instruction at each PC
         # and records (caller_pc, callee_pc, lr_at_call) when a bl fires.
@@ -757,9 +823,9 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         hist = getattr(self, "_pc_hist", None)
         if not hist:
             return
-        log.error("PC sample (top %d most-executed):", top)
+        log.info("PC sample (top %d most-executed):", top)
         for pc, n in hist.most_common(top):
-            log.error("  0x%08x  x%d", pc, n)
+            log.info("  0x%08x  x%d", pc, n)
 
     def _intr_hook(self, uc, intno, user_data):
         try:
@@ -803,6 +869,31 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                         return
             except Exception:  # noqa: BLE001
                 pass
+        # Opt-in PC-write emulation (HAL_EMULATE_PC_WRITE=1): the faulting
+        # instruction is `mov{cond} pc, Rm` (LSL #0) — a native-ARM register
+        # return/indirect-branch unicorn raised here instead of executing. Read
+        # Rm (still the program's banked-out value at intr time) and branch there.
+        if (self._emulate_pc_write and self.arch_name == "arm"
+                and pc not in (-1, 0)):
+            try:
+                instr = int.from_bytes(bytes(uc.mem_read(pc, 4)), "little")
+            except Exception:  # noqa: BLE001
+                instr = 0
+            if (instr & 0x0FFFFFF0) == 0x01A0F000:   # mov{cond} pc, Rm
+                rm = instr & 0xF
+                name = ("r%d" % rm if rm <= 12
+                        else {13: "sp", 14: "lr", 15: "pc"}[rm])
+                try:
+                    target = self.read_register(name) & 0xFFFFFFFE
+                    self.write_register("pc", target)
+                    self._pc_write_emulated += 1
+                    if self._pc_write_emulated <= 8 or self._pc_write_emulated % 1000 == 0:
+                        log.info("UnicornBackend: emulated PC-write `mov pc,%s` at "
+                                 "0x%08x -> 0x%08x (#%d)", name, pc, target,
+                                 self._pc_write_emulated)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    log.info("UnicornBackend: PC-write emulate failed at 0x%08x: %s", pc, e)
         # Opt-in bad-call recovery (HAL_RECOVER_BAD_CALLS=1): on A-profile
         # ARM, an indirect call through a `_func_` hook bound to a garbage
         # (data) address faults on the first fetch — delivered here as an
@@ -1138,6 +1229,25 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                 return False
         log.error("UnicornBackend: unmapped %s at 0x%x (size %d, value 0x%x) "
                   "from pc=0x%x", kind, addr, size, value, pc)
+        if access == unicorn.UC_MEM_FETCH_UNMAPPED:
+            # Derail diagnosis: dump lr + the stack top so we can see where the bad PC came from
+            # (a corrupted return address / setjmp jmp_buf pops the garbage PC).
+            try:
+                lr_reg = self._reg_map.get("lr")
+                sp = self.read_register("sp") & 0xFFFFFFFF
+                lr = (self._uc.reg_read(lr_reg) & 0xFFFFFFFF) if lr_reg else 0
+                stk = []
+                for _o in range(0, 32, 4):
+                    try:
+                        stk.append(int.from_bytes(self._uc.mem_read(sp + _o, 4), "little"))
+                    except Exception:  # noqa: BLE001
+                        stk.append(0xFFFFFFFF)
+                lb = getattr(self, "_last_blocks", None)
+                log.error("UnicornBackend: FETCH-DERAIL lr=0x%08x sp=0x%08x stack=[%s]%s",
+                          lr, sp, " ".join("0x%08x" % w for w in stk),
+                          ("" if not lb else " lastblocks=" + " -> ".join("0x%08x" % p for p in lb)))
+            except Exception:  # noqa: BLE001
+                pass
         return False  # abort
 
     def _map_region(self, region: MemoryRegion) -> None:
@@ -1487,6 +1597,33 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             except unicorn.UcError as _uc_err:
                 if self._stopped:
                     return  # stopped by breakpoint hook — normal
+                # Diagnostic (HAL_LAST_PC): dump the block path leading into the fault.
+                _lb = getattr(self, "_last_blocks", None)
+                if _lb:
+                    log.error("HAL_LAST_PC: last %d basic blocks before fault: %s",
+                              len(_lb), " -> ".join("0x%08x" % p for p in _lb))
+                    try:
+                        _sp = self.read_register("sp") & 0xFFFFFFFF
+                        _regs = {r: self.read_register(r) & 0xFFFFFFFF
+                                 for r in ("r10", "r11", "lr")}
+                        _stk = []
+                        for _o in range(0, 24, 4):
+                            try:
+                                _stk.append(self._uc.mem_read(_sp + _o, 4))
+                            except Exception:  # noqa: BLE001
+                                _stk.append(b"\xff\xff\xff\xff")
+                        _cur = 0
+                        try:
+                            _cp = self._uc.mem_read(0x202AD2FC, 4)
+                            _cur = int.from_bytes(_cp, "little")
+                            _cur = int.from_bytes(self._uc.mem_read(_cur, 4), "little")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        log.error("HAL_LAST_PC: sp=0x%08x r10=0x%08x r11=0x%08x lr=0x%08x curTCB=0x%08x "
+                                  "stack=[%s]", _sp, _regs["r10"], _regs["r11"], _regs["lr"], _cur,
+                                  " ".join("0x%08x" % int.from_bytes(w, "little") for w in _stk))
+                    except Exception:  # noqa: BLE001
+                        pass
                 # x86 flat-segment recovery: _intr_hook decoded a far
                 # control transfer and stashed the resume EIP. Re-enter
                 # emu_start at it (read_register("pc") already returns it).
@@ -1655,6 +1792,13 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             # instruction count was reached, NOT that emulation is done.
             # Keep running unless a breakpoint/stop() set self._stopped.
             if irq_chunk and not self._stopped:
+                # Deterministic system-clock tick: every _det_period completed chunks, queue the
+                # clock IRQ (instruction-count-paced, not wall-clock). Drained at the top of the
+                # next iteration like any pending IRQ.
+                if self._det_irq is not None:
+                    self._det_chunks += 1
+                    if self._det_chunks % self._det_period == 0:
+                        self._pending_irqs.append(self._det_irq)
                 continue
             return
 
@@ -1734,6 +1878,11 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             return
         if self._uc is None:
             raise RuntimeError("Call UnicornBackend.init() first")
+        # Deterministic-tick mode: the system clock IRQ is driven from instruction count in
+        # cont(), so ignore the wall-clock timer thread's injections of that same IRQ (avoid
+        # double-ticking). Other IRQs still deliver normally.
+        if self._det_irq is not None and int(irq_num) == self._det_irq:
+            return
         # A-profile arm with a *synthesising* controller (ArmVicController,
         # the ARM mirror of X86PicController): the controller's trigger()
         # owns the queue — it appends to _pending_irqs from the timer
