@@ -42,11 +42,22 @@ else:
     width = request.Width
     if request.IsRead:
         _sock.sendall(("R %x %d\\n" % (_BASE + offset, width)).encode())
-        resp = _sock.recv(64).decode().strip()
+        resp = b""
+        while not resp.endswith(b"\\n"):
+            _chunk = _sock.recv(64)
+            if not _chunk:
+                break
+            resp += _chunk
+        resp = resp.decode().strip()
         request.Value = int(resp, 0) if resp else 0
     else:
         _sock.sendall(("W %x %d %d\\n" % (_BASE + offset, width, request.Value)).encode())
-        _sock.recv(16)
+        _ack = b""
+        while not _ack.endswith(b"\\n"):
+            _chunk = _sock.recv(16)
+            if not _chunk:
+                break
+            _ack += _chunk
 '''
 
 
