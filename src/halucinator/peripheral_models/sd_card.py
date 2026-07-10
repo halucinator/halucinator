@@ -25,10 +25,10 @@ class SDCardModel(object):
     def set_config(cls, sd_id: int, filename: Optional[str], block_size: int) -> None:
         cls.BLOCK_SIZE[sd_id] = 0x200
         if filename is not None:
-            if peripheral_server.base_dir is not None:
+            if peripheral_server.OUTPUT_DIRECTORY is not None:
                 log.info("Setting File name using output dir")
                 cls.filename[sd_id] = os.path.join(
-                    peripheral_server.base_dir, filename)
+                    peripheral_server.OUTPUT_DIRECTORY, filename)
             else:
                 log.info("No output found dir")
                 cls.filename[sd_id] = filename
@@ -36,9 +36,9 @@ class SDCardModel(object):
     @classmethod
     def get_filename(cls, sd_id: int) -> str:
         if sd_id not in cls.filename:
-            if peripheral_server.base_dir is not None:
+            if peripheral_server.OUTPUT_DIRECTORY is not None:
                 cls.filename[sd_id] = os.path.join(
-                    peripheral_server.base_dir, "sd_card_%s.bin" % str(sd_id))
+                    peripheral_server.OUTPUT_DIRECTORY, "sd_card_%s.bin" % str(sd_id))
             else:
                 cls.filename[sd_id] = "sd_card_%s.bin" % str(sd_id)
 

@@ -50,29 +50,11 @@ def test_set_config_hardcodes_block_size():
         raise XfailException from ex
 
 
-@pytest.mark.xfail(
-    raises=XfailException,
-    reason="module 'halucinator.peripheral_models.peripheral_server' has no attribute 'base_dir'",
-)
-def test_set_config_yields_attribute_error():
-    sd_id, filename, block_size = (0, "sd_card.bin", 0x100)
-    try:
-        SDCardModel.set_config(sd_id, filename, block_size)
-    except AttributeError as ex:
-        if (
-            str(ex)
-            == "module 'halucinator.peripheral_models.peripheral_server' has no attribute 'base_dir'"
-        ):
-            raise XfailException
-        else:
-            raise
-
-
 @pytest.mark.parametrize("base_dir", PERIPHERAL_SERVER_BASE_DIR_VALUES)
 def test_patched_set_config_updates_filenames_and_block_sizes(base_dir,):
     with mock.patch(
         "halucinator.peripheral_models.sd_card.peripheral_server",
-        mock.Mock(base_dir=base_dir),
+        mock.Mock(OUTPUT_DIRECTORY=base_dir),
     ):
         for qwargs in SD_CARD_CONFIG_QWARGS:
             SDCardModel.set_config(**qwargs)
@@ -93,23 +75,6 @@ def test_patched_set_config_updates_filenames_and_block_sizes(base_dir,):
         )
 
 
-@pytest.mark.xfail(
-    raises=XfailException,
-    reason="module 'halucinator.peripheral_models.peripheral_server' has no attribute 'base_dir'",
-)
-def test_get_filename_yields_attribute_error():
-    try:
-        SDCardModel.get_filename(0x0)
-    except AttributeError as ex:
-        if (
-            str(ex)
-            == "module 'halucinator.peripheral_models.peripheral_server' has no attribute 'base_dir'"
-        ):
-            raise XfailException
-        else:
-            raise
-
-
 @pytest.mark.parametrize("base_dir", PERIPHERAL_SERVER_BASE_DIR_VALUES)
 def test_patched_get_filename_for_new_cards_updates_configured_filenames(
     base_dir,
@@ -119,7 +84,7 @@ def test_patched_get_filename_for_new_cards_updates_configured_filenames(
         assert sd_id not in SDCardModel.filename
         with mock.patch(
             "halucinator.peripheral_models.sd_card.peripheral_server",
-            mock.Mock(base_dir=base_dir),
+            mock.Mock(OUTPUT_DIRECTORY=base_dir),
         ):
             filename = SDCardModel.get_filename(sd_id)
         assert os.path.dirname(filename) == (
@@ -132,11 +97,11 @@ def test_patched_get_filename_for_new_cards_updates_configured_filenames(
 
 @pytest.fixture(params=["peripheral_server_base_dir", None])
 def patched_sd_card_model_setup(reset_config, request):
-    # Patch missing module attribute peripheral_server.base_dir.
+    # Drive sd_card's output dir via peripheral_server.OUTPUT_DIRECTORY.
     peripheral_server_base_dir = request.param
     with mock.patch(
         "halucinator.peripheral_models.sd_card.peripheral_server",
-        mock.Mock(base_dir=peripheral_server_base_dir),
+        mock.Mock(OUTPUT_DIRECTORY=peripheral_server_base_dir),
     ):
         if not (
             peripheral_server_base_dir is None
