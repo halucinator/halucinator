@@ -51,7 +51,7 @@ def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
         __RX_HANDLERS__[key] = (cls, method)
         if __RX_SOCKET__ is not None:
             log.info("Subscribing to: %s", key)
-            __RX_SOCKET__.setsockopt(zmq.SUBSCRIBE, bytes(key))
+            __RX_SOCKET__.setsockopt_string(zmq.SUBSCRIBE, key)
 
     return cls
 
