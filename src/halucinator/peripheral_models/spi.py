@@ -23,16 +23,14 @@ class UARTModel(object):
     def read(self, count: int, blocking: bool = True) -> bytes:
         log.info("Reading %d bytes" % count)
         out = b""
-        if self.rx_buffer:
-            while True:
-                data_pkt = self.rx_buffer.pop()
-                l += min(len(data_pkt), count - bytes_read)
-                out += data_pkt[:l]
-                if l < len(data_pkt):
-                    leftover = data_pkt[l:]
-                    self.rx_buffer.appendleft(leftover)
-                if bytes_read == count:
-                    break
+        bytes_read = 0
+        while self.rx_buffer and bytes_read < count:
+            data_pkt = self.rx_buffer.pop()
+            l = min(len(data_pkt), count - bytes_read)
+            out += data_pkt[:l]
+            bytes_read += l
+            if l < len(data_pkt):
+                self.rx_buffer.appendleft(data_pkt[l:])
         return out
 
     def write(self, data: bytes) -> None:
@@ -40,10 +38,10 @@ class UARTModel(object):
         self.tx_buffer.append(data)
 
     def tx_empty(self) -> bool:
-        return self.tx_buffer.empty()
+        return not self.tx_buffer
 
     def rx_empty(self) -> bool:
-        return self.rx_buffer.empty()
+        return not self.rx_buffer
 
 
 # Register the pub/sub calls and methods that need mapped

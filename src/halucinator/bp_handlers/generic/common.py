@@ -119,7 +119,7 @@ class ReturnConstant(BPHandler):
         self, qemu: "HalBackend", addr: int, func_name: str, ret_value: Optional[int] = None, silent: bool = False
     ) -> HandlerFunction:  # pylint: disable=unused-argument, too-many-arguments
         self.ret_values[addr] = ret_value
-        self.silent[addr] = ret_value
+        self.silent[addr] = silent
         self.func_names[addr] = func_name
         return cast(HandlerFunction, ReturnConstant.return_constant)
 

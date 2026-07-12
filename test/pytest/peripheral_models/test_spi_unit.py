@@ -68,3 +68,23 @@ class TestUARTModel:
         model.write(b"hello")
         model.write(b"world")
         assert len(model.tx_buffer) == 2
+
+    def test_read_empty_returns_nothing(self):
+        model = UARTModel()
+        assert model.read(4) == b""
+
+    def test_read_partial_leaves_remainder(self):
+        model = UARTModel()
+        model.rx_buffer.append(b"abcdef")
+        assert model.read(4) == b"abcd"
+        # the unread tail stays buffered for the next read
+        assert model.read(2) == b"ef"
+
+    def test_tx_rx_empty(self):
+        model = UARTModel()
+        assert model.tx_empty() is True
+        assert model.rx_empty() is True
+        model.write(b"x")
+        model.rx_buffer.append(b"y")
+        assert model.tx_empty() is False
+        assert model.rx_empty() is False
