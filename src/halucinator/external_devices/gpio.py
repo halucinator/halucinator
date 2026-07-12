@@ -29,7 +29,7 @@ def rx_from_emulator(emu_rx_port: int) -> None:
     mq_socket = context.socket(zmq.SUB)
     mq_socket.connect("ipc:///tmp/Halucinator2IoServer%s" % emu_rx_port)
     #mq_socket.setsockopt(zmq.SUBSCRIBE, "GPIO.write_pin")
-    mq_socket.setsockopt(zmq.SUBSCRIBE, '')
+    mq_socket.setsockopt_string(zmq.SUBSCRIBE, '')
     #mq_socket.setsockopt(zmq.SUBSCRIBE, "GPIO.toggle_pin")
 
     print("Setup GPIO Listener")
