@@ -27,15 +27,19 @@ the same shape; they are intentionally not implemented here yet.
 from __future__ import annotations
 
 import logging
+import struct
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from halucinator import hal_log
+
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
+hlog = hal_log.getHalLogger()
 
 
 class DeliveryModel(Enum):
@@ -404,6 +408,122 @@ class ShadowExceptionDeliverer(ExceptionDeliverer):
 
 
 # ---------------------------------------------------------------------------
+# x86 / i386 (synthesised PC interrupt frame) — for in-process unicorn
+# ---------------------------------------------------------------------------
+
+_EFLAGS_IF = 1 << 9   # interrupt-enable flag
+
+
+class X86ExceptionDeliverer(ExceptionDeliverer):
+    """Synthesised x86/i386 PC interrupt entry for in-process unicorn
+    (replaces ``X86PicController.deliver``). Unicorn's x86 model does not
+    take hardware interrupts, so we build the hardware interrupt frame
+    (EIP/CS/EFLAGS on the stack) and vector to the connected clock ISR —
+    either directly or through a once-assembled VxWorks-style intEnt/intExit
+    stub.
+
+    Delivery data comes from the ``DeliveryPlan``: ``isr_addr`` (the connected
+    clock ISR, typically learned at run time via ``sysClkConnect``) plus the
+    kernel stub fields in ``extra`` (``int_ent``/``int_exit``/``stub_addr``/
+    ``isr_arg``). The assembled-stub cache lives on the backend
+    (``_x86_stub_*``), not the deliverer, so a single deliverer instance is
+    stateless across backends. ``num`` is unused (a single clock tick)."""
+
+    arch = "x86"
+
+    def deliver(self, backend: "HalBackend", num: int,
+                plan: DeliveryPlan) -> bool:
+        setattr(backend, "_last_delivered_irq", int(num))
+        isr_addr = plan.isr_addr
+        if isr_addr is None:
+            log.warning("x86_pic: tick fired but no clock ISR known yet "
+                        "(sysClkConnect not seen, no isr_addr configured) "
+                        "— dropping")
+            return False
+        eflags = backend.read_register("eflags")
+        if not (eflags & _EFLAGS_IF):
+            # Interrupts masked (cli). The firmware will re-enable; the next
+            # tick will land. Dropping a masked tick matches real edge-PIC
+            # behaviour closely enough for the clock.
+            log.debug("x86_pic: IF=0 (interrupts masked) — tick dropped")
+            return False
+
+        eip = backend.read_register("eip")
+        cs = backend.read_register("cs")
+        esp = backend.read_register("esp")
+
+        target = self._ensure_stub(backend, plan)
+        if target is None:
+            target = isr_addr
+
+        # Build the hardware interrupt frame the handler/iret expects:
+        #   [esp]   = EIP   (return address)
+        #   [esp+4] = CS
+        #   [esp+8] = EFLAGS
+        esp -= 12
+        backend.write_memory(esp, 4, eip & 0xFFFFFFFF)
+        backend.write_memory(esp + 4, 4, cs & 0xFFFFFFFF)
+        backend.write_memory(esp + 8, 4, eflags & 0xFFFFFFFF)
+        backend.write_register("esp", esp)
+        # Mask IF for the duration of the handler (the stub's cli does this on
+        # hardware; set it now so a re-entrant tick is dropped by the IF check
+        # above until the handler's iret restores it).
+        backend.write_register("eflags", eflags & ~_EFLAGS_IF)
+        backend.write_register("eip", target)
+        hlog.info("x86_pic: delivering IRQ -> stub/ISR 0x%08x "
+                  "(interrupted eip=0x%08x, frame@0x%08x)",
+                  target, eip, esp)
+        return True
+
+    @staticmethod
+    def _ensure_stub(backend: "HalBackend",
+                     plan: DeliveryPlan) -> Optional[int]:
+        """Assemble the VxWorks-style interrupt stub in guest RAM once.
+
+        Returns the stub entry EIP, or None when no kernel int_ent/int_exit
+        are configured (caller then vectors at the ISR directly with a bare
+        iret frame). The once-only cache lives on the backend."""
+        int_ent = plan.extra.get("int_ent")
+        int_exit = plan.extra.get("int_exit")
+        isr_addr = plan.isr_addr
+        stub_addr = plan.extra.get("stub_addr", 0x7000)
+        isr_arg = plan.extra.get("isr_arg", 0)
+        if int_ent is None or int_exit is None:
+            return None
+        if getattr(backend, "_x86_stub_written", False):
+            return getattr(backend, "_x86_stub_entry", None)
+        if isr_addr is None:
+            return None
+        base = stub_addr
+        code = bytearray()
+        # cli
+        code += b"\xfa"
+        # call intEnt   (rel32 from end of this instruction)
+        code += b"\xe8" + struct.pack("<i", int_ent - (base + len(code) + 5))
+        # push <isr_arg>
+        code += b"\x68" + struct.pack("<I", isr_arg & 0xFFFFFFFF)
+        # call <isr>
+        code += b"\xe8" + struct.pack("<i", isr_addr - (base + len(code) + 5))
+        # add esp, 4
+        code += b"\x83\xc4\x04"
+        # jmp intExit
+        code += b"\xe9" + struct.pack("<i", int_exit - (base + len(code) + 5))
+        if not backend.write_memory(base, 1, bytes(code)):
+            log.warning("x86_pic: could not write interrupt stub at 0x%08x; "
+                        "falling back to direct ISR vector", base)
+            # Don't retry the stub write on every tick.
+            backend._x86_stub_written = True
+            backend._x86_stub_entry = None
+            return None
+        backend._x86_stub_written = True
+        backend._x86_stub_entry = base
+        log.info("x86_pic: assembled interrupt stub @ 0x%08x "
+                 "(intEnt=0x%x isr=0x%x intExit=0x%x, %d bytes)",
+                 base, int_ent, isr_addr, int_exit, len(code))
+        return base
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -414,6 +534,7 @@ _DELIVERER_CLASSES = {
     "powerpc": ShadowExceptionDeliverer,
     "powerpc:MPC8XX": ShadowExceptionDeliverer,
     "ppc64": ShadowExceptionDeliverer,
+    "x86": X86ExceptionDeliverer,
 }
 
 
@@ -432,5 +553,6 @@ __all__ = [
     "ArmExceptionDeliverer",
     "Arm64ExceptionDeliverer",
     "ShadowExceptionDeliverer",
+    "X86ExceptionDeliverer",
     "build_exception_deliverer",
 ]

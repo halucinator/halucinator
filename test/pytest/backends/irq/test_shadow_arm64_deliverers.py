@@ -77,4 +77,4 @@ class TestFactory:
         assert build_exception_deliverer("arm64").arch == "arm64"
         assert build_exception_deliverer("arm").arch == "arm"
         assert build_exception_deliverer("cortex-m3") is None
-        assert build_exception_deliverer("x86") is None
+        assert build_exception_deliverer("x86").arch == "x86"

@@ -856,16 +856,7 @@ class QEMUBackend(ARM32HalMixin, HalBackend):
         # Override the class-level ARM32 ABI helpers with the arch-specific
         # mixin's methods. ARM32 remains the default via inheritance so the
         # class is usable without __init__ (e.g. in unit tests).
-        abi_cls = ABI_MIXINS.get(arch, ARM32HalMixin)
-        self._abi = abi_cls
-        if abi_cls is not ARM32HalMixin:
-            for method_name in ("get_arg", "set_args", "get_ret_addr",
-                                "set_ret_addr", "execute_return",
-                                "read_string"):
-                method = getattr(abi_cls, method_name, None)
-                if method is not None:
-                    setattr(self, method_name,
-                            method.__get__(self, type(self)))
+        self._bind_abi(arch)
 
     # ------------------------------------------------------------------
     # Lifecycle
