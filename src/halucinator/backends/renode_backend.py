@@ -158,16 +158,7 @@ class RenodeBackend(ARM32HalMixin, HalBackend):
         self._machine_started: bool = False
 
         # Arch-specific ABI binding (same pattern as QEMUBackend).
-        abi_cls = ABI_MIXINS.get(arch, ARM32HalMixin)
-        self._abi = abi_cls
-        if abi_cls is not ARM32HalMixin:
-            for method_name in ("get_arg", "set_args", "get_ret_addr",
-                                "set_ret_addr", "execute_return",
-                                "read_string"):
-                method = getattr(abi_cls, method_name, None)
-                if method is not None:
-                    setattr(self, method_name,
-                            method.__get__(self, type(self)))
+        self._bind_abi(arch)
 
     def set_initial_state(self, pc: Optional[int] = None,
                           sp: Optional[int] = None) -> None:
