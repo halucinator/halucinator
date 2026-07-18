@@ -27,6 +27,26 @@ class UARTPublisher(object):
     # next run. Left clear during normal operation (reads block as before).
     abort_blocking: threading.Event = threading.Event()
 
+    # ------------------------------------------------------------------
+    # Snapshot (Layer 2): the per-uart rx buffers ARE machine state — a read
+    # blocked on pending input must resume identically after restore. The
+    # abort_blocking Event is control-plane, not state, so it is excluded.
+    # ------------------------------------------------------------------
+    @classmethod
+    def save_state(cls) -> Dict[str, Any]:
+        import copy
+        return {"rx_buffers": copy.deepcopy(cls.rx_buffers)}
+
+    @classmethod
+    def restore_state(cls, state: Dict[str, Any]) -> bool:
+        """Restore rx buffers IN PLACE (clear+refill) so a caller holding a
+        reference to ``rx_buffers`` still sees the restored contents."""
+        import copy
+        saved = copy.deepcopy(state.get("rx_buffers", {}))
+        cls.rx_buffers.clear()
+        cls.rx_buffers.update(saved)
+        return True
+
     @classmethod
     @peripheral_server.tx_msg
     def write(cls, uart_id: int, chars: bytes) -> Dict[str, Any]:

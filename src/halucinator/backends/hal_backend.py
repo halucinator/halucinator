@@ -6,8 +6,67 @@ Layer 2: HalTarget (below) adds ABI-aware helpers built on top of these primitiv
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+
+log = logging.getLogger(__name__)
+
+
+def log_snapshot_mismatch(backend: "HalBackend", snap: "Snapshot",
+                          field_name: str) -> None:
+    """Log why ``restore_state`` refused a snapshot (incompatible field)."""
+    log.error("%s.restore_state: refusing snapshot — %s mismatch "
+              "(snapshot=%r, expected=%r)",
+              backend.__class__.__name__, field_name,
+              getattr(snap, field_name, None),
+              (backend.__class__.__name__ if field_name == "backend_type"
+               else backend.SNAPSHOT_VERSION))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot types (Layer 1 — see halucinator.snapshot for the coordinator)
+# ---------------------------------------------------------------------------
+
+class SnapshotError(RuntimeError):
+    """Raised by ``save_state`` when a complete snapshot cannot be captured.
+
+    Save is all-or-nothing: rather than return a half-captured ``Snapshot``
+    (which would silently corrupt the guest on restore), the backend raises
+    and the partial capture is discarded.
+    """
+
+
+@dataclass
+class Snapshot:
+    """A Layer-1 backend checkpoint.
+
+    Tagged with ``backend_type`` (the concrete backend class name) and a schema
+    ``version`` so ``restore_state`` can reject an incompatible snapshot and
+    return ``False`` instead of corrupting the guest. ``data`` is backend-
+    private (generic fallback: ``{"regs": ..., "mem": ...}``; Unicorn native:
+    a ``UcContext`` + region blobs). A snapshot may own resources, so it is a
+    context manager and exposes :meth:`release`.
+    """
+
+    backend_type: str
+    version: int
+    data: Any = None
+    _released: bool = field(default=False, repr=False)
+
+    def release(self) -> None:
+        """Free any resources this snapshot holds. Idempotent."""
+        if self._released:
+            return
+        self.data = None
+        self._released = True
+
+    def __enter__(self) -> "Snapshot":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +237,118 @@ class HalBackend(ABC):
             return list(abi.REGISTERS)
         # Fallback — conservative ARM32 set.
         return [f"r{i}" for i in range(13)] + ["sp", "lr", "pc"]
+
+    # ------------------------------------------------------------------
+    # Snapshot / restore  (Layer 1)
+    #
+    # The generic implementation below dumps every writable memory region
+    # plus the full register file and restores them via the primitive
+    # read/write methods — universal but slow. Fast backends (Unicorn)
+    # override save_state/restore_state with a native path; the coordinator
+    # in halucinator.snapshot bundles this with Layer-2 peripheral state.
+    # ------------------------------------------------------------------
+
+    SNAPSHOT_VERSION = 1
+
+    def can_snapshot(self) -> bool:
+        """Whether this backend can produce a snapshot. Always True for the
+        generic fallback; a backend with no usable path overrides to False."""
+        return True
+
+    def snapshot_is_fast(self) -> bool:
+        """Hint for the consumer: is save/restore cheap enough for an
+        inner loop? The generic register+RAM dump is not — override to True on
+        a native ms-scale path (Unicorn)."""
+        return False
+
+    def _snapshot_regions(self) -> List["MemoryRegion"]:
+        """Writable regions the generic snapshot must capture.
+
+        Skips read-only flash (never changes) AND ``emulate=``-backed MMIO
+        regions: those are forwarded to a Python peripheral model, so their
+        state is Layer 2 — reading them here would invoke the model's
+        hw_read (not real RAM) and double-capture what the peripheral
+        registry already owns."""
+        regions = getattr(self, "_regions", None) or []
+        return [r for r in regions
+                if "w" in r.permissions and not getattr(r, "emulate", None)]
+
+    def save_state(self, portable: bool = False) -> "Snapshot":
+        """Capture registers + writable RAM via the primitive read methods.
+
+        ``portable=True`` requests a snapshot made of plain python values,
+        safe to pickle and restore in a different process (what disk
+        persistence needs). The generic path here is ALWAYS portable — the
+        flag exists for backends whose fast path holds process-local native
+        handles (unicorn's context blob) and must capture differently.
+
+        Raises :class:`SnapshotError` if there is nothing to capture (no
+        writable regions) so a caller never gets an empty, useless snapshot.
+
+        Registers are captured tolerantly: a name in ``list_registers()`` that
+        a given backend's stub can't actually read (register sets vary across
+        GDB stubs / emulators) is skipped with a warning rather than aborting
+        the whole snapshot. Memory is strict — a failed region read raises,
+        because missing RAM means the snapshot is not a faithful resume point.
+        """
+        regions = self._snapshot_regions()
+        if not regions:
+            raise SnapshotError(
+                f"{self.__class__.__name__}.save_state: no writable memory "
+                f"regions to capture")
+        regs = {}
+        for name in self.list_registers():
+            try:
+                regs[name] = self.read_register(name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("%s.save_state: register %r not readable; "
+                            "skipped (%s)", self.__class__.__name__, name, exc)
+        try:
+            mem = [(r.base_addr,
+                    bytes(self.read_memory(r.base_addr, 1, r.size, raw=True)))
+                   for r in regions]
+        except Exception as exc:  # noqa: BLE001
+            raise SnapshotError(
+                f"{self.__class__.__name__}.save_state failed reading "
+                f"memory: {exc!r}") from exc
+        return Snapshot(backend_type=self.__class__.__name__,
+                        version=self.SNAPSHOT_VERSION,
+                        data={"regs": regs, "mem": mem})
+
+    def restore_state(self, snap: "Snapshot") -> bool:
+        """Restore a snapshot produced by :meth:`save_state`.
+
+        Validates ``backend_type`` and ``version`` BEFORE touching any state,
+        returning ``False`` (no mutation) on mismatch rather than corrupting
+        the guest. Returns ``True`` once registers + memory are restored, and
+        ``False`` if a memory write reports failure (a half-restore must be
+        reported, not silently swallowed — that is the whole-or-nothing
+        contract the coordinator relies on).
+        """
+        if snap.backend_type != self.__class__.__name__:
+            log_snapshot_mismatch(self, snap, "backend_type")
+            return False
+        if snap.version != self.SNAPSHOT_VERSION:
+            log_snapshot_mismatch(self, snap, "version")
+            return False
+        data = snap.data or {}
+        for name, value in data.get("regs", {}).items():
+            # Tolerant, symmetric with save_state: a register this stub won't
+            # accept a write for is skipped with a warning, not fatal.
+            try:
+                self.write_register(name, value)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("%s.restore_state: register %r not writable; "
+                            "skipped (%s)", self.__class__.__name__, name, exc)
+        for base, blob in data.get("mem", []):
+            # write_memory returns False on a rejected write (unmapped/prot);
+            # propagate it so the caller knows the machine is now inconsistent.
+            if self.write_memory(base, 1, blob, len(blob), raw=True) is False:
+                log.error("%s.restore_state: write_memory(0x%x, %d bytes) "
+                          "failed; machine is now half-restored",
+                          self.__class__.__name__, base, len(blob))
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # Convenience wrappers (implemented once, reused by all backends)
