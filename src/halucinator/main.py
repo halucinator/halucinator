@@ -290,12 +290,24 @@ def emulate_binary(
     gdb_server_port: Optional[int] = None,
     print_qemu_command: Optional[bool] = None,
     emulator: str = "avatar2",
+    snapshot_at: Optional[str] = None,
+    snapshot_out: Optional[str] = None,
+    snapshot_include_devices: bool = False,
+    restore: Optional[str] = None,
 ) -> None:  # pylint: disable=too-many-arguments,too-many-locals
     """
     Start emulation of the firmware.
 
     emulator: backend to use - "avatar2" (default), "qemu", or "unicorn".
+    snapshot_at/snapshot_out/restore: whole-machine checkpointing, in-process
+    backends only (see doc/snapshot_restore.md).
     """
+
+    if (snapshot_at or restore) and emulator != "unicorn":
+        log.error("--snapshot-at/--restore need the in-process unicorn "
+                  "backend (--emulator unicorn); %r can't snapshot yet",
+                  emulator)
+        sys.exit(-1)
 
     # Non-avatar2 backends go through the new HalBackend factory path.
     if emulator != "avatar2":
@@ -313,6 +325,10 @@ def emulate_binary(
             qemu_args=qemu_args,
             gdb_server_port=gdb_server_port,
             print_qemu_command=print_qemu_command,
+            snapshot_at=snapshot_at,
+            snapshot_out=snapshot_out,
+            snapshot_include_devices=snapshot_include_devices,
+            restore=restore,
         )
 
     # Legacy avatar2 path - unchanged behaviour.
@@ -456,6 +472,10 @@ def _emulate_with_backend(
     qemu_args: Optional[str] = None,
     gdb_server_port: Optional[int] = None,
     print_qemu_command: Optional[bool] = None,
+    snapshot_at: Optional[str] = None,
+    snapshot_out: Optional[str] = None,
+    snapshot_include_devices: bool = False,
+    restore: Optional[str] = None,
 ) -> None:
     """
     Non-avatar2 emulation entry point using the HalBackend abstraction.
@@ -486,6 +506,9 @@ def _emulate_with_backend(
     if emulator == "unicorn":
         return _emulate_with_unicorn_backend(
             config, target_name=target_name, rx_port=rx_port, tx_port=tx_port,
+            snapshot_at=snapshot_at, snapshot_out=snapshot_out,
+            snapshot_include_devices=snapshot_include_devices,
+            restore=restore,
         )
     if emulator == "renode":
         return _emulate_with_renode_backend(
@@ -950,11 +973,29 @@ def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
     return cls(memory.name, memory.base_addr, memory.size, **kwargs)
 
 
+def _resolve_snapshot_addr(spec: str, config: Any) -> int:
+    """--snapshot-at accepts a hex/decimal address or a symbol name."""
+    try:
+        return int(spec, 0)
+    except ValueError:
+        pass
+    addr = config.get_addr_for_symbol(spec)
+    if addr is None:
+        log.error("--snapshot-at: %r is neither an address nor a known "
+                  "symbol", spec)
+        sys.exit(-1)
+    return addr
+
+
 def _emulate_with_unicorn_backend(
     config: Any,
     target_name: Optional[str],
     rx_port: int,
     tx_port: int,
+    snapshot_at: Optional[str] = None,
+    snapshot_out: Optional[str] = None,
+    snapshot_include_devices: bool = False,
+    restore: Optional[str] = None,
 ) -> None:
     """
     In-process emulation via unicorn-engine. No subprocess, no GDB/QMP -
@@ -963,6 +1004,11 @@ def _emulate_with_unicorn_backend(
     Considerably faster than the QEMU paths for short-running firmware
     that doesn't need full hardware peripheral timing, but only supports
     ARM at the moment (UnicornBackend._ARCH_MAP).
+
+    snapshot_at/snapshot_out: run until PC reaches the given address or
+    symbol, write a portable whole-machine snapshot, and exit (the
+    boot-once workflow). restore: load a .halsnap before running, so
+    execution resumes from the checkpoint instead of the reset vector.
     """
     from halucinator.backends.hal_backend import MemoryRegion
     from halucinator.backends.unicorn_backend import UnicornBackend
@@ -1063,26 +1109,88 @@ def _emulate_with_unicorn_backend(
 
     signal.signal(signal.SIGINT, _sigint)
 
+    # Snapshot/restore wiring (doc/snapshot_restore.md). Restore runs after
+    # intercept registration + peripheral-server start so the restored
+    # Layer-2 state lands on the same live objects the run will use.
+    if restore:
+        from halucinator.backends.hal_backend import Snapshot as _BSnap
+        from halucinator.backends.hal_backend import SnapshotError
+        from halucinator.snapshot import (DeviceLayer, SystemSnapshot,
+                                          load_snapshot_file, system_restore)
+        try:
+            snap, _header = load_snapshot_file(restore)
+            if isinstance(snap, _BSnap):  # backend-only snapshot file
+                snap = SystemSnapshot(backend=snap, peripherals={})
+            result = system_restore(backend, snap, device_layer=DeviceLayer())
+        except SnapshotError as exc:
+            # A corrupt/incompatible/wrong-arch file: fail cleanly, don't dump
+            # a raw traceback and leak the backend + peripheral server.
+            hal_log.getHalLogger().error("--restore %s: %s", restore, exc)
+            _shutdown()
+            sys.exit(-1)
+        if not result.ok:
+            hal_log.getHalLogger().error(
+                "--restore %s failed at layer %s: %s",
+                restore, result.layer, result.message)
+            _shutdown()
+            sys.exit(-1)
+        hal_log.getHalLogger().info(
+            "Restored snapshot %s; resuming at pc=0x%08x",
+            restore, backend.regs.pc)
+
+    snapshot_addr: Optional[int] = None
+    on_snapshot = None
+    if snapshot_at:
+        snapshot_addr = _resolve_snapshot_addr(snapshot_at, config)
+        out_path = snapshot_out or os.path.join(outdir, "snapshot.halsnap")
+        backend.set_breakpoint(snapshot_addr)
+        log.info("Will snapshot to %s when PC reaches 0x%08x",
+                 out_path, snapshot_addr)
+
+        def on_snapshot(b: "HalBackend") -> None:
+            from halucinator.snapshot import (DeviceLayer, save_snapshot_file,
+                                              system_snapshot)
+            # Only poll external devices when asked — the collection window
+            # costs a full timeout on every save, wasted if there are none.
+            dl = DeviceLayer() if snapshot_include_devices else None
+            snap = system_snapshot(b, portable=True, device_layer=dl)
+            p = save_snapshot_file(snap, out_path)
+            hal_log.getHalLogger().info(
+                "Snapshot written: %s (%d bytes) at pc=0x%08x — restore "
+                "with --restore %s", p, p.stat().st_size, b.regs.pc, p)
+
     log.info("Letting Unicorn Run (direct backend)")
     try:
-        _in_process_dispatch_loop(backend)
+        _in_process_dispatch_loop(backend, snapshot_at=snapshot_addr,
+                                  on_snapshot=on_snapshot)
     except KeyboardInterrupt:
         pass
     finally:
         _shutdown()
 
 
-def _in_process_dispatch_loop(backend: "HalBackend") -> None:
+def _in_process_dispatch_loop(backend: "HalBackend",
+                              snapshot_at: Optional[int] = None,
+                              on_snapshot: Optional[Any] = None) -> None:
     """
     Drive any in-process HalBackend (UnicornBackend, GhidraBackend, and
     anything else whose cont() blocks until a breakpoint fires). Read
     PC after each halt, dispatch to the registered bp_handler, and
     resume. Exits cleanly when cont() returns at an address that has
     no registered handler - i.e. the firmware ran off the rails.
+
+    snapshot_at/on_snapshot: --snapshot-at support — when PC first halts at
+    *snapshot_at*, call on_snapshot(backend) and return (snapshot-then-exit,
+    the boot-once workflow). Checked before intercept dispatch, so a
+    snapshot address that is also an intercept snapshots instead of running
+    the handler.
     """
     backend.cont()  # blocks until first breakpoint
     while True:
         pc = backend.read_register("pc") & ~1  # mask Thumb bit on ARM
+        if snapshot_at is not None and pc == (snapshot_at & ~1):
+            on_snapshot(backend)
+            return
         bp_id = intercepts.addr2bp_lut.get(pc)
         if bp_id is None:
             # An asynchronous IRQ (e.g. a TimerModel tick injected from a
@@ -1532,6 +1640,37 @@ def main() -> None:
         help="Just print the QEMU Command",
     )
     parser.add_argument(
+        "--snapshot-at",
+        default=None,
+        metavar="ADDR|SYMBOL",
+        help="Run until PC reaches this address (0x… or decimal) or symbol, "
+        "write a portable whole-machine snapshot, and exit. In-process "
+        "backends only (--emulator unicorn). See doc/snapshot_restore.md",
+    )
+    parser.add_argument(
+        "--snapshot-out",
+        default=None,
+        metavar="PATH",
+        help="Where --snapshot-at writes the snapshot "
+        "(default: tmp/<name>/snapshot.halsnap)",
+    )
+    parser.add_argument(
+        "--snapshot-include-devices",
+        action="store_true",
+        default=False,
+        help="Also capture external zmq device state in --snapshot-at "
+        "(costs a ~1s collection window; off by default since most "
+        "snapshots have no external devices)",
+    )
+    parser.add_argument(
+        "--restore",
+        default=None,
+        metavar="PATH",
+        help="Restore a .halsnap snapshot after setup, so execution resumes "
+        "from the checkpoint instead of the reset vector. Use the same "
+        "config files the snapshot was taken with",
+    )
+    parser.add_argument(
         "-q",
         "--qemu_args",
         nargs=argparse.REMAINDER,
@@ -1578,6 +1717,10 @@ def main() -> None:
         gdb_server_port=args.gdb_server_port,
         print_qemu_command=args.print_qemu_command,
         emulator=emulator,
+        snapshot_at=args.snapshot_at,
+        snapshot_out=args.snapshot_out,
+        snapshot_include_devices=args.snapshot_include_devices,
+        restore=args.restore,
     )
 
 

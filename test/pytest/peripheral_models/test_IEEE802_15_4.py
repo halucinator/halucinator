@@ -212,11 +212,20 @@ def test_tx_frame_passes_frame_to_ioserver():
         "Peripheral.IEEE802_15_4.tx_frame", rx_frame_handler
     )
     frame = "frame".encode()
-    model_IEEE802_15_4.tx_frame("an_interface_id", frame)
-    wait_assert(
-        lambda: rx_frame_handler.assert_called_once_with(
-            ioserver, {"frame": frame}
-        )
-    )
+
+    # Re-send on each retry rather than sending once up front. A single
+    # zmq PUB/SUB send can be silently dropped if the SUB subscription has
+    # not propagated yet (the "slow joiner" problem) — and register_topic
+    # subscribes from this thread while IOServer.run() polls the socket on
+    # another, so the first send frequently loses the race. Sending inside
+    # wait_assert keeps trying until one message is delivered; we assert on
+    # the delivered content (assert_called_with checks the latest call, and
+    # every send carries identical args), so a redundant extra delivery is
+    # harmless.
+    def _send_and_check():
+        model_IEEE802_15_4.tx_frame("an_interface_id", frame)
+        rx_frame_handler.assert_called_with(ioserver, {"frame": frame})
+
+    wait_assert(_send_and_check)
     ioserver.shutdown()
     fix_server_shutdown(ioserver.rx_socket, ioserver.tx_socket, 1000)

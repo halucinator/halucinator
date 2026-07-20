@@ -590,17 +590,37 @@ class _GDBClient:
     # Memory access
     # ------------------------------------------------------------------
 
+    # GDB RSP bounds a single m/M transfer by the negotiated packet size; a
+    # too-large read/write is rejected (E22). Chunk at a conservative size so
+    # arbitrary-length transfers (e.g. snapshotting a whole RAM region) work
+    # regardless of the stub's PacketSize.
+    _MEM_CHUNK = 1024
+
     def read_memory(self, addr: int, length: int) -> bytes:
-        resp = self._cmd(f"m{addr:x},{length:x}".encode())
-        if resp.startswith(b"E"):
-            raise OSError(f"GDB read_memory error: {resp!r}")
-        return bytes.fromhex(resp.decode())
+        out = bytearray()
+        off = 0
+        while off < length:
+            n = min(self._MEM_CHUNK, length - off)
+            resp = self._cmd(f"m{addr + off:x},{n:x}".encode())
+            if resp.startswith(b"E"):
+                raise OSError(f"GDB read_memory error: {resp!r}")
+            chunk = bytes.fromhex(resp.decode())
+            if not chunk:
+                raise OSError(
+                    f"GDB read_memory short read at 0x{addr + off:x}")
+            out += chunk
+            off += len(chunk)
+        return bytes(out)
 
     def write_memory(self, addr: int, data: bytes) -> None:
-        hex_data = data.hex()
-        resp = self._cmd(f"M{addr:x},{len(data):x}:{hex_data}".encode())
-        if resp != b"OK":
-            raise OSError(f"GDB write_memory error: {resp!r}")
+        off = 0
+        while off < len(data):
+            chunk = data[off:off + self._MEM_CHUNK]
+            resp = self._cmd(
+                f"M{addr + off:x},{len(chunk):x}:{chunk.hex()}".encode())
+            if resp != b"OK":
+                raise OSError(f"GDB write_memory error: {resp!r}")
+            off += len(chunk)
 
     # ------------------------------------------------------------------
     # Execution control
@@ -796,7 +816,16 @@ class _QMPClient:
         if arguments:
             msg["arguments"] = arguments
         self._send(msg)
-        return self._recv_line()
+        # A command's reply may be preceded by asynchronous QMP events
+        # (RESUME/STOP from a preceding cont or breakpoint, an IRQ-driven
+        # event, etc.). Those are out-of-band w.r.t. the request/response and
+        # must be skipped — the reply is the first line carrying "return" or
+        # "error". (An empty dict means the socket closed; return it to avoid
+        # looping forever.)
+        while True:
+            resp = self._recv_line()
+            if not resp or "event" not in resp:
+                return resp
 
 
 # ---------------------------------------------------------------------------
