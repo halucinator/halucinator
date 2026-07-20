@@ -113,3 +113,66 @@ class LibAflQemuBackend(QEMUBackend):
                 )
         super().__init__(config=config, arch=arch, qemu_path=qemu_path,
                          **kwargs)
+        # Monotonic id of the current in-QEMU syx snapshot. QEMU keeps exactly
+        # one; taking a new snapshot supersedes the previous, so a Snapshot
+        # handle carries the generation it was minted at and restore refuses a
+        # superseded one.
+        self._syx_generation = 0
+
+    # ------------------------------------------------------------------
+    # Snapshot / restore — fast in-QEMU checkpoint via libafl syx-snapshot
+    #
+    # The generic QEMUBackend fallback reads all of guest RAM back over the
+    # GDB stub (slow). The libafl-qemu-bridge instead exposes syx-snapshot
+    # (a whole-machine RAM+device checkpoint) through the custom QMP commands
+    # `libafl-syx-snapshot` / `libafl-syx-restore`, so save/restore happen
+    # entirely inside QEMU — the fast path an iterative loop needs.
+    # ------------------------------------------------------------------
+
+    def can_snapshot(self) -> bool:
+        return True
+
+    def snapshot_is_fast(self) -> bool:
+        return True
+
+    def save_state(self, portable: bool = False) -> "Snapshot":
+        from .hal_backend import Snapshot, SnapshotError
+        if portable:
+            # A syx snapshot lives inside the QEMU process and cannot be
+            # serialized to disk. For the portable/persistent form, fall back
+            # to the generic reg+RAM capture (which IS picklable).
+            return super().save_state(portable=True)
+        resp = self._qmp.execute("libafl-syx-snapshot")
+        if resp.get("error"):
+            raise SnapshotError(
+                f"libafl-syx-snapshot QMP command failed: {resp['error']}")
+        self._syx_generation += 1
+        return Snapshot(backend_type=self.__class__.__name__,
+                        version=self.SNAPSHOT_VERSION,
+                        data={"syx": True, "generation": self._syx_generation})
+
+    def restore_state(self, snap: "Snapshot") -> bool:
+        from .hal_backend import log_snapshot_mismatch
+        data = snap.data if isinstance(snap.data, dict) else {}
+        if not data.get("syx"):
+            # A generic (portable) snapshot — restore via the base reg+RAM
+            # path, not the syx QMP command.
+            return super().restore_state(snap)
+        if snap.backend_type != self.__class__.__name__:
+            log_snapshot_mismatch(self, snap, "backend_type")
+            return False
+        if snap.version != self.SNAPSHOT_VERSION:
+            log_snapshot_mismatch(self, snap, "version")
+            return False
+        if data.get("generation") != self._syx_generation:
+            log.error("libafl-syx-restore: snapshot (generation %s) was "
+                      "superseded by a newer syx snapshot (%s); QEMU keeps "
+                      "only the latest", data.get("generation"),
+                      self._syx_generation)
+            return False
+        resp = self._qmp.execute("libafl-syx-restore")
+        if resp.get("error"):
+            log.error("libafl-syx-restore QMP command failed: %r",
+                      resp["error"])
+            return False
+        return True

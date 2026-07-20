@@ -167,13 +167,45 @@ class TestLibAflQemuBackendLive:
         backend.write_register("r5", 0xDEADBEEF)
         assert backend.read_register("r5") == 0xDEADBEEF
 
-    def test_snapshot_restore_round_trip(self, backend):
-        from backend_snapshot_helpers import (
-            assert_backend_snapshot_round_trip,
-            assert_restore_rejects_wrong_backend_type,
-        )
-        assert_backend_snapshot_round_trip(backend, _RAM_BASE)
-        assert_restore_rejects_wrong_backend_type(backend)
+    def test_syx_snapshot_restore_round_trip(self, backend):
+        """save_state() with no args uses the fast in-QEMU syx snapshot
+        (libafl-syx-snapshot/restore QMP commands), not the slow generic
+        reg+RAM-over-GDB path."""
+        assert backend.snapshot_is_fast() is True
+        backend.write_memory(_RAM_BASE + 0x40, 1, b"syx-me!!", 8, raw=True)
+        backend.write_register("r0", 0x1234)
+
+        snap = backend.save_state()          # -> libafl-syx-snapshot
+        # Opaque handle: the state lives inside QEMU, not in the Python object.
+        assert snap.data.get("syx") is True
+
+        backend.write_memory(_RAM_BASE + 0x40, 1, b"CLOBBER!", 8, raw=True)
+        backend.write_register("r0", 0)
+
+        assert backend.restore_state(snap) is True   # -> libafl-syx-restore
+        assert bytes(backend.read_memory(_RAM_BASE + 0x40, 1, 8,
+                                         raw=True)) == b"syx-me!!"
+        assert backend.read_register("r0") == 0x1234
+
+    def test_syx_snapshot_superseded_is_refused(self, backend):
+        """QEMU keeps exactly one syx snapshot; a handle to a superseded one
+        must be refused rather than silently restoring the newer state."""
+        snap_a = backend.save_state()
+        backend.save_state()                 # supersedes A inside QEMU
+        assert backend.restore_state(snap_a) is False
+
+    def test_portable_snapshot_falls_back_to_generic(self, backend):
+        """portable=True can't use the in-QEMU syx snapshot (not
+        serializable); it falls back to the generic reg+RAM capture."""
+        from backend_snapshot_helpers import _ensure_ram_region
+        _ensure_ram_region(backend, _RAM_BASE, 0x1000)
+        backend.write_memory(_RAM_BASE + 0x40, 1, b"portable", 8, raw=True)
+        snap = backend.save_state(portable=True)
+        assert "mem" in snap.data            # generic, picklable structure
+        backend.write_memory(_RAM_BASE + 0x40, 1, b"XXXXXXXX", 8, raw=True)
+        assert backend.restore_state(snap) is True
+        assert bytes(backend.read_memory(_RAM_BASE + 0x40, 1, 8,
+                                         raw=True)) == b"portable"
 
     def test_set_remove_breakpoint_does_not_crash(self, backend):
         bp = backend.set_breakpoint(_BP_ADDR)
