@@ -1506,9 +1506,13 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                           "FAULTMASK", "CONTROL")
     # VFP/NEON registers captured on FP-capable cores (guarded — a core
     # without VFP raises on the read and the reg is skipped). d0-d31 covers
-    # s0-s31 (aliased low halves); FPSCR is the status/control word.
+    # s0-s31 (aliased low halves); FPSCR is the status/control word; FPEXC
+    # carries the VFP EN bit (bit 30). FPEXC is ESSENTIAL: unicorn's
+    # context_save() does not preserve it, so without capturing/restoring it a
+    # restored A-profile machine comes back with VFP disabled and the first
+    # VFP instruction (e.g. `vpush {d8,d9}`) traps as UC_ERR_INSN_INVALID.
     _VFP_DREGS = tuple(f"UC_ARM_REG_D{i}" for i in range(32))
-    _VFP_CTRL = ("FPSCR",)
+    _VFP_CTRL = ("FPEXC", "FPSCR")
 
     def can_snapshot(self) -> bool:
         return self._uc is not None

@@ -272,3 +272,64 @@ class TestUnicornNative:
         b2 = _make_unicorn()  # same config -> same fingerprint
         assert b2.restore_state(snap) is True
         assert b2.read_memory(RAM_BASE, 1, 14, raw=True) == b"fingerprint-ok"
+
+
+# ---------------------------------------------------------------------------
+# A-profile VFP: FPEXC must survive a portable snapshot round-trip.
+# ---------------------------------------------------------------------------
+
+def _make_arm_a9_vfp():
+    """An A-profile (Cortex-A9) unicorn backend with the VFP unit enabled — the
+    configuration that exposes FPEXC. The caller must have set
+    HAL_ARM_CPU_MODEL=UC_CPU_ARM_CORTEX_A9 (a VFP-capable model) first."""
+    from unicorn import arm_const as A
+
+    from halucinator.backends.unicorn_backend import UnicornBackend
+    b = UnicornBackend(arch="arm")
+    b.add_memory_region(MemoryRegion("ram", RAM_BASE, RAM_SIZE, "rwx"))
+    b.init()
+    uc = b._uc
+    # Grant cp10/cp11 (VFP) full access via CPACR and enable the unit (FPEXC.EN).
+    uc.reg_write(A.UC_ARM_REG_CP_REG, (15, 0, 0, 1, 0, 0, 2, (0xF << 20)))
+    uc.reg_write(A.UC_ARM_REG_FPEXC, 0x40000000)  # EN = bit 30
+    return b, uc, A
+
+
+@pytestmark_uc
+class TestUnicornArmVfpFpexc:
+    """Regression for the FPEXC snapshot gap. On A-profile cores unicorn's
+    context_save() does NOT preserve FPEXC (the VFP enable/exception register),
+    so a portable snapshot must capture/restore it explicitly. Without it a
+    restored machine comes back with VFP DISABLED and the first VFP instruction
+    traps UC_ERR_INSN_INVALID — observed restoring a real Cortex-A9 VxWorks
+    image, where `vpush {d8,d9}` in the post-keygen app-init faulted."""
+
+    def test_fpexc_and_dregs_round_trip(self, monkeypatch):
+        monkeypatch.setenv("HAL_ARM_CPU_MODEL", "UC_CPU_ARM_CORTEX_A9")
+        b, uc, A = _make_arm_a9_vfp()
+        uc.reg_write(A.UC_ARM_REG_D8, 0xDEADBEEFCAFEF00D)
+        assert uc.reg_read(A.UC_ARM_REG_FPEXC) & 0x40000000  # EN set at snapshot
+        snap = b.save_state(portable=True)
+        # Simulate unicorn dropping FPEXC on a context restore + clobber d8.
+        uc.reg_write(A.UC_ARM_REG_FPEXC, 0x0)  # VFP now disabled
+        uc.reg_write(A.UC_ARM_REG_D8, 0x0)
+        assert b.restore_state(snap) is True
+        assert uc.reg_read(A.UC_ARM_REG_FPEXC) & 0x40000000, "FPEXC.EN not restored"
+        assert uc.reg_read(A.UC_ARM_REG_D8) == 0xDEADBEEFCAFEF00D
+
+    def test_vfp_instruction_executes_after_restore(self, monkeypatch):
+        """The exact production failure mode: a VFP instruction must decode and
+        execute after restore. `vpush {d8}` (0xed2d8b02) traps
+        UC_ERR_INSN_INVALID with VFP disabled; with FPEXC restored it runs."""
+        monkeypatch.setenv("HAL_ARM_CPU_MODEL", "UC_CPU_ARM_CORTEX_A9")
+        b, uc, A = _make_arm_a9_vfp()
+        code = RAM_BASE
+        uc.mem_write(code, struct.pack("<I", 0xED2D8B02))  # vpush {d8}
+        uc.reg_write(A.UC_ARM_REG_SP, RAM_BASE + 0x4000)   # writable stack
+        snap = b.save_state(portable=True)
+        uc.reg_write(A.UC_ARM_REG_FPEXC, 0x0)  # disable VFP (as a bare restore would)
+        assert b.restore_state(snap) is True
+        # Single-step the vpush; must NOT raise UcError(UC_ERR_INSN_INVALID).
+        uc.emu_start(code, code + 4, count=1)
+        # sp decremented by 8 (one 64-bit d-reg pushed) proves it ran as VFP.
+        assert uc.reg_read(A.UC_ARM_REG_SP) == RAM_BASE + 0x4000 - 8
