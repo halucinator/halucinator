@@ -1784,6 +1784,19 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         except Exception as exc:  # noqa: BLE001
             log.error("UnicornBackend.restore_state failed: %r", exc)
             return False
+        # After a restore we are logically stopped at the snapshot PC, as if we
+        # had just hit a breakpoint there. Reset the transient breakpoint
+        # bookkeeping so a following continue_past_breakpoint() arms its
+        # one-shot skip for THIS pc, not a stale address left over from the
+        # pre-restore run. Otherwise, when the snapshot sits on a breakpoint
+        # (e.g. a loop snapshotting at a marker breakpoint), the marker
+        # re-triggers immediately and the resumed run is silently skipped —
+        # a nasty source of flaky, order-dependent execution.
+        self._skip_bp_once = None
+        try:
+            self._bp_hit_addr = self.read_register("pc") & 0xFFFFFFFE
+        except Exception:  # noqa: BLE001
+            self._bp_hit_addr = None
         return True
 
     def read_memory(self, addr: int, size: int, num_words: int = 1,
