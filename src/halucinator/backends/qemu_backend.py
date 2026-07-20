@@ -816,7 +816,16 @@ class _QMPClient:
         if arguments:
             msg["arguments"] = arguments
         self._send(msg)
-        return self._recv_line()
+        # A command's reply may be preceded by asynchronous QMP events
+        # (RESUME/STOP from a preceding cont or breakpoint, an IRQ-driven
+        # event, etc.). Those are out-of-band w.r.t. the request/response and
+        # must be skipped — the reply is the first line carrying "return" or
+        # "error". (An empty dict means the socket closed; return it to avoid
+        # looping forever.)
+        while True:
+            resp = self._recv_line()
+            if not resp or "event" not in resp:
+                return resp
 
 
 # ---------------------------------------------------------------------------

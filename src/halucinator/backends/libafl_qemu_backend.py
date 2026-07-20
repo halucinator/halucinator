@@ -176,3 +176,49 @@ class LibAflQemuBackend(QEMUBackend):
                       resp["error"])
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # Edge coverage — native libafl-qemu AFL-style edge instrumentation
+    #
+    # libafl-qemu compiles the edge-coverage TCG hooks and a 64 KB AFL
+    # hitcount map into the binary, but nothing registers the hook unless
+    # the embedded Rust harness does. The bridge's `libafl-cov-open` /
+    # `libafl-cov-result` QMP commands register it from C and fold the map
+    # diff host-side, so a coverage-guided loop over GDB+QMP gets native
+    # instrumentation speed without shipping the 64 KB map each iteration.
+    #
+    # The coverage map is host-side (not guest RAM / vmstate), so a syx
+    # restore does not touch it — the caller resets it via coverage_open().
+    # ------------------------------------------------------------------
+
+    def coverage_available(self) -> bool:
+        return True
+
+    def coverage_open(self) -> bool:
+        """Register the edge-coverage hook and zero the coverage maps.
+
+        Idempotent enable (the hook is registered once, which tb_flushes so
+        already-translated blocks re-translate with instrumentation) plus a
+        reset of the current and cumulative maps. Call once up front. Returns False if the command errored.
+        """
+        resp = self._qmp.execute("libafl-cov-open")
+        if resp.get("error"):
+            log.error("libafl-cov-open QMP command failed: %r", resp["error"])
+            return False
+        return True
+
+    def coverage_result(self) -> Optional[Dict[str, int]]:
+        """Fold the last run's edges into the cumulative set and reset the
+        current map for the next run.
+
+        Returns ``{"new_edges": N, "total_edges": M}`` where *new_edges* is how
+        many edges the last run covered that no prior run had, and *total_edges*
+        is the cumulative distinct-edge count. Returns None on error.
+        """
+        resp = self._qmp.execute("libafl-cov-result")
+        if resp.get("error"):
+            log.error("libafl-cov-result QMP command failed: %r", resp["error"])
+            return None
+        ret = resp.get("return", {})
+        return {"new_edges": int(ret.get("new-edges", 0)),
+                "total_edges": int(ret.get("total-edges", 0))}
