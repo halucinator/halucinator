@@ -466,6 +466,18 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                 log.debug(
                     "UnicornBackend: PPB auto-map skipped (%s)", exc,
                 )
+            # SCB->ICSR (0xE000ED04): a write with PENDSVSET (bit28) requests a
+            # PendSV — the RTOS context switch. Nothing else models the NVIC, so
+            # watch that write and queue PendSV (exception 14, as irq -2).
+            self._pendsv_pending = False
+
+            def _icsr_write(uc, access, addr, size, value, ud):  # noqa: ANN001
+                if value & (1 << 28):
+                    self._pendsv_pending = True
+                if value & (1 << 27):            # PENDSVCLR
+                    self._pendsv_pending = False
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icsr_write,
+                              begin=0xE000ED04, end=0xE000ED07)
 
         # Global hook to detect breakpoint hits and stop execution
         self._uc.hook_add(
@@ -2367,19 +2379,43 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                         "unmapped; no handler installed", irq_num, isr_slot)
             return
 
-        # Push the 8-word exception frame.
-        regs = {name: self.read_register(name) for name in
-                ("r0", "r1", "r2", "r3", "r12", "lr", "pc", "cpsr")}
-        sp = self.read_register("sp") - 32
-        frame = (regs["r0"], regs["r1"], regs["r2"], regs["r3"],
-                 regs["r12"], regs["lr"], regs["pc"], regs["cpsr"])
+        # Take the exception the way ARMv7-M hardware does — PSP-aware, so a
+        # preemptive RTOS (mbed RTX etc.) can context-switch. Push the 8-word
+        # frame onto the ACTIVE stack (PSP when in a thread with CONTROL.SPSEL,
+        # else MSP), set LR to the matching EXC_RETURN (…F1 handler/MSP,
+        # …F9 thread/MSP, …FD thread/PSP), then enter handler mode (IPSR = the
+        # exception number) so the handler runs on MSP. If the active SP isn't
+        # writable (early boot / a mid-switch window), real hardware wouldn't
+        # take the interrupt either — drop this delivery rather than crash.
         import struct
-        self._uc.mem_write(sp, struct.pack("<8I", *frame))
-        self.write_register("sp", sp)
-        self.write_register("lr", self._EXC_RETURN_THREAD_MSP)
+        from unicorn import arm_const as _A
+        exc_num = (16 + irq_num) & 0x1FF
+        ipsr = self._uc.reg_read(_A.UC_ARM_REG_IPSR) & 0x1FF
+        control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        in_thread = ipsr == 0
+        use_psp = in_thread and bool(control & 2)          # SPSEL
+        active = _A.UC_ARM_REG_PSP if use_psp else _A.UC_ARM_REG_MSP
+        xpsr = self._uc.reg_read(_A.UC_ARM_REG_XPSR)
+        frame = struct.pack("<8I",
+                            self.read_register("r0"), self.read_register("r1"),
+                            self.read_register("r2"), self.read_register("r3"),
+                            self.read_register("r12"), self.read_register("lr"),
+                            self.read_register("pc"), xpsr)
+        sp = self._uc.reg_read(active) - 32     # RTOS/thread stacks are 8-aligned
+        try:
+            self._uc.mem_write(sp, frame)
+        except Exception:  # noqa: BLE001 — unmapped/invalid SP: skip this tick
+            log.debug("inject_irq(%d): SP 0x%x not writable, dropping delivery",
+                      irq_num, sp)
+            return
+        self._uc.reg_write(active, sp)
+        exc_ret = (0xFFFFFFF1 if not in_thread
+                   else 0xFFFFFFFD if use_psp else 0xFFFFFFF9)
+        self.write_register("lr", exc_ret)
+        self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
-        log.info("inject_irq(%d): entering ISR @ 0x%x (vector 0x%x)",
-                 irq_num, isr_addr, isr_slot)
+        log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
+                 irq_num, exc_num, isr_addr, exc_ret)
 
     def set_vtor(self, vtor: int) -> None:
         """Remember the vector-table base so inject_irq can find ISRs."""
@@ -2487,18 +2523,24 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                                            self._resolve_delivery_plan(_legacy))
 
     def _maybe_handle_exc_return(self, addr: int) -> bool:
-        """Called from the invalid-fetch hook. If the fetch address looks
-        like an EXC_RETURN magic value, pop the exception frame and
-        restore pre-interrupt state. Returns True when handled."""
+        """Called from the invalid-fetch hook. If the fetch address is an
+        EXC_RETURN magic value, pop the exception frame from the stack the
+        EXC_RETURN selects (MSP or PSP), restore thread/handler mode + SPSEL,
+        and resume. PSP-aware so an RTOS context switch (PendSV returning via
+        …FD to the switched-in thread's PSP) lands on the new thread."""
         if self.arch_name != "cortex-m3":
             return False
         if (addr & self._EXC_RETURN_MASK) != self._EXC_RETURN_MAGIC:
             return False
         import struct
-        sp = self.read_register("sp")
+        from unicorn import arm_const as _A
+        return_psp = bool(addr & 0x4)          # EXC_RETURN bit2: return stack
+        return_thread = bool(addr & 0x8)       # bit3: return mode
+        active = _A.UC_ARM_REG_PSP if return_psp else _A.UC_ARM_REG_MSP
+        sp = self._uc.reg_read(active)
         try:
             frame = struct.unpack("<8I", bytes(self._uc.mem_read(sp, 32)))
-        except Exception:
+        except Exception:                      # noqa: BLE001
             return False
         self.write_register("r0", frame[0])
         self.write_register("r1", frame[1])
@@ -2506,10 +2548,20 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         self.write_register("r3", frame[3])
         self.write_register("r12", frame[4])
         self.write_register("lr", frame[5])
+        self._uc.reg_write(active, sp + 32)
+        self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
+        if return_thread:
+            self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
+            control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+            control = (control | 2) if return_psp else (control & ~2)
+            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
         self.write_register("pc", frame[6])
-        self.write_register("cpsr", frame[7])
-        self.write_register("sp", sp + 32)
-        log.info("exc_return: popped frame, resuming at 0x%x", frame[6])
+        log.info("exc_return %#x: popped from %s, resuming at 0x%x",
+                 addr, "PSP" if return_psp else "MSP", frame[6])
+        # A PendSV requested from the handler we're leaving tail-chains here.
+        if return_thread and getattr(self, "_pendsv_pending", False):
+            self._pendsv_pending = False
+            self._pending_irqs.append(-2)      # -2 -> exception 14 (PendSV)
         # Unicorn needs to restart from the restored PC; stop the current
         # emu_start so our dispatch loop re-issues cont() at the new PC.
         self._uc.emu_stop()
