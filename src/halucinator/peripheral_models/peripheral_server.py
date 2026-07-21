@@ -19,6 +19,10 @@ log = logging.getLogger(__name__)
 # pylint: disable=global-statement
 
 __RX_HANDLERS__ = {}
+# Every class decorated with @peripheral_model, in registration order. The
+# snapshot layer (halucinator.snapshot.peripheral_registry) enumerates these
+# to capture/restore each model's host-side mutable state alongside the guest.
+__PERIPHERAL_MODELS__ = []
 __RX_CONTEXT__ = zmq.Context()
 __TX_CONTEXT__ = zmq.Context()
 __STOP_SERVER = False
@@ -42,6 +46,8 @@ def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
     """
     Decorator which registers classes as peripheral models
     """
+    if cls not in __PERIPHERAL_MODELS__:
+        __PERIPHERAL_MODELS__.append(cls)
     methods = [
         getattr(cls, x) for x in dir(cls) if hasattr(getattr(cls, x), "is_rx_handler")
     ]
@@ -49,9 +55,15 @@ def peripheral_model(cls: Type[Publisher]) -> Type[Publisher]:
         key = f"Peripheral.{cls.__name__}.{method.__name__}"
         log.info("Adding method: %s", key)
         __RX_HANDLERS__[key] = (cls, method)
-        if __RX_SOCKET__ is not None:
-            log.info("Subscribing to: %s", key)
-            __RX_SOCKET__.setsockopt(zmq.SUBSCRIBE, bytes(key))
+        # Deliberately do NOT touch __RX_SOCKET__ here. This decorator can run
+        # on a different thread than run_server, which owns and is concurrently
+        # polling/recv'ing that SUB socket — zmq sockets are not thread-safe,
+        # so a cross-thread setsockopt races the poll. It is also unnecessary:
+        # run_server subscribes to b"" (ALL topics), so a model registered
+        # after start() is already covered. What matters here is the
+        # __RX_HANDLERS__ entry, which run_server consults to dispatch. (Topics
+        # registered before start() are subscribed by start() itself, on the
+        # caller thread, before run_server begins.)
 
     return cls
 

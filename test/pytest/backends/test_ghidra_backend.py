@@ -163,3 +163,36 @@ def test_live_thumb_step(tmp_path):
         assert b.read_register("pc") == 0x08000004
     finally:
         b.shutdown()
+
+
+@pytest.mark.skipif(not _HAVE_PYGHIDRA, reason="pyghidra not installed")
+def test_live_snapshot_restore(tmp_path):
+    """The Ghidra p-code backend uses the generic reg+RAM snapshot fallback;
+    verify a full save -> clobber -> restore round-trip on the real emulator."""
+    from halucinator.backends.ghidra_backend import GhidraBackend
+    from halucinator.backends.hal_backend import MemoryRegion
+
+    code = bytes([0x42, 0x20, 0x10, 0x21, 0xfe, 0xe7])  # movs r0,#0x42; ...
+    fw = tmp_path / "fw.bin"
+    fw.write_bytes(code + b"\x00" * 1024)
+    b = GhidraBackend(arch="cortex-m3")
+    b.add_memory_region(MemoryRegion(
+        name="flash", base_addr=0x08000000, size=0x1000, file=str(fw)))
+    b.add_memory_region(MemoryRegion(
+        name="ram", base_addr=0x20000000, size=0x1000, permissions="rw"))
+    b.init()
+    try:
+        b.write_memory(0x20000040, 1, b"snap-me!", 8, raw=True)
+        b.write_register("r0", 0x1234)
+        snap = b.save_state()
+        assert snap.data["mem"]
+        assert snap.data["regs"].get("r0") == 0x1234
+
+        b.write_memory(0x20000040, 1, b"CLOBBER!", 8, raw=True)
+        b.write_register("r0", 0)
+
+        assert b.restore_state(snap) is True
+        assert bytes(b.read_memory(0x20000040, 1, 8, raw=True)) == b"snap-me!"
+        assert b.read_register("r0") == 0x1234
+    finally:
+        b.shutdown()

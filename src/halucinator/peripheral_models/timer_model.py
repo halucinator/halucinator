@@ -33,6 +33,12 @@ class TimerModel(object):
         if name in cls.active_timers:
             (stop_event, t) = cls.active_timers[name]
             stop_event.set()
+            # Drop the entry so a later start_timer(name) can spawn a FRESH
+            # thread. Without this the stopped (dead) entry lingers and the
+            # `if name not in active_timers` guard in start_timer turns every
+            # re-arm into a no-op — e.g. GRBL's step timer never restarts for
+            # a second move. The signalled thread exits on its own stop_event.
+            del cls.active_timers[name]
 
     @classmethod
     def clear_timer(cls, irq_name: str) -> None:
@@ -43,6 +49,49 @@ class TimerModel(object):
     def shutdown(cls) -> None:
         for key, (stop_event, t) in list(cls.active_timers.items()):
             stop_event.set()
+
+    # -- snapshot (see doc/snapshot_restore.md) ------------------------
+    # active_timers holds live Event/Thread pairs — process-local plumbing
+    # the generic deep-copy can't (and shouldn't) capture. The machine
+    # state of a timer is its parameters; the thread is reconstructable.
+
+    @classmethod
+    def save_state(cls) -> Dict[str, dict]:
+        timers = {}
+        for name, (stop_event, t) in cls.active_timers.items():
+            timers[name] = {
+                "irq_num": t.irq_num,
+                "rate": t.rate,
+                "delay": t.delay,
+                "stopped": stop_event.is_set() or not t.is_alive(),
+            }
+        return {"timers": timers}
+
+    @classmethod
+    def restore_state(cls, state: Dict[str, dict]) -> bool:
+        """Stop every live timer, then relaunch the saved set. Tick phase is
+        not preserved — a restored periodic timer starts a fresh period,
+        which is indistinguishable to the guest.
+
+        Old timer threads are JOINED (not just signalled) before relaunching,
+        so a stale tick from a pre-restore timer can't fire an IRQ after
+        restore has reported success and the guest resumes."""
+        old = list(cls.active_timers.values())
+        for stop_event, _t in old:
+            stop_event.set()
+        # Event.set() wakes a thread parked in stopped.wait(rate) immediately;
+        # join with a bounded timeout so a wedged tick callback can't hang
+        # restore forever (the thread is a daemon and will not outlive us).
+        for _stop_event, t in old:
+            if t.is_alive():
+                t.join(timeout=2.0)
+        cls.active_timers.clear()
+        for name, cfg in state.get("timers", {}).items():
+            if cfg.get("stopped"):
+                continue
+            cls.start_timer(name, cfg["irq_num"], cfg["rate"],
+                            cfg.get("delay", 0))
+        return True
 
 
 class TimerIRQ(Thread):

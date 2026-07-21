@@ -427,6 +427,7 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         if self.arch_name == "arm":
             import os as _os
             model_name = _os.environ.get("HAL_ARM_CPU_MODEL", "UC_CPU_ARM_926")
+            self._cpu_model_name = model_name  # recorded in snapshot fingerprint
             model = getattr(arm_const, model_name, None)
             if model is not None:
                 try:
@@ -465,6 +466,18 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                 log.debug(
                     "UnicornBackend: PPB auto-map skipped (%s)", exc,
                 )
+            # SCB->ICSR (0xE000ED04): a write with PENDSVSET (bit28) requests a
+            # PendSV — the RTOS context switch. Nothing else models the NVIC, so
+            # watch that write and queue PendSV (exception 14, as irq -2).
+            self._pendsv_pending = False
+
+            def _icsr_write(uc, access, addr, size, value, ud):  # noqa: ANN001
+                if value & (1 << 28):
+                    self._pendsv_pending = True
+                if value & (1 << 27):            # PENDSVCLR
+                    self._pendsv_pending = False
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icsr_write,
+                              begin=0xE000ED04, end=0xE000ED07)
 
         # Global hook to detect breakpoint hits and stop execution
         self._uc.hook_add(
@@ -1448,6 +1461,360 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         if self._uc is not None:
             self._map_region(region)
 
+    # ------------------------------------------------------------------
+    # Snapshot / restore  (Layer 1, native fast path)
+    #
+    # unicorn's context_save() captures the full CPU context and mem_regions()
+    # + mem_read give a bulk copy of every mapped page, so save/restore is a
+    # handful of milliseconds — the generalized form of diagnostics/
+    # snapshot_lab.py. This is the fast checkpoint an iterative loop wants.
+    #
+    # PORTABLE form (save_state(portable=True)): a raw uc context blob embeds
+    # process-local pointers — restoring one in a different process SIGBUSes
+    # (verified: same unicorn build, same CPU model, byte-identical config).
+    # The portable form therefore enumerates architectural state explicitly
+    # (general regs + A-profile banked regs + curated CP15 set, or M-profile
+    # system regs) into plain python values, which is what disk persistence
+    # (snapshot/persist.py) requires. Slightly slower; still ~ms.
+    # ------------------------------------------------------------------
+
+    # A-profile banked modes visited by the portable capture/restore dance.
+    # "sys" (0x1f) shares sp/lr with usr and has no SPSR; fiq additionally
+    # banks r8-r12.
+    _ARM_BANKED_MODES = (
+        (0x11, "fiq"), (0x12, "irq"), (0x13, "svc"),
+        (0x17, "abt"), (0x1b, "und"), (0x1f, "sys"),
+    )
+    # Curated CP15 system registers, as (crn, crm, opc1, opc2) for
+    # UC_ARM_REG_CP_REG. Covers the ARMv5/ARM926 MMU set PLUS the v6/v7 regs
+    # that later A-profile CPU models (cortex-a*) implement — VBAR (relocated
+    # vector base), TTBR1 + the LPAE memory-attribute regs, and the thread-ID
+    # (TPIDR*) regs an RTOS uses. Reads/writes are per-register guarded, so a
+    # model that doesn't implement one simply skips it (absent from the dict).
+    # Restore order matters: SCTLR (the MMU enable) is written LAST so
+    # translation state (TTBR/DACR/attrs) is in place before the M bit flips.
+    _CP15_PORTABLE = (
+        ("ttbr0",      (2, 0, 0, 0)),
+        ("ttbr1",      (2, 0, 0, 1)),   # v6+
+        ("ttbcr",      (2, 0, 0, 2)),
+        ("dacr",       (3, 0, 0, 0)),
+        ("dfsr",       (5, 0, 0, 0)),
+        ("ifsr",       (5, 0, 0, 1)),
+        ("dfar",       (6, 0, 0, 0)),
+        ("ifar",       (6, 0, 0, 2)),   # v6+
+        ("prrr_mair0", (10, 2, 0, 0)),  # PRRR / MAIR0 (v6+/v7)
+        ("nmrr_mair1", (10, 2, 0, 1)),  # NMRR / MAIR1 (v6+/v7)
+        ("vbar",       (12, 0, 0, 0)),  # v7: relocated exception vector base
+        ("fcseidr",    (13, 0, 0, 0)),
+        ("contextidr", (13, 0, 0, 1)),
+        ("tpidrurw",   (13, 0, 0, 2)),  # v6+ user RW thread-id
+        ("tpidruro",   (13, 0, 0, 3)),  # v6+ user RO thread-id
+        ("tpidrprw",   (13, 0, 0, 4)),  # v6+ priv thread-id
+        ("cpacr",      (1, 0, 0, 2)),   # coprocessor (VFP) access control
+        ("sctlr",      (1, 0, 0, 0)),
+    )
+    # M-profile system registers (arm_const name suffixes).
+    _M_PROFILE_SYSREGS = ("MSP", "PSP", "PRIMASK", "BASEPRI",
+                          "FAULTMASK", "CONTROL")
+    # VFP/NEON registers captured on FP-capable cores (guarded — a core
+    # without VFP raises on the read and the reg is skipped). d0-d31 covers
+    # s0-s31 (aliased low halves); FPSCR is the status/control word; FPEXC
+    # carries the VFP EN bit (bit 30). FPEXC is ESSENTIAL: unicorn's
+    # context_save() does not preserve it, so without capturing/restoring it a
+    # restored A-profile machine comes back with VFP disabled and the first
+    # VFP instruction (e.g. `vpush {d8,d9}`) traps as UC_ERR_INSN_INVALID.
+    _VFP_DREGS = tuple(f"UC_ARM_REG_D{i}" for i in range(32))
+    _VFP_CTRL = ("FPEXC", "FPSCR")
+
+    def can_snapshot(self) -> bool:
+        return self._uc is not None
+
+    def snapshot_is_fast(self) -> bool:
+        return True
+
+    def _is_arm_profile_a(self) -> bool:
+        arch_str, mode_str, *_ = _ARCH_MAP.get(
+            self.arch_name, ("arm", "thumb", True, False, 4))
+        return arch_str == "arm" and mode_str != "thumb"
+
+    def _is_arm_profile_m(self) -> bool:
+        arch_str, mode_str, *_ = _ARCH_MAP.get(
+            self.arch_name, ("arm", "thumb", True, False, 4))
+        return arch_str == "arm" and mode_str == "thumb"
+
+    def _capture_banked_regs(self) -> Dict[str, Dict[str, int]]:
+        """A-profile: visit each banked mode via raw CPSR writes and read its
+        sp/lr/spsr (+ r8-r12 for fiq). CPSR is always restored, even if a
+        mode read fails."""
+        uc = self._uc
+        cpsr_id = arm_const.UC_ARM_REG_CPSR
+        orig = uc.reg_read(cpsr_id)
+        banked: Dict[str, Dict[str, int]] = {}
+        try:
+            for mode_bits, tag in self._ARM_BANKED_MODES:
+                uc.reg_write(cpsr_id, (orig & ~0x1F) | mode_bits)
+                entry = {"sp": uc.reg_read(arm_const.UC_ARM_REG_SP),
+                         "lr": uc.reg_read(arm_const.UC_ARM_REG_LR)}
+                if tag != "sys":  # sys/usr have no SPSR
+                    entry["spsr"] = uc.reg_read(arm_const.UC_ARM_REG_SPSR)
+                if tag == "fiq":
+                    for i in range(8, 13):
+                        entry[f"r{i}"] = uc.reg_read(
+                            getattr(arm_const, f"UC_ARM_REG_R{i}"))
+                banked[tag] = entry
+        finally:
+            uc.reg_write(cpsr_id, orig)
+        return banked
+
+    def _restore_banked_regs(self, banked: Dict[str, Dict[str, int]]) -> None:
+        """Inverse of _capture_banked_regs. Caller restores the final CPSR."""
+        uc = self._uc
+        cpsr_id = arm_const.UC_ARM_REG_CPSR
+        orig = uc.reg_read(cpsr_id)
+        try:
+            for mode_bits, tag in self._ARM_BANKED_MODES:
+                entry = banked.get(tag)
+                if not entry:
+                    continue
+                uc.reg_write(cpsr_id, (orig & ~0x1F) | mode_bits)
+                uc.reg_write(arm_const.UC_ARM_REG_SP, entry["sp"])
+                uc.reg_write(arm_const.UC_ARM_REG_LR, entry["lr"])
+                if "spsr" in entry:
+                    uc.reg_write(arm_const.UC_ARM_REG_SPSR, entry["spsr"])
+                for i in range(8, 13):
+                    if f"r{i}" in entry:
+                        uc.reg_write(getattr(arm_const, f"UC_ARM_REG_R{i}"),
+                                     entry[f"r{i}"])
+        finally:
+            uc.reg_write(cpsr_id, orig)
+
+    def _capture_cp15(self) -> Dict[str, int]:
+        """Read the curated CP15 set. Registers the CPU model doesn't
+        implement are skipped (absent from the dict, skipped on restore)."""
+        out: Dict[str, int] = {}
+        for name, (crn, crm, opc1, opc2) in self._CP15_PORTABLE:
+            try:
+                out[name] = self._uc.reg_read(
+                    arm_const.UC_ARM_REG_CP_REG,
+                    (15, 0, 0, crn, crm, opc1, opc2))
+            except Exception:  # noqa: BLE001 — not implemented on this model
+                continue
+        return out
+
+    def _restore_cp15(self, cp15: Dict[str, int]) -> None:
+        # _CP15_PORTABLE order is the restore order (SCTLR last).
+        for name, (crn, crm, opc1, opc2) in self._CP15_PORTABLE:
+            if name not in cp15:
+                continue
+            try:
+                self._uc.reg_write(
+                    arm_const.UC_ARM_REG_CP_REG,
+                    (15, 0, 0, crn, crm, opc1, opc2, cp15[name]))
+            except Exception:  # noqa: BLE001
+                log.warning("restore_state: CP15 %s not writable on this "
+                            "CPU model; skipped", name)
+
+    def _capture_vfp(self) -> Dict[str, int]:
+        """Read the VFP/NEON register file. On a core without VFP the reads
+        raise and the register is skipped (absent from the dict), so this is
+        a no-op on ARM926 and captures the full FP state on cortex-a*/FPU-M."""
+        out: Dict[str, int] = {}
+        for i, dname in enumerate(self._VFP_DREGS):
+            rid = getattr(arm_const, dname, None)
+            if rid is None:
+                continue
+            try:
+                out[f"d{i}"] = self._uc.reg_read(rid)
+            except Exception:  # noqa: BLE001 — no VFP on this model
+                continue
+        for suffix in self._VFP_CTRL:
+            rid = getattr(arm_const, f"UC_ARM_REG_{suffix}", None)
+            if rid is None:
+                continue
+            try:
+                out[suffix.lower()] = self._uc.reg_read(rid)
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _restore_vfp(self, vfp: Dict[str, int]) -> None:
+        for i, dname in enumerate(self._VFP_DREGS):
+            key = f"d{i}"
+            if key not in vfp:
+                continue
+            rid = getattr(arm_const, dname, None)
+            if rid is None:
+                continue
+            try:
+                self._uc.reg_write(rid, vfp[key])
+            except Exception:  # noqa: BLE001
+                log.warning("restore_state: VFP %s not writable; skipped", key)
+        for suffix in self._VFP_CTRL:
+            if suffix.lower() not in vfp:
+                continue
+            rid = getattr(arm_const, f"UC_ARM_REG_{suffix}", None)
+            if rid is not None:
+                try:
+                    self._uc.reg_write(rid, vfp[suffix.lower()])
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _capture_portable_regs(self) -> Dict[str, Any]:
+        """Architectural state as plain python values — safe to pickle and
+        restore in a different process (unlike a raw uc context blob)."""
+        uc = self._uc
+        state: Dict[str, Any] = {
+            "regs": {name: uc.reg_read(rid)
+                     for name, rid in self._reg_map.items()},
+        }
+        if self._is_arm_profile_a():
+            state["banked"] = self._capture_banked_regs()
+            state["cp15"] = self._capture_cp15()
+            state["vfp"] = self._capture_vfp()
+        elif self._is_arm_profile_m():
+            sysregs: Dict[str, int] = {}
+            for suffix in self._M_PROFILE_SYSREGS:
+                rid = getattr(arm_const, f"UC_ARM_REG_{suffix}", None)
+                if rid is None:
+                    continue
+                try:
+                    sysregs[suffix.lower()] = uc.reg_read(rid)
+                except Exception:  # noqa: BLE001
+                    continue
+            state["m_sysregs"] = sysregs
+            state["vfp"] = self._capture_vfp()  # FPU-equipped M-profile
+        else:
+            # Non-ARM: the arch reg map covers the visible register file but
+            # NOT hidden system state (x86 segment descriptors/MSRs, MIPS
+            # cp0, ...). Good enough for flat-model targets; be honest here.
+            log.warning("save_state(portable=True) on %s captures the "
+                        "general register file only — hidden system state "
+                        "is not yet enumerated for this arch", self.arch_name)
+        return state
+
+    def _restore_portable_regs(self, state: Dict[str, Any]) -> None:
+        uc = self._uc
+        regs: Dict[str, int] = state.get("regs", {})
+        # System state first (CP15 translation regs before SCTLR, banked
+        # modes before the final CPSR), then the general file with CPSR
+        # first (mode/T bit context) and PC last.
+        if "cp15" in state:
+            self._restore_cp15(state["cp15"])
+        if "vfp" in state:
+            self._restore_vfp(state["vfp"])
+        if "banked" in state:
+            self._restore_banked_regs(state["banked"])
+        for suffix_l, value in state.get("m_sysregs", {}).items():
+            rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
+            if rid is None:
+                continue
+            try:
+                uc.reg_write(rid, value)
+            except Exception:  # noqa: BLE001
+                log.warning("restore_state: m-profile %s not writable; "
+                            "skipped", suffix_l)
+        ordered = sorted(regs,
+                         key=lambda n: (0 if n == "cpsr" else
+                                        2 if n == "pc" else 1))
+        for name in ordered:
+            try:
+                uc.reg_write(self._reg_map[name], regs[name])
+            except Exception:  # noqa: BLE001 — read-only alias on this model
+                log.debug("restore_state: register %s not writable; skipped",
+                          name)
+
+    def _machine_fingerprint(self) -> Dict[str, Any]:
+        """Identifies the machine config a snapshot was taken on: arch, CPU
+        model, and the mapped memory layout. A portable snapshot restored onto
+        a DIFFERENT config (wrong --emulator machine.yaml, different CPU model)
+        would half-mutate before failing; comparing this fingerprint rejects
+        the mismatch cleanly before any write."""
+        return {
+            "arch": self.arch_name,
+            "cpu_model": getattr(self, "_cpu_model_name", None),
+            "regions": sorted((base, end)
+                              for (base, end, _p) in self._uc.mem_regions()),
+        }
+
+    def save_state(self, portable: bool = False) -> "Snapshot":
+        from .hal_backend import Snapshot, SnapshotError
+        if self._uc is None:
+            raise SnapshotError(
+                "UnicornBackend.save_state: engine not initialised "
+                "(call init() first)")
+        try:
+            # bytes(): unicorn's mem_write requires bytes (rejects the
+            # bytearray mem_read returns), so this conversion is load-bearing
+            # on the restore path, not merely defensive.
+            mem = [(base, bytes(self._uc.mem_read(base, end - base + 1)))
+                   for (base, end, _perm) in self._uc.mem_regions()]
+            if portable:
+                data: Dict[str, Any] = {"portable": True,
+                                        "fingerprint": self._machine_fingerprint(),
+                                        **self._capture_portable_regs()}
+            else:
+                data = {"context": self._uc.context_save()}
+            data["mem"] = mem
+        except SnapshotError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise SnapshotError(
+                f"UnicornBackend.save_state failed: {exc!r}") from exc
+        return Snapshot(backend_type=self.__class__.__name__,
+                        version=self.SNAPSHOT_VERSION,
+                        data=data)
+
+    def restore_state(self, snap: "Snapshot") -> bool:
+        from .hal_backend import log_snapshot_mismatch
+        if snap.backend_type != self.__class__.__name__:
+            log_snapshot_mismatch(self, snap, "backend_type")
+            return False
+        if snap.version != self.SNAPSHOT_VERSION:
+            log_snapshot_mismatch(self, snap, "version")
+            return False
+        if self._uc is None:
+            log.error("UnicornBackend.restore_state: engine not initialised")
+            return False
+        data = snap.data or {}
+        # Validate the machine fingerprint BEFORE any write (validate-before-
+        # mutate). A portable snapshot from a different arch/CPU/memory map
+        # can't be applied coherently — reject it whole rather than half-write.
+        fp = data.get("fingerprint")
+        if fp is not None:
+            current = self._machine_fingerprint()
+            if fp != current:
+                log.error("UnicornBackend.restore_state: snapshot machine "
+                          "fingerprint %r != current %r; refusing (restore "
+                          "with the same config the snapshot was taken on)",
+                          fp, current)
+                return False
+        try:
+            for base, blob in data.get("mem", []):
+                self._uc.mem_write(base, blob)
+            if data.get("portable"):
+                self._restore_portable_regs(data)
+            else:
+                context = data.get("context")
+                if context is not None:
+                    self._uc.context_restore(context)
+        except Exception as exc:  # noqa: BLE001
+            log.error("UnicornBackend.restore_state failed: %r", exc)
+            return False
+        # After a restore we are logically stopped at the snapshot PC, as if we
+        # had just hit a breakpoint there. Reset the transient breakpoint
+        # bookkeeping so a following continue_past_breakpoint() arms its
+        # one-shot skip for THIS pc, not a stale address left over from the
+        # pre-restore run. Otherwise, when the snapshot sits on a breakpoint
+        # (e.g. a loop snapshotting at a marker breakpoint), the marker
+        # re-triggers immediately and the resumed run is silently skipped —
+        # a nasty source of flaky, order-dependent execution.
+        self._skip_bp_once = None
+        try:
+            self._bp_hit_addr = self.read_register("pc") & 0xFFFFFFFE
+        except Exception:  # noqa: BLE001
+            self._bp_hit_addr = None
+        return True
+
     def read_memory(self, addr: int, size: int, num_words: int = 1,
                     raw: bool = False) -> Union[int, bytes]:
         total = size * num_words
@@ -2012,19 +2379,43 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                         "unmapped; no handler installed", irq_num, isr_slot)
             return
 
-        # Push the 8-word exception frame.
-        regs = {name: self.read_register(name) for name in
-                ("r0", "r1", "r2", "r3", "r12", "lr", "pc", "cpsr")}
-        sp = self.read_register("sp") - 32
-        frame = (regs["r0"], regs["r1"], regs["r2"], regs["r3"],
-                 regs["r12"], regs["lr"], regs["pc"], regs["cpsr"])
+        # Take the exception the way ARMv7-M hardware does — PSP-aware, so a
+        # preemptive RTOS (mbed RTX etc.) can context-switch. Push the 8-word
+        # frame onto the ACTIVE stack (PSP when in a thread with CONTROL.SPSEL,
+        # else MSP), set LR to the matching EXC_RETURN (…F1 handler/MSP,
+        # …F9 thread/MSP, …FD thread/PSP), then enter handler mode (IPSR = the
+        # exception number) so the handler runs on MSP. If the active SP isn't
+        # writable (early boot / a mid-switch window), real hardware wouldn't
+        # take the interrupt either — drop this delivery rather than crash.
         import struct
-        self._uc.mem_write(sp, struct.pack("<8I", *frame))
-        self.write_register("sp", sp)
-        self.write_register("lr", self._EXC_RETURN_THREAD_MSP)
+        from unicorn import arm_const as _A
+        exc_num = (16 + irq_num) & 0x1FF
+        ipsr = self._uc.reg_read(_A.UC_ARM_REG_IPSR) & 0x1FF
+        control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        in_thread = ipsr == 0
+        use_psp = in_thread and bool(control & 2)          # SPSEL
+        active = _A.UC_ARM_REG_PSP if use_psp else _A.UC_ARM_REG_MSP
+        xpsr = self._uc.reg_read(_A.UC_ARM_REG_XPSR)
+        frame = struct.pack("<8I",
+                            self.read_register("r0"), self.read_register("r1"),
+                            self.read_register("r2"), self.read_register("r3"),
+                            self.read_register("r12"), self.read_register("lr"),
+                            self.read_register("pc"), xpsr)
+        sp = self._uc.reg_read(active) - 32     # RTOS/thread stacks are 8-aligned
+        try:
+            self._uc.mem_write(sp, frame)
+        except Exception:  # noqa: BLE001 — unmapped/invalid SP: skip this tick
+            log.debug("inject_irq(%d): SP 0x%x not writable, dropping delivery",
+                      irq_num, sp)
+            return
+        self._uc.reg_write(active, sp)
+        exc_ret = (0xFFFFFFF1 if not in_thread
+                   else 0xFFFFFFFD if use_psp else 0xFFFFFFF9)
+        self.write_register("lr", exc_ret)
+        self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
-        log.info("inject_irq(%d): entering ISR @ 0x%x (vector 0x%x)",
-                 irq_num, isr_addr, isr_slot)
+        log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
+                 irq_num, exc_num, isr_addr, exc_ret)
 
     def set_vtor(self, vtor: int) -> None:
         """Remember the vector-table base so inject_irq can find ISRs."""
@@ -2132,18 +2523,24 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                                            self._resolve_delivery_plan(_legacy))
 
     def _maybe_handle_exc_return(self, addr: int) -> bool:
-        """Called from the invalid-fetch hook. If the fetch address looks
-        like an EXC_RETURN magic value, pop the exception frame and
-        restore pre-interrupt state. Returns True when handled."""
+        """Called from the invalid-fetch hook. If the fetch address is an
+        EXC_RETURN magic value, pop the exception frame from the stack the
+        EXC_RETURN selects (MSP or PSP), restore thread/handler mode + SPSEL,
+        and resume. PSP-aware so an RTOS context switch (PendSV returning via
+        …FD to the switched-in thread's PSP) lands on the new thread."""
         if self.arch_name != "cortex-m3":
             return False
         if (addr & self._EXC_RETURN_MASK) != self._EXC_RETURN_MAGIC:
             return False
         import struct
-        sp = self.read_register("sp")
+        from unicorn import arm_const as _A
+        return_psp = bool(addr & 0x4)          # EXC_RETURN bit2: return stack
+        return_thread = bool(addr & 0x8)       # bit3: return mode
+        active = _A.UC_ARM_REG_PSP if return_psp else _A.UC_ARM_REG_MSP
+        sp = self._uc.reg_read(active)
         try:
             frame = struct.unpack("<8I", bytes(self._uc.mem_read(sp, 32)))
-        except Exception:
+        except Exception:                      # noqa: BLE001
             return False
         self.write_register("r0", frame[0])
         self.write_register("r1", frame[1])
@@ -2151,10 +2548,20 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         self.write_register("r3", frame[3])
         self.write_register("r12", frame[4])
         self.write_register("lr", frame[5])
+        self._uc.reg_write(active, sp + 32)
+        self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
+        if return_thread:
+            self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
+            control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+            control = (control | 2) if return_psp else (control & ~2)
+            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
         self.write_register("pc", frame[6])
-        self.write_register("cpsr", frame[7])
-        self.write_register("sp", sp + 32)
-        log.info("exc_return: popped frame, resuming at 0x%x", frame[6])
+        log.info("exc_return %#x: popped from %s, resuming at 0x%x",
+                 addr, "PSP" if return_psp else "MSP", frame[6])
+        # A PendSV requested from the handler we're leaving tail-chains here.
+        if return_thread and getattr(self, "_pendsv_pending", False):
+            self._pendsv_pending = False
+            self._pending_irqs.append(-2)      # -2 -> exception 14 (PendSV)
         # Unicorn needs to restart from the restored PC; stop the current
         # emu_start so our dispatch loop re-issues cont() at the new PC.
         self._uc.emu_stop()
