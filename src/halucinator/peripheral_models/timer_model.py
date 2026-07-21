@@ -33,6 +33,12 @@ class TimerModel(object):
         if name in cls.active_timers:
             (stop_event, t) = cls.active_timers[name]
             stop_event.set()
+            # Drop the entry so a later start_timer(name) can spawn a FRESH
+            # thread. Without this the stopped (dead) entry lingers and the
+            # `if name not in active_timers` guard in start_timer turns every
+            # re-arm into a no-op — e.g. GRBL's step timer never restarts for
+            # a second move. The signalled thread exits on its own stop_event.
+            del cls.active_timers[name]
 
     @classmethod
     def clear_timer(cls, irq_name: str) -> None:
