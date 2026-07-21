@@ -13,6 +13,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from avatar2 import Avatar, QemuTarget
+from halucinator.qemu_targets.qemu_connect import RobustQemuConnectMixin
 from capstone import *
 from keystone.keystone_const import *
 from unicorn import *
@@ -57,7 +58,7 @@ class AllocedMemory():
         self.size += block.size
         self.base_addr = self.base_addr if self.base_addr <= block.base_addr else block.base_addr
 
-class PowerPCQemuTarget(QemuTarget):
+class PowerPCQemuTarget(RobustQemuConnectMixin, QemuTarget):
     '''
         Implements a QEMU target that has function args for use with
         halucinator.  Enables read/writing and returning from
