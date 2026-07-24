@@ -1,0 +1,23 @@
+# Files to carry into the sdist (and, with include-package-data, the wheel).
+# Packaging is rooted here so LICENSE/README.md are reachable; setuptools picks
+# LICENSE up automatically for the dist-info, and it is listed again here so the
+# sdist carries it too.
+include LICENSE
+include README.md
+include CHANGELOG.md
+
+# Required at runtime by hal_log.setLogConfig().
+include src/halucinator/logging.cfg
+# PEP 561 marker.
+include src/halucinator/py.typed
+
+# Recursive over the whole package: per-directory rules previously missed the
+# C-intercept sources under bp_handlers/test/ and the mcp/ + diagnostics/
+# READMEs. Mirrors [tool.setuptools.package-data] in pyproject.toml.
+recursive-include src/halucinator *.cfg *.yaml *.md
+recursive-include src/halucinator *.c *.h *.ld Makefile
+recursive-include src/halucinator *.sh *.tpl
+
+# Never ship caches or build leftovers.
+global-exclude *.py[cod]
+global-exclude __pycache__/*

@@ -13,7 +13,13 @@ from collections import defaultdict, deque
 from typing import Any, DefaultDict, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
 import yaml
-from avatar2 import Avatar, GDBTarget, ARM_CORTEX_M3, TargetStates
+# Used only by this module's own main() (the avatar2/GDB profiling entry point),
+# but main.py imports State_Recorder from here unconditionally -- so guard the
+# import to keep the unicorn/ghidra/renode paths importable without avatar2.
+try:
+    from avatar2 import Avatar, GDBTarget, ARM_CORTEX_M3, TargetStates
+except ImportError:  # pragma: no cover - exercised by avatar2-less installs
+    Avatar = GDBTarget = ARM_CORTEX_M3 = TargetStates = None
 from IPython import embed
 
 if TYPE_CHECKING:

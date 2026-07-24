@@ -132,7 +132,7 @@ source ~/.virtualenvs/halucinator/bin/activate
 ```bash
 pip install -e deps/avatar2/
 pip install -r src/requirements.txt
-pip install -e src
+pip install -e .
 pip install pytest-cov pytest-timeout  # for running tests
 ```
 
@@ -329,7 +329,7 @@ In list below after the colon (:) denotes the file/cmd .
 
 
 2. Copy binary to a dir of you choice and cd to it:  `test/STM32/example`
-3. Create binary file: `<halucinator_repo_root>/src/tools/make_bin.sh Uart_Hyperterminal_IT_O0.elf` creates `Uart_Hyperterminal_IT_O0.elf.bin`
+3. Create binary file: `<halucinator_repo_root>/src/halucinator/tools/make_bin.sh Uart_Hyperterminal_IT_O0.elf` creates `Uart_Hyperterminal_IT_O0.elf.bin`
 4. Create Memory Layout (specifies memory map of chip): `Uart_Hyperterminal_IT_O0_memory.yaml`
 5. Create Address File (maps function names to address): `Uart_Hyperterminal_IT_O0_addrs.yaml`
 6. Create Intercept File (defines functions to intercept and what handler to use for it): `Uart_Hyperterminal_IT_O0_config.yaml`
@@ -537,3 +537,24 @@ and the full pytest suite with coverage reporting.
 - **mbed**: Mbed OS (boot, serial, timer)
 - **vxworks**: VxWorks RTOS (boot, filesystem, ethernet, interrupts, scheduler, tasks)
 - **zephyr**: Zephyr RTOS (filesystem, UART)
+## Authors and Credits
+
+HALucinator was **originally created by Abraham Clements** at Sandia National
+Laboratories, and introduced in the [USENIX Security 2020
+paper](https://www.usenix.org/conference/usenixsecurity20/presentation/clements)
+*"HALucinator: Firmware Re-hosting Through Abstraction Layer Emulation."*
+
+Its continued development — the multi-architecture emulation support, the
+unicorn / Renode / Ghidra / libafl-qemu backends, the expanded breakpoint-handler
+libraries, the Debug Adapter Protocol integration, and the MCP server — is
+principally the work of **Christopher Wright**, who also maintains the project.
+
+Contributing organizations:
+
+- **Sandia National Laboratories (NTESS)** — original development and copyright
+  holder for the bulk of the codebase (see `LICENSE` and the per-file headers).
+  Work supported under U.S. Department of Energy contract DE-NA0003525.
+- **GrammaTech** — GTIRB-based binary analysis and stack-trace reconstruction
+  used by the debugger handler.
+
+The full list of contributors is in the git history (`git shortlog -sn`).

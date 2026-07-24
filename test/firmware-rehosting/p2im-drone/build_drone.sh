@@ -163,7 +163,7 @@ fi
 # ---------------------------------------------------------------------------
 # Regenerate drone_addrs.yaml so the halucinator intercepts match
 # whatever symbol layout this build produced. hal_make_addr ships with
-# halucinator (src/tools/make_bin.sh installs hal_make_addr as an entry
+# halucinator (src/halucinator/tools/make_bin.sh installs hal_make_addr as an entry
 # point).
 # ---------------------------------------------------------------------------
 if command -v hal_make_addr >/dev/null 2>&1; then
@@ -171,7 +171,7 @@ if command -v hal_make_addr >/dev/null 2>&1; then
     hal_make_addr -b "$OUT_ELF" -o drone_addrs.yaml
 else
     echo ">>> WARNING: hal_make_addr not on PATH; drone_addrs.yaml not regenerated"
-    echo ">>>          run 'pip install -e src/' from the halucinator root first."
+    echo ">>>          run 'pip install -e .' from the halucinator root first."
 fi
 
 # ---------------------------------------------------------------------------

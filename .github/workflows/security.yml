@@ -158,7 +158,7 @@ jobs:
           pip install -e deps/avatar2/ || true
           # Then halucinator's requirements + editable install
           pip install -r requirements.txt || true
-          pip install -e src/ || true
+          pip install -e . || true
           # Dump full pip tree for reference
           pip list --format=json > pip-freeze.json
 
