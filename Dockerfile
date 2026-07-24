@@ -46,7 +46,7 @@ RUN pip install "z3-solver>=4.8.5.0,<4.13"
 RUN pip install -e deps/avatar2/
 RUN pip install --no-build-isolation "pyvex==8.20.7.27"
 RUN pip install --no-build-isolation -r src/requirements.txt
-RUN pip install -e src
+RUN pip install -e .
 
 RUN mkdir -p deps/build-qemu/arm-softmmu
 RUN mkdir -p deps/build-qemu/aarch64-softmmu

@@ -1,0 +1,169 @@
+# Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC (NTESS).
+# Under the terms of Contract DE-NA0003525 with NTESS, the U.S. Government retains
+# certain rights in this software.
+#
+# Packaging lives at the repo root (not in src/) so LICENSE and README.md -- which
+# also live here -- can be carried into the built distributions. The package itself
+# stays under src/ via the package-dir mapping below.
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "halucinator"
+description = "Firmware emulation and rehosting framework"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+# Core metadata has no "original author" field -- only Author and Maintainer,
+# with no role qualifiers -- so `authors` lists the principal authors and the
+# contributing organizations, ordered with the original author first, and
+# `maintainers` is who carries the project now. The narrative credit (who
+# created it, who wrote which era of the code) is in README.md, which is the
+# long_description and therefore what actually renders on the project page.
+# The complete contributor list is the git history. Emails are deliberately
+# omitted from published metadata.
+authors = [
+    { name = "Abraham Clements" },
+    { name = "Sandia National Laboratories HALucinator Team" },
+    { name = "Christopher Wright" },
+    { name = "GrammaTech HALucinator Team" },
+]
+maintainers = [
+    { name = "Sandia National Laboratories (NTESS)" },
+    { name = "Abraham Clements" },
+    { name = "Christopher Wright" },
+]
+# Read from halucinator.__version__ so the version has exactly one home.
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Emulators",
+]
+
+# The core runtime set: exactly what importing halucinator.main pulls in.
+#   PyYAML     -- hal_stats/hal_config parse every config file
+#   pyzmq      -- peripheral_server + the hal_dev_* external devices.
+#                 (The import is `zmq`; the DISTRIBUTION providing it is pyzmq.)
+#   pyelftools -- config/elf_program.py (ELFFile) on the import path
+#   IPython    -- bp_handlers/generic/debug.py imports it at module scope, and
+#                 bp_handlers/__init__ star-imports that package
+#
+# avatar2 is deliberately absent. HALucinator tracks a FORK installed from the
+# pinned submodule (`pip install -e deps/avatar2/`); declaring `avatar2` here
+# would risk resolving the unrelated upstream project from PyPI over it. The
+# avatar2/qemu/libafl-qemu backends are opt-in and import it lazily.
+dependencies = [
+    "PyYAML",
+    "pyzmq",
+    "pyelftools",
+    "IPython",
+]
+
+[project.urls]
+Homepage = "https://github.com/halucinator/halucinator"
+Repository = "https://github.com/halucinator/halucinator"
+Changelog = "https://github.com/halucinator/halucinator/blob/master/CHANGELOG.md"
+
+[project.optional-dependencies]
+# The unicorn backend (`--emulator unicorn`) is the only one that needs no
+# externally-built binary, so this is the self-contained install:
+#     pip install halucinator[unicorn]
+unicorn = ["unicorn>=2.0", "capstone>=4.0"]
+
+# Host-network / serial external devices: hal_dev_host_eth,
+# hal_dev_host_eth_server, and the tty/serial tunnels.
+net = ["scapy", "pyserial"]
+
+# `hal_make_addr` ELF symbol extraction. cle is imported lazily and already
+# degrades to a clear error when absent, so it stays out of the core set.
+# (cle ships alongside angr; angr itself is never imported by this package.)
+symbols = ["cle"]
+
+# MCP server (`halucinator-mcp`). Upper-bounded below 2.0: the FastMCP API the
+# server uses is 1.x. Verified against mcp 1.27. Needs Python >=3.10 (the SDK's
+# floor), which is why it is not part of `all`.
+mcp = ["mcp[cli]>=1.2,<2", "capstone>=4.0"]
+
+# Everything runnable on the >=3.9 baseline, in one shot. Excludes [mcp]
+# (Python >=3.10) and [dev].
+all = [
+    "unicorn>=2.0",
+    "capstone>=4.0",
+    "scapy",
+    "pyserial",
+    "cle",
+]
+
+# Lint + test tooling. pycparser is used only by halucinator/tools/, never by
+# the package itself.
+dev = [
+    "pylint==2.13.5",
+    "yamllint==1.26.3",
+    "black==26.3.1",
+    "pytest",
+    "pytest-cov",
+    "pytest-timeout",
+    "pycparser",
+]
+
+[project.scripts]
+halucinator = "halucinator.main:main"
+halucinator-mcp = "halucinator.mcp.server:main"
+qemulog2trace = "halucinator.tools.qemu_to_trace:main"
+hal_make_addr = "halucinator.util.elf_sym_hal_getter:main"
+hal_dev_uart = "halucinator.external_devices.uart:main"
+hal_dev_virt_hub = "halucinator.external_devices.ethernet_virt_hub:main"
+hal_dev_eth_wireless = "halucinator.external_devices.ethernet_wireless:main"
+hal_dev_host_eth = "halucinator.external_devices.host_ethernet:main"
+hal_dev_host_eth_server = "halucinator.external_devices.host_ethernet_server:main"
+hal_dev_802_15_4 = "halucinator.external_devices.IEEE802_15_4:main"
+hal_dev_irq_trigger = "halucinator.external_devices.trigger_interrupt:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "halucinator.__version__" }
+
+[tool.setuptools]
+# src-layout: the importable package tree lives under src/.
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["halucinator*"]
+
+[tool.setuptools.package-data]
+# logging.cfg is loaded at startup by hal_log.py (path.dirname(__file__)/
+# logging.cfg) -- a wheel without it crashes with KeyError: 'formatters'.
+# py.typed marks the package as typed (PEP 561); without it downstream
+# type-checkers ignore the annotations entirely.
+# Recursive patterns rather than per-directory ones: the earlier
+# `test/**` globs matched only halucinator/test/ and silently missed the
+# C-intercept sources under halucinator/bp_handlers/test/, plus the
+# mcp/ and diagnostics/ READMEs. MANIFEST.in mirrors this for the sdist.
+halucinator = [
+    "logging.cfg",
+    "py.typed",
+    "**/*.cfg",
+    "**/*.yaml",
+    "**/*.md",
+    "**/*.c",
+    "**/*.h",
+    "**/*.ld",
+    "**/Makefile",
+    "**/*.sh",
+    "**/*.tpl",
+]

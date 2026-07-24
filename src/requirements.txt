@@ -1,20 +1,51 @@
+# Development / CI environment for HALucinator.
+#
+# This is the full working set: every backend, every external device, and the
+# lint/test tooling. It is equivalent to
+#
+#     pip install -e '.[all,dev]'
+#
+# plus the pieces below that cannot be expressed as install-time dependencies.
+# Library-level dependencies live in pyproject.toml -- `dependencies` is the
+# core set, and the optional pieces are extras ([unicorn], [net], [symbols],
+# [mcp], [dev], [all]).
+#
+# avatar2 is deliberately NOT listed here. It is installed from the pinned
+# submodule (`pip install -e deps/avatar2/`) because HALucinator tracks a fork;
+# listing it would risk resolving the unrelated upstream `avatar2` from PyPI
+# over the fork.
+
+# --- core runtime (pyproject `dependencies`) ---
 PyYAML
-zmq
+pyzmq        # the module is `zmq`; the distribution is pyzmq
 IPython
 pyelftools
-scapy==2.4.4
-pycparser
-avatar2
+
+# --- unicorn backend ([unicorn]) ---
+# Previously reached CI only transitively via avatar2 (which pins
+# unicorn==2.0.1.post1 and capstone>=5). Declared directly so the unicorn
+# backend does not depend on avatar2 being installed.
+unicorn
+capstone
+
+# --- host-network / serial external devices ([net]) ---
+scapy
 pyserial
-angr<9
-protobuf<=3.20
-deprecated
+
+# --- hal_make_addr symbol extraction ([symbols]) ---
+# cle is imported lazily and degrades gracefully when absent. angr itself is
+# never imported anywhere in this package; the old `angr<9` pin has been
+# dropped (the README already documents angr as optional).
+cle
+
+# --- lint / tooling ([dev]) ---
+pycparser    # used by halucinator/tools/map_hal2intercepts.py and stm_tools/
 pylint==2.13.5
 yamllint==1.26.3
 black==26.3.1
-cle
 setuptools<81
+
 # NOTE: the MCP server's deps (mcp[cli], capstone) are intentionally NOT
 # listed here — they require Python >=3.10, and listing them would break
 # `pip install -r requirements.txt` on the 3.9 baseline. Install them via the
-# extra instead: `pip install -e 'src/[mcp]'` (see src/halucinator/mcp/README.md).
+# extra instead: `pip install -e '.[mcp]'` (see src/halucinator/mcp/README.md).
