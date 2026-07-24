@@ -5,7 +5,7 @@
 import sqlite3
 from tkinter import Tk, ttk, Label
 import tkinter as tk
-from tools.parse_symbol_tables import DWARFReader, sym_format
+from halucinator.util.parse_symbol_tables import DWARFReader, sym_format
 #from StringIO import StringIO
 from io import BytesIO
 import pickle

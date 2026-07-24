@@ -10,7 +10,13 @@ from ..bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
 from ..intercepts import register_bp_handler
 import IPython
 import logging
-import avatar2
+# Only referenced on the avatar2 path (self.qemu.avatar.arch comparisons), but
+# this module is eagerly imported via bp_handlers/__init__, so guard it to keep
+# the unicorn/ghidra/renode paths importable without avatar2.
+try:
+    import avatar2
+except ImportError:  # pragma: no cover - exercised by avatar2-less installs
+    avatar2 = None  # type: ignore[assignment]
 from ... import hal_config
 log = logging.getLogger(__name__)
 from ... import hal_log

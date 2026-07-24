@@ -132,7 +132,7 @@ source ~/.virtualenvs/halucinator/bin/activate
 ```bash
 pip install -e deps/avatar2/
 pip install -r src/requirements.txt
-pip install -e src
+pip install -e .
 pip install pytest-cov pytest-timeout  # for running tests
 ```
 
@@ -329,7 +329,7 @@ In list below after the colon (:) denotes the file/cmd .
 
 
 2. Copy binary to a dir of you choice and cd to it:  `test/STM32/example`
-3. Create binary file: `<halucinator_repo_root>/src/tools/make_bin.sh Uart_Hyperterminal_IT_O0.elf` creates `Uart_Hyperterminal_IT_O0.elf.bin`
+3. Create binary file: `<halucinator_repo_root>/src/halucinator/tools/make_bin.sh Uart_Hyperterminal_IT_O0.elf` creates `Uart_Hyperterminal_IT_O0.elf.bin`
 4. Create Memory Layout (specifies memory map of chip): `Uart_Hyperterminal_IT_O0_memory.yaml`
 5. Create Address File (maps function names to address): `Uart_Hyperterminal_IT_O0_addrs.yaml`
 6. Create Intercept File (defines functions to intercept and what handler to use for it): `Uart_Hyperterminal_IT_O0_config.yaml`

@@ -39,7 +39,7 @@ HALucinator runs on 3.9. Use a dedicated virtualenv:
 
 ```sh
 python3.10 -m venv .venv-mcp
-.venv-mcp/bin/pip install -e 'src/[mcp]'      # mcp[cli] + capstone
+.venv-mcp/bin/pip install -e '.[mcp]'      # mcp[cli] + capstone
 # Plus HALucinator's own runtime deps (not pulled by the extra):
 .venv-mcp/bin/pip install -r src/requirements.txt
 .venv-mcp/bin/pip install -e deps/avatar2/ --no-deps

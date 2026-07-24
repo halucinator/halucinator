@@ -7,9 +7,18 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Iterator, Optional
 
-from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
-from avatar2.archs.mips import MIPS_BE
-from avatar2.archs.x86 import X86
+# avatar2 supplies the `avatar_arch` values below, which only the avatar2/qemu
+# backends ever read. Guarding the import (as main.py already does) keeps the
+# unicorn/ghidra/renode paths importable when avatar2 isn't installed -- it
+# drags in a native keystone-engine that won't load on every host. The names
+# stay defined so the targets table below still builds.
+try:
+    from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
+    from avatar2.archs.mips import MIPS_BE
+    from avatar2.archs.x86 import X86
+except ImportError:  # pragma: no cover - exercised by avatar2-less installs
+    ARM_CORTEX_M3 = ARM = ARM64 = PPC32 = PPC64 = PPC_MPC8544DS = None
+    MIPS_BE = X86 = None
 
 import halucinator
 

@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Planned
+
+- Retire avatar2 from the core: extract the avatar2/QEMU backends into a
+  separately-installed distribution, leaving `halucinator` avatar2-free. The
+  seams already exist (`HalBackend` ABC, `HalPeripheral` as a drop-in for
+  `AvatarPeripheral`). This will come with deprecations and a **2.0.0** major
+  bump.
+
+## [1.9.0] - 2026-07-24
+
+First release since 1.8.0 (January 2024). Collects the multi-architecture
+emulation work, the expanded breakpoint-handler libraries, the new backends,
+and makes the project installable as a real Python distribution.
+
+### Packaging
+
+Prepares HALucinator for a PyPI release. `pip install halucinator[unicorn]`
+now yields a working rehosting install with no avatar2 and no hand-built QEMU.
+
+- Replaced `src/setup.py` with a PEP 621 `pyproject.toml` at the repo root,
+  keeping the importable tree under `src/` via `package-dir`. Consequence:
+  **`pip install -e src` becomes `pip install -e .`**
+- **Dependencies are now actually installed.** They had been declared under
+  the distutils-era `requires=` keyword, which pip ignores entirely, so
+  `pip install halucinator` installed the package with zero dependencies
+- Corrected the dependency set: `zmq` → `pyzmq` (the distribution providing
+  the `zmq` module); added `unicorn`, `capstone`, `pyelftools` and `IPython`,
+  all imported but never declared; dropped `angr<9`, `protobuf<=3.20` and
+  `deprecated`, none of which is imported anywhere in the package; unpinned
+  `scapy`
+- Added extras: `[unicorn]`, `[net]`, `[symbols]`, `[mcp]`, `[dev]`, and
+  `[all]` for everything installable on the >=3.9 baseline
+- Ship `LICENSE` in the built distributions — the wheel previously contained
+  no license file at all, a compliance problem for GPL-3.0 code
+- Ship `logging.cfg` as package data; without it a non-editable install
+  crashed at startup with `KeyError: 'formatters'`
+- Added the PEP 561 `py.typed` marker, so the package's type annotations are
+  visible to downstream type-checkers
+- Completed the package data: the per-directory globs shipped
+  `halucinator/test/` but silently missed the C-intercept sources under
+  `halucinator/bp_handlers/test/` and the `mcp/` and `diagnostics/` READMEs.
+  Wheel and sdist now carry every non-`.py` file in the package
+- Populated `authors`/`maintainers` metadata (previously a placeholder)
+- The version is single-sourced from `halucinator.__version__`
+- Added `python_requires`, `url`, `license` and trove classifiers
+- New CI job `pip-install-unicorn` validates the packaging on Python 3.9,
+  3.11 and 3.13: it builds wheel and sdist, installs into a clean venv,
+  asserts no avatar2 is pulled in, runs the `multi_arch` and i386 IRQ e2e
+  suites entirely on the unicorn backend, and runs `twine check`
+
 ### Multi-Architecture Emulation
 
 HALucinator previously only supported ARM (Cortex-M3/M4) targets. This branch
@@ -203,6 +253,20 @@ expected output.
 - MIPS: uses `MIPS_BE` arch (has `qemu_name` defined) instead of `MIPS32`
 - Mock assertion typo in libopencm3 GPIO test (`called_once_with` →
   `assert_called_once_with`) — was silently passing on Python ≤3.11
+- **avatar2 is no longer required by backends that never use it.** Three
+  modules on the eager import path (`config/target_archs.py`,
+  `util/profile_hals.py`, `bp_handlers/generic/function_callers.py`)
+  imported avatar2 unconditionally, defeating the guard `main.py` already
+  had and making `import halucinator.main` fail without avatar2 installed —
+  which matters because avatar2 pulls in a native keystone-engine that does
+  not load on every host
+- **`qemulog2trace` never worked outside an editable install.** The console
+  script pointed at `tools.qemu_to_trace`, but `tools` was not a packaged
+  subpackage. `src/tools` is now `halucinator.tools` (moved under the
+  package rather than claiming the generic top-level name `tools`)
+- `SymbolBrowser.py` imported `tools.parse_symbol_tables`, a module that
+  lives at `halucinator/util/parse_symbol_tables.py` and had never been
+  importable from that path
 
 ## [1.8.0] - 2024-01-23
 
