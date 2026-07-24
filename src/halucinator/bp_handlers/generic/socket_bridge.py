@@ -57,6 +57,7 @@ import collections
 import socket
 import struct
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Deque, Dict, List, Optional, cast
 
 from halucinator.bp_handlers.bp_handler import BPHandler, HandlerFunction, HandlerReturn, bp_handler
@@ -108,6 +109,10 @@ class SocketBridge(BPHandler):
         self.errno_scratch = 0x04700000
         self.errno_value = 0x46
         self.verbose = False
+        # Optional block-wait windows (ms); 0 = original non-blocking behaviour.
+        # See register_handler / _h_accept / _h_recv for what each guards.
+        self.accept_block_ms = 0
+        self.recv_block_ms = 0
 
     # ---- registration -------------------------------------------------
     def register_handler(  # pylint: disable=too-many-arguments
@@ -116,7 +121,7 @@ class SocketBridge(BPHandler):
         max_conns: int = 32, bind_host: str = "0.0.0.0",
         poll_caller_lo: int = 0x200c91d0, poll_caller_hi: int = 0x200c962f,
         errno_scratch_addr: int = 0x04700000, errno_value: int = 0x46,
-        verbose: bool = False,
+        verbose: bool = False, accept_block_ms: int = 0, recv_block_ms: int = 0,
     ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.func_names[addr] = func_name
         if not self._server_started:
@@ -131,6 +136,8 @@ class SocketBridge(BPHandler):
             self.errno_scratch = int(errno_scratch_addr)
             self.errno_value = int(errno_value)
             self.verbose = bool(verbose)
+            self.accept_block_ms = int(accept_block_ms)
+            self.recv_block_ms = int(recv_block_ms)
             self._server_started = True
             t = threading.Thread(target=self._server_thread, name="SocketBridge-502",
                                  daemon=True)
@@ -276,6 +283,20 @@ class SocketBridge(BPHandler):
             return False, None      # not Port502Server's listen socket
         sa_ptr = qemu.get_arg(1)
         len_ptr = qemu.get_arg(2)
+        # Optional block-wait for a client. Servers that accept() DIRECTLY (no
+        # select() gate on the listen fd) often tear down + rebuild the listen
+        # socket on every accept()<0, which can race past the host client's
+        # connect. If accept_block_ms>0, poll the host accept queue for up to that
+        # long before returning -1. The emulator is single-threaded, so this stalls
+        # the guest for the wait -- keep it short; the background server thread
+        # fills self._pending while we poll. (0 = original non-blocking behaviour.)
+        if self.accept_block_ms > 0:
+            deadline = time.time() + self.accept_block_ms / 1000.0
+            while time.time() < deadline:
+                with self._lock:
+                    if self._pending:
+                        break
+                time.sleep(0.01)
         with self._lock:
             if not self._pending:
                 # no pending connection (select gates this; guard anyway)
@@ -309,6 +330,20 @@ class SocketBridge(BPHandler):
             return False, None      # not a bridge socket -> real recv
         buf = qemu.get_arg(1)
         length = qemu.get_arg(2)
+        # Optional block-wait for the request bytes. The firmware reads the socket
+        # non-blocking and, when its __errno is not bridged, treats a -1
+        # (EWOULDBLOCK) as a fatal "transfer interrupted" and aborts the request.
+        # If recv_block_ms>0, poll the host reader thread for buffered bytes (or a
+        # clean EOF on peer half-close) for up to that long before falling back to
+        # -1, so the already-sent request is delivered instead of dropped. Single-
+        # threaded emu: keep it short. (0 = original non-blocking behaviour.)
+        if self.recv_block_ms > 0:
+            deadline = time.time() + self.recv_block_ms / 1000.0
+            while time.time() < deadline:
+                with self._lock:
+                    if conn.rx or conn.state == "peer_closed":
+                        break
+                time.sleep(0.005)
         with self._lock:
             have = len(conn.rx)
             if have > 0:
