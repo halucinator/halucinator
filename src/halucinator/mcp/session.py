@@ -756,7 +756,7 @@ class HalucinatorSession:
         except ImportError as exc:  # pragma: no cover — install hint
             raise SessionError(
                 "Disassembly needs capstone. Install it with: "
-                "pip install 'capstone>=4.0' (or `pip install -e src/[mcp]`)."
+                "pip install 'capstone>=4.0' (or `pip install -e .[mcp]`)."
             ) from exc
         arch = self.config.machine.arch
         if arch in ("cortex-m3", "arm"):

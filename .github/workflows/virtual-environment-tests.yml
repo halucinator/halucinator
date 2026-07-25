@@ -144,11 +144,11 @@ jobs:
         pip install --upgrade pip
         pip install -e deps/avatar2/
         pip install -r src/requirements.txt
-        pip install -e src
+        pip install -e .
         # MCP server extra (mcp[cli] + capstone). The CI runners are Python
         # 3.10 (jammy) / 3.12 (noble), both >= the SDK's 3.10 floor, so the
         # MCP tests under test/pytest/mcp_server/ run on both.
-        pip install -e 'src/[mcp]'
+        pip install -e '.[mcp]'
         pip install pytest-cov pytest-timeout
 
     - name: Build QEMU (cached)
@@ -329,7 +329,7 @@ jobs:
         set -x
         source $(pwd)/virtualenvs/halucinator/bin/activate
         rm ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf.bin
-        bash ./src/tools/make_bin.sh ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf
+        bash ./src/halucinator/tools/make_bin.sh ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf
         test -f ./test/STM32/example/Uart_Hyperterminal_IT_O0.elf.bin
 
     - name: test make_addrs
@@ -529,3 +529,97 @@ jobs:
       with:
         path: deps/build-qemu-upstream-v11.0.0
         key: upstream-qemu-overlay-v11.0.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
+
+  # Proves the packaging story end-to-end: a plain `pip install halucinator[unicorn]`
+  # into a clean virtualenv -- no avatar2, no externally-built QEMU, no submodules --
+  # yields a working rehosting install. This job deliberately does NOT check out
+  # submodules or build QEMU, so any failure here is unambiguously a packaging or
+  # unicorn-backend regression rather than a toolchain problem. It is also the
+  # matrix that validates the declared `requires-python = ">=3.9"`.
+  pip-install-unicorn:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.11', '3.13']
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python }}
+
+    - name: Build wheel + sdist
+      run: |
+        set -e
+        set -x
+        python -m pip install --upgrade pip build
+        python -m build
+        ls -l dist/
+
+    - name: Install the wheel into a clean venv (with the [unicorn] extra)
+      run: |
+        set -e
+        set -x
+        python -m venv /tmp/wheelenv
+        /tmp/wheelenv/bin/pip install --upgrade pip
+        /tmp/wheelenv/bin/pip install "$(ls dist/*.whl)[unicorn]"
+
+    - name: Assert the install is avatar2-free, complete and typed
+      run: |
+        set -e
+        set -x
+        # The whole point of the [unicorn] tier: avatar2 must NOT be pulled in.
+        if /tmp/wheelenv/bin/python -c "import avatar2" 2>/dev/null; then
+          echo "FATAL: avatar2 was installed by halucinator[unicorn]"; exit 1
+        fi
+        # Console scripts must resolve (qemulog2trace regressed silently for
+        # years because `tools` was not a packaged subpackage).
+        /tmp/wheelenv/bin/halucinator --help > /dev/null
+        /tmp/wheelenv/bin/qemulog2trace --help > /dev/null
+        # Runtime data files + PEP 561 marker + single-sourced version.
+        /tmp/wheelenv/bin/python - <<'PY'
+        import os, halucinator
+        pkg = os.path.dirname(halucinator.__file__)
+        for f in ("logging.cfg", "py.typed"):
+            assert os.path.exists(os.path.join(pkg, f)), "missing " + f
+        assert halucinator.__version__, "no __version__"
+        print("OK: data files, py.typed, version", halucinator.__version__)
+        PY
+
+    - name: Run the e2e suites on the unicorn backend
+      timeout-minutes: 15
+      run: |
+        set -e
+        set -x
+        export PATH="/tmp/wheelenv/bin:$PATH"
+        # ppc64 is deliberately excluded: in-process unicorn produces no UART
+        # output for ppc64, a known unicorn coverage gap documented in
+        # test/BACKEND_MATRIX.md. Every other multi_arch arch must pass, as
+        # must the i386 IRQ suite (X86Pic synthesised interrupt delivery).
+        for arch in arm32 arm64 mips ppc; do
+          echo "=== multi_arch/$arch on unicorn ==="
+          HAL_EMULATOR=unicorn bash ./test/multi_arch/$arch/run_tests.bash
+          echo "$arch: PASSED"
+        done
+        echo "=== multi_arch_irq/x86 on unicorn ==="
+        bash ./test/multi_arch_irq/x86/run_tests.bash
+        echo "x86_irq: PASSED"
+
+    - name: Install from the sdist as well
+      run: |
+        set -e
+        set -x
+        python -m venv /tmp/sdistenv
+        /tmp/sdistenv/bin/pip install --upgrade pip
+        /tmp/sdistenv/bin/pip install "$(ls dist/*.tar.gz)[unicorn]"
+        /tmp/sdistenv/bin/halucinator --help > /dev/null
+        echo "sdist install OK"
+
+    - name: Check distribution metadata
+      run: |
+        set -e
+        set -x
+        python -m pip install --upgrade twine
+        python -m twine check dist/*
