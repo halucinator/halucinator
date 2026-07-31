@@ -110,7 +110,13 @@ def test_svc_end_to_end_handler_runs_and_returns():
     # full system the dispatch loop would re-enter). A regressed trap instead
     # falls through _intr_hook and stops on the svc with the marker unset.
     b._uc.mem_write(_SVC_PC, b"\x00\xdf")            # svc #0
-    b._uc.mem_write(_SVC_PC + 2, b"\x00\xbf")        # nop
+    # `b .` (branch-to-self), NOT nop: it is valid on every unicorn build AND
+    # terminates the basic block, so translating the block at _SVC_PC+2 cannot
+    # run past it into the uninitialized bytes that follow (some unicorn builds
+    # raise UC_ERR_INSN_INVALID on that fall-through even with a breakpoint set,
+    # because the block is translated before the code hook fires). The breakpoint
+    # below stops on it, so it never actually loops.
+    b._uc.mem_write(_SVC_PC + 2, b"\xfe\xe7")        # b .  (self-branch)
     # Handler (Thumb): write sentinel 1 to *marker, then return via EXC_RETURN.
     #   movs r1,#1 ; ldr r2,[pc,#4] ; str r1,[r2] ; bx lr ; <literal: marker>
     # The `ldr r2,[pc,#4]` reads the literal at handler+8 (Align(PC,4)+4).
@@ -126,14 +132,12 @@ def test_svc_end_to_end_handler_runs_and_returns():
     b._uc.reg_write(unicorn.arm_const.UC_ARM_REG_IPSR, 0)
     b._uc.mem_write(marker, struct.pack("<I", 0))    # clear marker
 
-    # Breakpoint on the `nop` after the svc for a deterministic stop: exc_return
-    # must unwind back there. Without it, cont() runs past the nop into
-    # uninitialized memory and where it faults is unicorn-version-dependent
-    # (fine on some builds, UC_ERR_INSN_INVALID on others). A regressed trap that
-    # never vectored would instead stop on the svc itself, before this bp.
+    # Breakpoint on the instruction after the svc for a deterministic stop:
+    # exc_return must unwind back there. A regressed trap that never vectored
+    # would instead stop on the svc itself, before this bp.
     b.set_breakpoint(_SVC_PC + 2)
     # Run: cont() drives the intr hook -> svc trap -> handler -> exc_return,
-    # landing on the `nop` breakpoint after the svc.
+    # landing on the breakpoint at the instruction after the svc.
     b.write_register("pc", _SVC_PC)
     b.cont()
 
