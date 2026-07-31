@@ -209,3 +209,123 @@ def test_thread_mode_pendsv_delivered_end_to_end():
     assert b.read_register("pc") == prog_at + 2
     assert b._pendsv_pending is False
     assert b._pendsv_store_parked is False
+
+
+# --- observe-only bp injects an exception: exc_return must land PAST the bp --
+# The regression this guards: an observe-only bp handler (e.g. HalTick on
+# HAL_GetTick) queues a Cortex-M exception via inject_irq() and then resumes with
+# continue_past_breakpoint(), which arms a one-shot _skip_bp_once for the bp
+# address. cont() drains the queued IRQ while PC is still parked on the bp, so the
+# stacked return address IS the bp. When the ISR returns via EXC_RETURN,
+# _maybe_handle_exc_return restores PC onto the bp and emu_stop's. If cont() then
+# surfaces that internal stop to the caller (returning with PC on the bp), the
+# firmware never retires the bp instruction: in the full system the dispatch loop
+# re-dispatches the same bp, the handler re-injects, and the tick livelocks
+# (device-liteos: SysTick fired 371k times, HAL_Delay never completed). The fix
+# has cont() treat the exc_return stop as "resume from the restored PC", so the
+# armed one-shot skip fires on re-entry, the bp instruction executes exactly once,
+# and PC advances into the function body.
+_TICK_IRQ = -1                         # vtor + (16 + -1)*4 == vector 15 (SysTick)
+_TICK_SLOT = _VTOR + (16 + _TICK_IRQ) * 4
+_TICK_HANDLER = 0x08000200             # our SysTick handler (Thumb)
+_TICK_COUNTER = _RAM + 0x100           # ISR increments this once per delivery
+_CLOCK_PC = 0x08000100                 # the observed "clock read" instruction
+
+
+def _make_tick_backend():
+    """Backend with a SysTick handler that increments _TICK_COUNTER and returns
+    via EXC_RETURN, wired into vector slot 15."""
+    from halucinator.backends.unicorn_backend import UnicornBackend
+    from halucinator.backends.hal_backend import MemoryRegion
+    b = UnicornBackend(arch="cortex-m3")
+    b.add_memory_region(MemoryRegion("flash", _FLASH, 0x10000, "rwx"))
+    b.add_memory_region(MemoryRegion("ram", _RAM, 0x10000, "rw"))
+    b.init()
+    b.set_vtor(_VTOR)
+    b._uc.mem_write(_TICK_SLOT, struct.pack("<I", _TICK_HANDLER | 1))
+    # SysTick handler (Thumb): *_TICK_COUNTER += 1, then bx lr (EXC_RETURN).
+    #   ldr r2,[pc,#8] ; ldr r3,[r2] ; adds r3,#1 ; str r3,[r2] ; bx lr
+    # `ldr r2,[pc,#8]` reads the literal at handler+12 (Align(pc,4)+8).
+    isr = (b"\x02\x4a"                  # ldr  r2, [pc, #8]  -> literal @ +12
+           b"\x13\x68"                  # ldr  r3, [r2]
+           b"\x01\x33"                  # adds r3, #1
+           b"\x13\x60"                  # str  r3, [r2]
+           b"\x70\x47"                  # bx   lr
+           b"\x00\xbf"                  # nop  (align literal to +12)
+           + struct.pack("<I", _TICK_COUNTER))
+    b._uc.mem_write(_TICK_HANDLER, isr)
+    b.write_register("sp", _RAM + 0x1000)
+    b._uc.reg_write(unicorn.arm_const.UC_ARM_REG_IPSR, 0)   # thread mode
+    b._uc.mem_write(_TICK_COUNTER, struct.pack("<I", 0))
+    return b
+
+
+def test_observe_bp_inject_exc_return_retires_bp():
+    """One observe-only tick cycle: bp hit -> inject SysTick -> resume via
+    continue_past_breakpoint(). The bp instruction must retire exactly once and
+    PC must advance past it (not re-fire forever on the parked bp)."""
+    b = _make_tick_backend()
+    # Program at the clock-read site: `adds r5,#1` (a witness the instruction
+    # actually retired), then `b .` (self-branch) as the function-body marker.
+    b._uc.mem_write(_CLOCK_PC, b"\x01\x35")          # adds r5, #1
+    b._uc.mem_write(_CLOCK_PC + 2, b"\xfe\xe7")      # b .   (body marker)
+    b.set_breakpoint(_CLOCK_PC)                       # observe-only clock bp
+    b.set_breakpoint(_CLOCK_PC + 2)                   # deterministic stop in body
+    b.write_register("r5", 0)
+    b.write_register("pc", _CLOCK_PC)
+
+    b.cont()                                          # stop on the clock bp
+    assert b.read_register("pc") == _CLOCK_PC
+    assert b.read_register("r5") == 0                  # not retired yet
+
+    # The observe-only handler: queue a real SysTick, then resume. This is
+    # exactly what HalTick.hal_get_tick + main's non-intercept path do.
+    b.inject_irq(_TICK_IRQ)
+    b.continue_past_breakpoint()
+
+    # The SysTick handler ran exactly once ...
+    assert struct.unpack("<I", bytes(b._uc.mem_read(_TICK_COUNTER, 4)))[0] == 1
+    # ... the clock instruction retired exactly once (skip absorbed the re-hit) ...
+    assert b.read_register("r5") == 1
+    # ... and PC advanced PAST the bp into the body, rather than re-parking on it.
+    assert b.read_register("pc") == _CLOCK_PC + 2
+    assert b._exc_return_pending is False
+
+
+def test_observe_bp_tick_loop_completes():
+    """End-to-end analogue of HAL_Delay(3): a loop that reads the clock until a
+    counter reaches 3, each read observed by a tick-injecting bp handler. Drives
+    it through a mini dispatch loop and asserts it TERMINATES (bp retired every
+    cycle) rather than livelocking on the parked bp."""
+    b = _make_tick_backend()
+    done_pc = _CLOCK_PC + 6
+    # for (r5=0; r5<3; ) { clock_read; }  -- r5 counts completed loop bodies.
+    b._uc.mem_write(_CLOCK_PC, b"\x01\x35")          # adds r5, #1
+    b._uc.mem_write(_CLOCK_PC + 2, b"\x03\x2d")      # cmp  r5, #3
+    b._uc.mem_write(_CLOCK_PC + 4, b"\xfc\xdb")      # blt  _CLOCK_PC
+    b._uc.mem_write(done_pc, b"\xfe\xe7")            # b .   (loop done)
+    b.set_breakpoint(_CLOCK_PC)                       # observe-only clock bp
+    b.set_breakpoint(done_pc)                         # loop-exit marker
+    b.write_register("r5", 0)
+    b.write_register("pc", _CLOCK_PC)
+
+    b.cont()                                          # stop on the first clock bp
+    ticks = 0
+    for _ in range(50):                               # cap: a livelock never exits
+        pc = b.read_register("pc") & ~1
+        if pc == done_pc:
+            break
+        assert pc == _CLOCK_PC, f"unexpected stop at {pc:#x}"
+        # Observe-only handler: inject one SysTick, then resume past the bp.
+        b.inject_irq(_TICK_IRQ)
+        ticks += 1
+        b.continue_past_breakpoint()
+    else:
+        pytest.fail("loop never reached done_pc -- bp instruction never retired "
+                    "(exc_return re-parked on the bp -> tick livelock)")
+
+    assert b.read_register("pc") & ~1 == done_pc
+    assert b.read_register("r5") == 3                  # firmware loop completed
+    assert ticks == 3                                 # one tick per clock read
+    # Every injected SysTick was delivered to the firmware's own handler.
+    assert struct.unpack("<I", bytes(b._uc.mem_read(_TICK_COUNTER, 4)))[0] == 3

@@ -276,6 +276,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # address ONCE without stopping. Used to step over a breakpoint after
         # an observe-only (non-intercept) bp_handler so the real function runs.
         self._skip_bp_once: Optional[int] = None
+        # Set by _maybe_handle_exc_return: a Cortex-M exception return redirected
+        # PC and emu_stop'd to force a restart at the restored PC. cont() must
+        # treat that internal stop as "resume", NOT as a breakpoint/external
+        # stop — otherwise it hands control back to the dispatch loop parked on
+        # the restored PC (see cont() for why that livelocks / prematurely exits).
+        self._exc_return_pending: bool = False
         self._breakpoints: Dict[int, int] = {}   # addr → bp_id
         # Fast-breakpoint mode (opt-in HAL_FAST_BP=1): instead of ONE global
         # per-instruction UC_HOOK_CODE that checks every PC against the
@@ -2047,6 +2053,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                          "breaker will NOT run. Unset HAL_FAST_BP to use it.")
         self._stopped = False
         self._bp_hit_addr = None
+        # Fresh run: no exception-return continuation is owed from a prior cont().
+        self._exc_return_pending = False
         until = (1 << (self._word_size * 8)) - 1
         # Loop over emu_start so an emu_stop triggered by inject_irq
         # from another thread doesn't bubble out to the dispatch loop.
@@ -2096,6 +2104,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             except unicorn.UcError as _uc_err:
                 if self._stopped:
                     return  # stopped by breakpoint hook — normal
+                # An exception return resolved the EXC_RETURN fetch and emu_stop'd;
+                # some unicorn builds still surface the aborted run as a UcError.
+                # Treat it exactly like the clean exc_return path: resume from the
+                # restored PC rather than falling into bad-call/fault recovery.
+                if self._exc_return_pending:
+                    self._exc_return_pending = False
+                    continue
                 # Diagnostic (HAL_LAST_PC): dump the block path leading into the fault.
                 _lb = getattr(self, "_last_blocks", None)
                 if _lb:
@@ -2307,6 +2322,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
                         self._pending_irqs.append(self._det_irq)
+                continue
+            # A Cortex-M exception return (_maybe_handle_exc_return) redirected PC
+            # and emu_stop'd purely to restart at the restored PC — that internal
+            # stop is neither a breakpoint nor an external stop(). Resume the run
+            # from the restored PC instead of returning to the dispatch loop.
+            # Returning here would (a) let the dispatch loop re-dispatch a
+            # breakpoint the frame returned onto, which never re-enters emu_start
+            # and so never fires the one-shot _skip_bp_once — an observe-only tick
+            # handler (HAL_GetTick inject SysTick + continue_past_breakpoint) then
+            # re-injects forever (livelock); and (b) exit outright when no IRQ
+            # controller is configured (in_process_irq_active() is False), which
+            # is exactly a native SVCall/PendSV-launched RTOS task landing at a
+            # non-breakpoint PC (e.g. flipper's furi_thread_body). A real
+            # breakpoint on the restored PC still stops us cleanly: the code hook
+            # fires on re-entry, sets _stopped, and we fall through to return.
+            if self._exc_return_pending and not self._stopped:
+                self._exc_return_pending = False
                 continue
             return
 
@@ -2736,7 +2768,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._pendsv_pending = False
             self._pending_irqs.append(-2)      # -2 -> exception 14 (PendSV)
         # Unicorn needs to restart from the restored PC; stop the current
-        # emu_start so our dispatch loop re-issues cont() at the new PC.
+        # emu_start. Flag this as an exception-return stop so cont() resumes
+        # from the restored PC itself, rather than surfacing the internal stop
+        # to the dispatch loop (which would re-dispatch a breakpoint the frame
+        # happened to return onto — defeating _skip_bp_once and livelocking an
+        # observe-only tick handler — or exit outright when no IRQ controller is
+        # configured, e.g. a native SVCall/PendSV-launched RTOS first task).
+        self._exc_return_pending = True
         self._uc.emu_stop()
         return True
 
