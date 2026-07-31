@@ -504,11 +504,47 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # PendSV — the RTOS context switch. Nothing else models the NVIC, so
             # watch that write and queue PendSV (exception 14, as irq -2).
             self._pendsv_pending = False
+            # PC parked on the `str ICSR,PENDSVSET` store by emu_stop (see below).
+            self._pendsv_store_parked = False
+            # True while cont() single-steps to retire the parked store, so the
+            # store's own re-write does not re-park (which would abort the step
+            # and pin PC on the store forever).
+            self._pendsv_stepping = False
 
             def _icsr_write(uc, access, addr, size, value, ud):  # noqa: ANN001
-                if value & (1 << 28):
+                if getattr(self, "_pendsv_stepping", False):
+                    return                            # retiring the parked store
+                if value & (1 << 28):                 # PENDSVSET
+                    already = self._pendsv_pending
                     self._pendsv_pending = True
-                if value & (1 << 27):            # PENDSVCLR
+                    # A PendSV requested from THREAD mode (no exception in
+                    # flight) has nothing to tail-chain its delivery off — the
+                    # exc_return path only pends it when LEAVING a handler. This
+                    # is how an RTOS starts its first switch (Zephyr's arch_swap
+                    # sets PENDSVSET, unmasks, `isb`, and expects to be preempted
+                    # immediately). Real hardware takes the PendSV at the next
+                    # instruction boundary; mirror that by breaking out of
+                    # emu_start so cont() synthesises the entry between chunks
+                    # (PC/SP mutation is only safe there). emu_stop leaves PC
+                    # parked on this store, so flag it for cont() to retire first
+                    # (else the resumed thread re-writes PENDSVSET and ping-pongs
+                    # forever). Break only the first time — the already-pending
+                    # guard lets a deferred re-entry's store complete. From
+                    # HANDLER mode we do NOT break: the existing exc_return
+                    # tail-chain delivers it once the CPU drops back to thread.
+                    if not already:
+                        try:
+                            ipsr = (uc.reg_read(unicorn.arm_const.UC_ARM_REG_IPSR)
+                                    & 0x1FF)
+                        except Exception:  # noqa: BLE001
+                            ipsr = 0
+                        if ipsr == 0:                 # thread mode
+                            self._pendsv_store_parked = True
+                            try:
+                                uc.emu_stop()
+                            except Exception:  # noqa: BLE001
+                                pass
+                if value & (1 << 27):                 # PENDSVCLR
                     self._pendsv_pending = False
             self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icsr_write,
                               begin=0xE000ED04, end=0xE000ED07)
@@ -904,6 +940,22 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 and pc != -1
                 and self._maybe_handle_exc_return(pc)):
             return  # _maybe_handle_exc_return already called emu_stop
+        # Cortex-M supervisor call (`svc #n`). RTOS kernels use SVC for syscalls
+        # and, in some ports, to start/switch threads (RIOT's cpu_switch_context_exit
+        # issues `svc #1`; FreeRTOS's vPortStartFirstTask uses `svc`). (Note: Zephyr
+        # on this target does NOT use svc to launch its main thread — it context-
+        # switches via PENDSVSET from thread mode; see _maybe_deliver_thread_pendsv.
+        # This trap is for the RTOSes that do use svc.) The generic ARM core Unicorn
+        # boots does not vector M-profile SVC to the NVIC table, so the trap lands
+        # here. Synthesise the
+        # architectural entry to vector[11] (SVCall) via the shared in-process
+        # delivery path so the firmware's OWN handler runs and returns via
+        # EXC_RETURN (_maybe_handle_exc_return). skip_svc firmware (P2IM
+        # instrumentation) opts out and takes the advance-past-SVC path below.
+        if (self.arch_name == "cortex-m3" and not self.skip_svc
+                and pc not in (-1, 0)
+                and self._maybe_handle_cortexm_svc(uc, pc)):
+            return
         # Opt-in recovery: a Thumb SVC (high byte 0xDF) from instrumented
         # firmware (e.g. P2IM aflCall). When the SVC traps, unicorn reports
         # pc at the *next* instruction, so the SVC opcode is at pc or pc-2.
@@ -2028,6 +2080,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # PC/SP, only safe when emu_start is not running.
             while self._pending_irqs:
                 self._apply_pending_irq(self._pending_irqs.pop(0))
+            # Deliver a PendSV requested from thread mode (the ICSR write hook
+            # emu_stop'd us and parked PC on the store). Done here, at the top of
+            # the loop, so it survives an intervening breakpoint stop: the parked
+            # request stays set across a cont() return/re-entry (a bp handler
+            # runs between) and is delivered when execution next resumes.
+            if getattr(self, "_pendsv_store_parked", False):
+                self._maybe_deliver_thread_pendsv()
             pc = self.read_register("pc")
             # Unicorn Thumb mode needs the LSB set on the start
             # address.
@@ -2203,9 +2262,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         except Exception as _e:
                             log.error("UnicornBackend: rescue failed: %s", _e)
                 # emu_stop without a breakpoint hook firing: either
-                # inject_irq queued an IRQ on another thread, or
-                # something asked us to stop. If the former, loop and
-                # apply the IRQ. Otherwise honour the stop.
+                # inject_irq queued an IRQ on another thread, a thread-mode
+                # PendSV request broke us out, or something asked us to stop.
+                # Deliver / drain the former; otherwise honour the stop.
+                if not self._stopped and getattr(self, "_pendsv_store_parked",
+                                                  False):
+                    continue
                 if not self._pending_irqs:
                     # Print PC + LR so the user can find where boot died.
                     try:
@@ -2225,6 +2287,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # hook), so check the resume flag here too.
             if getattr(self, "_x86_resume_eip", None) is not None:
                 self._x86_resume_eip = None
+                continue
+            # Cortex-M PendSV requested from thread mode (the ICSR write hook
+            # emu_stop'd us, parking PC on the store). Loop back to the top,
+            # which delivers it — unless a breakpoint also stopped us, in which
+            # case honour the stop and deliver on the next cont() entry.
+            if not self._stopped and getattr(self, "_pendsv_store_parked", False):
                 continue
             if self._pending_irqs:
                 continue
@@ -2520,6 +2588,112 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             )
         Arm64ExceptionDeliverer().deliver(self, irq_num,
                                           self._resolve_delivery_plan(_legacy))
+
+    # PendSV is exception 14, delivered through _apply_cortex_m_fallback as
+    # irq_num -2 (16 + -2 == 14), the same shared path as external IRQs.
+    _PENDSV_IRQ = -2
+
+    def _cortexm_step_one(self) -> None:
+        """Execute exactly one instruction from the current PC.
+
+        Used to retire the `str ICSR,PENDSVSET` store the write hook parked PC
+        on (emu_stop aborts the faulting instruction, leaving PC on it). The
+        hook's already-pending guard keeps this single step from being
+        re-broken by the same store's write hook."""
+        if self._uc is None:
+            return
+        pc = self.read_register("pc")
+        start = (pc | 1) if self._is_thumb else pc
+        until = (1 << (self._word_size * 8)) - 1
+        try:
+            self._uc.emu_start(start, until, timeout=0, count=1)
+        except unicorn.UcError:
+            pass
+
+    def _maybe_deliver_thread_pendsv(self) -> bool:
+        """Deliver a PendSV that was requested from THREAD mode (the ICSR write
+        hook emu_stop'd us with ``_pendsv_pending`` set). Runs from cont()
+        between emu_start calls, where mutating PC/SP is safe.
+
+        Retires the parked PENDSVSET store first, then — only if the CPU is
+        back in thread mode (a PendSV, the lowest-priority exception, must not
+        nest inside an active handler) — synthesises the PendSV entry through
+        the shared ``_apply_cortex_m_fallback`` path (irq -2 -> exception 14),
+        exactly as a tail-chained PendSV is. If still in a handler, leaves the
+        request pending for the exc_return tail-chain to deliver.
+
+        Returns True when it delivered (or retired the parked store), so cont()
+        re-enters emu_start rather than treating the emu_stop as a final stop.
+        """
+        if getattr(self, "_pendsv_store_parked", False):
+            self._pendsv_store_parked = False
+            # Retire the parked store under the stepping guard so its re-write
+            # of PENDSVSET does not re-park (which would abort the step and pin
+            # PC on the store, re-pending PendSV forever).
+            self._pendsv_stepping = True
+            try:
+                self._cortexm_step_one()
+            finally:
+                self._pendsv_stepping = False
+        try:
+            ipsr = self._uc.reg_read(unicorn.arm_const.UC_ARM_REG_IPSR) & 0x1FF
+        except Exception:  # noqa: BLE001
+            ipsr = 0
+        if ipsr != 0:            # in a handler: leave pending for exc_return
+            return False
+        self._pendsv_pending = False
+        self._apply_cortex_m_fallback(self._PENDSV_IRQ)
+        return True
+
+    # SVCall (exception 11) is delivered through the same in-process path as
+    # every other Cortex-M exception: _apply_pending_irq (InProcessIrqMixin)
+    # -> _apply_cortex_m_fallback, which computes exc_num = 16 + irq_num. So
+    # SVCall is queued as irq_num -5 (16 + -5 == 11), mirroring PendSV's -2.
+    _SVCALL_IRQ = -5
+
+    def _maybe_handle_cortexm_svc(self, uc, pc: int) -> bool:
+        """Synthesise a Cortex-M SVCall (``svc`` instruction) exception entry.
+
+        RTOS kernels start their first thread and yield via ``svc``: Zephyr's
+        ``z_arm_svc`` (``arch_switch_to_main_thread``), FreeRTOS's
+        ``vPortSVCHandler``, RIOT's ``isr_svc``. The generic ARM core Unicorn
+        boots does not architecturally vector M-profile SVC to the NVIC vector
+        table, so the trap surfaces here in the INTR hook with PC at the
+        instruction *after* the ``svc`` — the 16-bit Thumb opcode is ``0xDFxx``,
+        i.e. two bytes back at ``pc-2``.
+
+        We verify the opcode and QUEUE a synthetic exception entry to SVCall
+        (vector slot 11) through the shared in-process delivery path — the SAME
+        ``_apply_cortex_m_fallback`` frame-push/vectoring used for external IRQs
+        and PendSV (via ``InProcessIrqMixin._apply_pending_irq``). Queueing
+        rather than mutating PC/SP inline matters: the frame push is only safe
+        between ``emu_start`` calls, so we append the pending IRQ and stop, and
+        ``cont()`` drains it at the top of its loop (exactly as PendSV is).
+
+        The return address stacked is the current PC (the instruction after the
+        ``svc``); the firmware's own handler runs and returns via EXC_RETURN
+        (unwound by ``_maybe_handle_exc_return``). Faithful: no firmware skip,
+        the kernel's context switch executes for real.
+
+        Returns True (and ``emu_stop``s) when an SVC entry was queued, else
+        False.
+        """
+        if self.arch_name != "cortex-m3":
+            return False
+        # Confirm a 16-bit Thumb SVC (0xDF nn) sits just before PC. Unicorn
+        # reports PC at the next instruction, so the opcode is at pc-2.
+        try:
+            op = bytes(uc.mem_read(pc - 2, 2))
+        except Exception:  # noqa: BLE001 — Unicorn raises UcError on bad read
+            return False
+        if len(op) != 2 or op[1] != 0xDF:
+            return False
+        # Queue SVCall (exc 11) via the shared mixin delivery path and break out
+        # of emu_start; cont() applies it (pushes the frame, vectors to slot 11)
+        # before re-entering at the handler. Same mechanism inject_irq/PendSV use.
+        self._pending_irqs.append(self._SVCALL_IRQ)
+        uc.emu_stop()
+        return True
 
     def _maybe_handle_exc_return(self, addr: int) -> bool:
         """Called from the invalid-fetch hook. If the fetch address is an
