@@ -16,9 +16,15 @@ try:
     from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
     from avatar2.archs.mips import MIPS_BE
     from avatar2.archs.x86 import X86
+    try:
+        # Little-endian MIPS32 (PIC32 and similar). Older avatar2 releases only
+        # ship MIPS_BE; fall back to it so the table still builds.
+        from avatar2.archs.mips import MIPS_LE
+    except ImportError:  # pragma: no cover
+        MIPS_LE = MIPS_BE
 except ImportError:  # pragma: no cover - exercised by avatar2-less installs
     ARM_CORTEX_M3 = ARM = ARM64 = PPC32 = PPC64 = PPC_MPC8544DS = None
-    MIPS_BE = X86 = None
+    MIPS_BE = MIPS_LE = X86 = None
 
 import halucinator
 
@@ -68,6 +74,18 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
             "qemu_env_var": "HALUCINATOR_QEMU_MIPS",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "mips-softmmu/qemu-system-mips"
+            ),
+        },
+        # Little-endian MIPS32 ("mipsel"): the endianness used by Microchip
+        # PIC32 and most embedded MIPS SoCs that are not routers. Runs on the
+        # in-process unicorn backend (which reads mode from its own arch table);
+        # the avatar/qemu fields mirror big-endian mips for completeness.
+        "mipsel": {
+            "avatar_arch": MIPS_LE,
+            "qemu_target": lambda: _qemu_target("MIPSQemuTarget"),
+            "qemu_env_var": "HALUCINATOR_QEMU_MIPS",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "mipsel-softmmu/qemu-system-mipsel"
             ),
         },
         "powerpc": {
