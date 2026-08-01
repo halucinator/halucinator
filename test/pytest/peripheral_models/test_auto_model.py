@@ -102,6 +102,43 @@ class TestAutoPeripheral:
         assert 0xFFFFFFFF in seen
         assert 0 in seen
 
+    def test_windowed_breaker_breaks_interleaved_poll(self):
+        # A register polled in a loop that ALSO reads a second register every
+        # iteration (A,B,A,B,...) never builds a strictly-consecutive run, so
+        # the consecutive detector alone never fires (its run resets on every
+        # B). The windowed detector must still break the spin on A within a
+        # bounded number of reads. This is the gps-tracker UOTGHS/USB regression
+        # (target register polled interleaved with another).
+        p = AutoPeripheral("a", 0x40000000, 0x1000,
+                           stall_threshold=8, stall_window=40, stall_win_div=4)
+        # trigger = max(8, 40 // 4) = 10 reads of A within the window.
+        a_vals = []
+        for _ in range(20):
+            a_vals.append(p.hw_read(0x0, 4, pc=0x8000))   # register A
+            p.hw_read(0x4, 4, pc=0x8004)                  # interleaved reg B
+        # The strict-consecutive counter never reached the threshold — the
+        # interleaving keeps resetting it — proving the break came from the
+        # windowed path, not the consecutive one.
+        assert p._repeat[(0x8000, 0x40000000)] < p.stall_threshold
+        # A broke: a wait-for-SET spin sees all-ones within the bounded loop...
+        assert 0xFFFFFFFF in a_vals
+        # ...and promptly (once its dominance threshold of 10 reads is crossed).
+        assert a_vals.index(0xFFFFFFFF) <= 12
+
+    def test_interleaved_poll_not_broken_when_not_dominant(self):
+        # Conservative-behaviour guard: a register read only occasionally (not
+        # spun on) must NOT be broken by the windowed detector, even over many
+        # reads. Here A is read once per 8 reads of B — well under the 1/4
+        # dominance bar — so every A read must still return 0.
+        p = AutoPeripheral("a", 0x40000000, 0x1000,
+                           stall_threshold=8, stall_window=40, stall_win_div=4)
+        a_vals = []
+        for _ in range(30):
+            a_vals.append(p.hw_read(0x0, 4, pc=0x8000))       # register A (rare)
+            for _ in range(7):
+                p.hw_read(0x4, 4, pc=0x8004)                  # register B (busy)
+        assert set(a_vals) == {0}
+
     def test_write_clears_stall_state(self):
         p = AutoPeripheral("a", 0x40000000, 0x1000, stall_threshold=4)
         for _ in range(6):
