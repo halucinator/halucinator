@@ -279,11 +279,25 @@ class ArmExceptionDeliverer(ExceptionDeliverer):
         backend.write_register("lr", (pc + 4) & 0xFFFFFFFF)
         backend.write_register("spsr", cpsr)
 
-        # GIC path only: stash the acknowledged id into the GICC_IAR shadow
-        # so the firmware ISR reads the right interrupt number. Absent on
-        # the VIC path (plan.gicc_base is None) — exactly matching old
+        # GIC path only: stash the acknowledged id so the firmware ISR reads
+        # the right interrupt number from GICC_IAR. Absent on the VIC path
+        # (plan.gicc_base is None) — exactly matching old
         # ArmVicController.deliver, which never touched GICC_IAR.
+        #
+        # Two mechanisms, because backends differ:
+        #   * `_gicc_iar_pending` — consumed by the in-process backend's
+        #     modelled GICC_IAR read (UnicornBackend.set_delivery_plan). This
+        #     is authoritative: it survives an AutoPeripheral catch-all mapped
+        #     over the CPU-interface page, which a plain memory write does not
+        #     (the catch-all's read hook would overwrite it with its default,
+        #     so the firmware would read the GICv2 spurious id 0x3FF forever
+        #     and never dispatch the delivered ISR).
+        #   * a raw GICC_IAR memory write — the legacy shadow, kept for
+        #     backends without the modelled interface (they read IAR straight
+        #     from memory). Harmless where the model is present (the model
+        #     wins on read).
         if plan.gicc_base is not None:
+            setattr(backend, "_gicc_iar_pending", int(num) & 0xFFFFFFFF)
             backend.write_memory(plan.gicc_base + _GICC_IAR_OFFSET, 4,
                                  int(num) & 0xFFFFFFFF)
 
