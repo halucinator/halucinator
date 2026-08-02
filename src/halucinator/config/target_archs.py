@@ -104,6 +104,26 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
                 _QEMU_DEFAULT_LOC, "i386-softmmu/qemu-system-i386"
             ),
         },
+        # SPARC V8, 32-bit, big-endian -- the Gaisler LEON2/3/4/5 SoC family
+        # (ESA/NASA spaceflight avionics). In-process unicorn backend only:
+        # avatar2 ships no SPARC arch, and there is no sparc-softmmu in the
+        # qemu builds this targets, so avatar_arch is None and the qemu_target
+        # lambda is a tripwire -- it is never invoked on the unicorn path
+        # (which reads the mode straight from unicorn_backend._ARCH_MAP).
+        # Registered here so HalConfig's `arch not in HALUCINATOR_TARGETS`
+        # validation accepts the config. LEON is V8; SPARC64/V9 is the
+        # unsupported one.
+        "sparc": {
+            "avatar_arch": None,
+            "qemu_target": lambda: (_ for _ in ()).throw(
+                NotImplementedError(
+                    "sparc runs on the in-process unicorn backend only "
+                    "(--emulator unicorn); no avatar2/qemu SPARC target")),
+            "qemu_env_var": "HALUCINATOR_QEMU_SPARC",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "sparc-softmmu/qemu-system-sparc"
+            ),
+        },
     }
 
 
