@@ -118,12 +118,38 @@ def _get_arm64_reg_map() -> Dict[str, int]:
         "sp": arm64_const.UC_ARM64_REG_SP,
         "pc": arm64_const.UC_ARM64_REG_PC,
     }
-    # x29 = fp, x30 = lr on AArch64
+    # x29 = fp, x30 = lr on AArch64. The EL1 exception registers below are what
+    # Arm64ExceptionDeliverer's FRAME path already reads/writes by name
+    # (`vbar_el1` to find the vector table, `elr_el1` to set the return address
+    # the handler's terminating `eret` consumes). Without them both lookups
+    # raised ValueError, which the deliverer catches and swallows -- so the
+    # FRAME path silently fell back to the configured vector_base and NEVER set
+    # ELR_EL1, and the ISR's `eret` returned to a stale address. Every name is
+    # added defensively (getattr) so an older Unicorn without a given constant
+    # degrades to "absent" rather than breaking import.
     for name, reg in (
         ("x29", "UC_ARM64_REG_X29"),
         ("x30", "UC_ARM64_REG_X30"),
         ("fp",  "UC_ARM64_REG_FP"),
         ("lr",  "UC_ARM64_REG_LR"),
+        # EL1 exception state (vector base, exception link, syndrome).
+        ("vbar_el1", "UC_ARM64_REG_VBAR_EL1"),
+        ("elr_el1",  "UC_ARM64_REG_ELR_EL1"),
+        ("esr_el1",  "UC_ARM64_REG_ESR_EL1"),
+        # Processor state (PSTATE carries DAIF/nRW; SPSR_EL1 has no dedicated
+        # Unicorn id, so callers that need it use the CP_REG path).
+        ("pstate", "UC_ARM64_REG_PSTATE"),
+        ("nzcv",   "UC_ARM64_REG_NZCV"),
+        # Other ELs, for images that boot through EL2/EL3 before dropping.
+        ("vbar_el2", "UC_ARM64_REG_VBAR_EL2"),
+        ("elr_el2",  "UC_ARM64_REG_ELR_EL2"),
+        ("vbar_el3", "UC_ARM64_REG_VBAR_EL3"),
+        ("elr_el3",  "UC_ARM64_REG_ELR_EL3"),
+        # MMU/control, useful to peripheral models and diagnostics.
+        ("sctlr_el1", "UC_ARM64_REG_SCTLR_EL1"),
+        ("ttbr0_el1", "UC_ARM64_REG_TTBR0_EL1"),
+        ("ttbr1_el1", "UC_ARM64_REG_TTBR1_EL1"),
+        ("cpacr_el1", "UC_ARM64_REG_CPACR_EL1"),
     ):
         v = getattr(arm64_const, reg, None)
         if v is not None:
