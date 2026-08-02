@@ -46,6 +46,10 @@ try:
         import unicorn.x86_const as x86_const
     except ImportError:
         x86_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.sparc_const as sparc_const
+    except ImportError:
+        sparc_const = None  # type: ignore[assignment]
     _HAVE_UNICORN = True
 except ImportError:
     _HAVE_UNICORN = False
@@ -55,6 +59,7 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    sparc_const = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,13 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # SPARC V8, 32-bit, big-endian -- the ISA of the Gaisler LEON2/3/4/5 SoCs
+    # used across ESA/NASA spaceflight avionics. LEON is V8, NOT V9: SPARC64/V9
+    # is the unsupported one in unicorn. Note UC_MODE_SPARC32 must be OR'd with
+    # UC_MODE_BIG_ENDIAN -- unicorn rejects SPARC32 on its own with
+    # UC_ERR_MODE (there is no little-endian SPARC32 CPU in its QEMU core), so
+    # the endianness flag is not optional here the way it is for MIPS.
+    "sparc":          ("sparc",  "sparc32_be", False, True, 4),
 }
 
 _PERM_MAP = {
@@ -215,6 +227,46 @@ def _get_ppc_reg_map(word: int = 4) -> Dict[str, int]:
     return m
 
 
+def _get_sparc_reg_map() -> Dict[str, int]:
+    """SPARC V8 register map (LEON2/3/4/5).
+
+    SPARC names its integer registers by *window role* rather than by number:
+    %g0-%g7 are the globals (shared by every window), while %o/%l/%i are the
+    out/local/in registers of the CURRENT window -- a `save` rotates the window
+    so the caller's %o becomes the callee's %i. unicorn exposes the current
+    window's view, which is what a breakpoint handler wants.
+
+    The ABI aliases matter: %sp IS %o6 and %fp IS %i6 (verified against
+    unicorn's own constants, which give both names the same id), and the return
+    address of a `call` lands in %o7, not in a dedicated link register.
+    """
+    if "sparc" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["sparc"]
+    if sparc_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for prefix in ("g", "o", "l", "i"):
+        for idx in range(8):
+            const = getattr(sparc_const,
+                            f"UC_SPARC_REG_{prefix.upper()}{idx}", None)
+            if const is not None:
+                m[f"{prefix}{idx}"] = const
+    # ABI aliases. %sp/%fp are genuinely the same registers as %o6/%i6, so
+    # these are aliases rather than copies.
+    if "o6" in m:
+        m["sp"] = m["o6"]
+    if "i6" in m:
+        m["fp"] = m["i6"]
+    if "o7" in m:
+        m["ra"] = m["o7"]        # `call` writes its return address here
+    for name in ("pc", "y"):
+        const = getattr(sparc_const, f"UC_SPARC_REG_{name.upper()}", None)
+        if const is not None:
+            m[name] = const
+    _REG_MAPS_CACHE["sparc"] = m
+    return m
+
+
 def _get_x86_reg_map() -> Dict[str, int]:
     if "x86" in _REG_MAPS_CACHE:
         return _REG_MAPS_CACHE["x86"]
@@ -253,6 +305,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_ppc_reg_map(word)
     if uc_arch == "x86":
         return _get_x86_reg_map()
+    if uc_arch == "sparc":
+        return _get_sparc_reg_map()
     return {}
 
 
@@ -433,6 +487,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "sparc":
+            uc_arch = unicorn.UC_ARCH_SPARC
+            # BIG_ENDIAN is REQUIRED, not a refinement: unicorn 2.1.4 rejects a
+            # bare UC_MODE_SPARC32 with UC_ERR_MODE (it has no little-endian
+            # SPARC32 CPU), so unlike MIPS this flag cannot be conditional on
+            # the mode string.
+            uc_mode = unicorn.UC_MODE_SPARC32 | unicorn.UC_MODE_BIG_ENDIAN
         else:
             raise ValueError(f"Unsupported arch for UnicornBackend: {arch_str!r}")
 
