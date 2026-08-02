@@ -27,6 +27,8 @@ import struct
 from typing import Callable, List, Optional
 
 log = logging.getLogger(__name__)
+from halucinator import hal_log  # noqa: E402
+hlog = hal_log.getHalLogger()
 
 
 class InProcessIrqMixin:
@@ -136,6 +138,9 @@ class InProcessIrqMixin:
         if arch in ("mips", "powerpc", "powerpc:MPC8XX", "ppc64"):
             self._apply_pending_irq_shadow(irq_num)
             return
+        if arch == "m68k":
+            self._apply_pending_irq_m68k(irq_num)
+            return
         if arch == "x86":
             # x86 delivery lives in X86ExceptionDeliverer; the configured
             # X86PicController.deliver is a thin shim over it that carries the
@@ -150,6 +155,123 @@ class InProcessIrqMixin:
             return
         # Cortex-M (and any un-migrated arch): backend-provided frame push.
         self._apply_cortex_m_fallback(irq_num)
+
+    # -- m68k / ColdFire ---------------------------------------------------
+    def _apply_pending_irq_m68k(self, irq_num: int) -> None:
+        """Synthesise an m68k exception entry for *irq_num* (a VECTOR NUMBER).
+
+        The 68000 family takes an exception by pushing a frame on the
+        SUPERVISOR stack, loading the handler address from ``VBR + vector*4``,
+        and entering supervisor state with the interrupt level raised. unicorn
+        performs none of that (its m68k CPU has no exception machinery), so we
+        do it here, on the dispatch thread, where mutating PC/SP is safe.
+
+        ColdFire uses a 2-longword frame, which is what we push:
+
+            SP+0 : FORMAT[31:28] | FS[27:26] | VECTOR[25:18] | FS[17:16] | SR[15:0]
+            SP+4 : PC
+
+        Two m68k-specific hazards, both of which cost real debugging time:
+
+        * **A7 is BANKED.** It is the user stack pointer while SR.S is clear and
+          the supervisor stack pointer while it is set. Every A7 access below is
+          therefore ordered so the supervisor bank is the live one: we raise
+          SR.S *before* touching A7 on entry, and decrement A7 *before*
+          restoring SR on exit (see ``_m68k_handle_rte`` in the backend).
+        * **The vector is a NUMBER, not an address.** Autovectored interrupt
+          level *n* is vector ``24 + n``; device interrupts on a ColdFire INTC
+          use vectors 64 and up. Callers pass the vector number.
+        """
+        uc_regs = self.regs
+        vector = int(irq_num) & 0xFF
+        sr = uc_regs.sr
+        pc = uc_regs.pc
+
+        # --- HONOUR THE INTERRUPT MASK -----------------------------------
+        # SR[10:8] is the interrupt priority level. Real 68k hardware delivers
+        # an interrupt only if its level is GREATER than the current IPL;
+        # level 7 is non-maskable. Ignoring this delivers interrupts into code
+        # that has explicitly masked them -- e.g. a reset stub running at
+        # IPL 7, or any critical section -- which corrupts firmware that is
+        # correct on real silicon. Autovectors 25..31 encode their own level
+        # (vector 24 + n); device vectors (64+) take their level from the
+        # interrupt controller, which is device-specific, so it is configurable
+        # here and defaults to 4 (a mid priority a firmware at IPL 0 accepts).
+        if 25 <= vector <= 31:
+            level = vector - 24
+        else:
+            try:
+                level = int(os.environ.get("HAL_M68K_IRQ_LEVEL", "4"), 0)
+            except ValueError:
+                level = 4
+            level = min(max(level, 1), 7)
+        cur_ipl = (sr >> 8) & 0x7
+        if level != 7 and level <= cur_ipl:
+            # Masked. Drop it, exactly as the hardware would -- and say so once
+            # per (vector, IPL) pair, because "my timer never fires" with no
+            # diagnostic is the worst possible failure mode here.
+            key = (vector, cur_ipl)
+            seen = getattr(self, "_m68k_masked_seen", None)
+            if seen is None:
+                seen = self._m68k_masked_seen = set()
+            if key not in seen:
+                seen.add(key)
+                hlog.info("m68k: vector %d (level %d) MASKED -- firmware is at "
+                          "IPL %d. The firmware must lower SR.IPL before this "
+                          "interrupt can be delivered.", vector, level, cur_ipl)
+            return
+
+        # Enter supervisor FIRST so A7 refers to the supervisor stack.
+        new_sr = (sr | 0x2000) & ~0x0700          # S = 1, clear IPL...
+        new_sr |= (level & 0x7) << 8              # ...then raise to this level
+        uc_regs.sr = new_sr
+
+        sp = uc_regs.sp - 8
+        fmt_word = ((0x4 << 28) | ((vector & 0xFF) << 18) | (sr & 0xFFFF))
+        self.write_memory(sp, 4, fmt_word, num_words=1)
+        self.write_memory(sp + 4, 4, pc, num_words=1)
+        uc_regs.sp = sp
+
+        # VBR relocates the vector table on real hardware, but unicorn 2.1.4
+        # does NOT implement the m68k VBR control register: reads are a no-op
+        # (register id 21) and emit a deprecation warning, and `movec ax,%vbr`
+        # does not stick. So the table is only reachable at address 0. Probe
+        # once, cache the answer, and say so ONCE -- a firmware that relocates
+        # its vector table (an RTOS moving it to RAM) will not work until
+        # unicorn implements VBR, and that must not be a silent wrong answer.
+        vbr = 0
+        if not getattr(self, "_m68k_vbr_checked", False):
+            self._m68k_vbr_checked = True
+            self._m68k_vbr_usable = False
+            try:
+                probe = uc_regs.vbr
+                self._m68k_vbr_usable = probe is not None
+            except Exception:  # noqa: BLE001
+                self._m68k_vbr_usable = False
+            if not self._m68k_vbr_usable:
+                log.warning(
+                    "m68k: unicorn does not implement VBR -- assuming the "
+                    "exception vector table is at address 0. Firmware that "
+                    "RELOCATES its vector table will vector incorrectly.")
+        if getattr(self, "_m68k_vbr_usable", False):
+            try:
+                vbr = uc_regs.vbr or 0
+            except Exception:  # noqa: BLE001
+                vbr = 0
+
+        handler = self.read_memory(vbr + vector * 4, 4, 1)
+        if not handler:
+            log.warning("inject_irq(vector %d): vector table entry at "
+                        "0x%08x is 0 -- refusing to jump to NULL",
+                        vector, vbr + vector * 4)
+            # Undo the frame push so the firmware is left untouched.
+            uc_regs.sp = sp + 8
+            uc_regs.sr = sr
+            return
+        uc_regs.pc = handler
+        hlog.info("m68k exception: vector %d -> handler 0x%08x "
+                 "(saved pc=0x%08x sr=0x%04x, sp=0x%08x)",
+                 vector, handler, pc, sr, sp)
 
     # -- shared SHADOW delivery -------------------------------------------
     def _apply_pending_irq_shadow(self, irq_num: int) -> None:

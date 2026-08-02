@@ -97,6 +97,11 @@ _PERM_MAP = {
     "xrw": 0x7,
 }
 
+# QEMU's m68k translator raises this out to the host instead of completing an
+# `rte` itself (target/m68k/cpu.h: EXCP_RTE). unicorn does not run QEMU's
+# do_interrupt, so the backend must finish the return -- see _m68k_handle_rte.
+_M68K_EXCP_RTE = 0x100
+
 _REG_MAPS_CACHE: Dict[str, Dict[str, int]] = {}
 
 
@@ -974,6 +979,49 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         for pc, n in hist.most_common(top):
             log.info("  0x%08x  x%d", pc, n)
 
+    def _m68k_handle_rte(self) -> bool:
+        """Complete an `rte`: pop the ColdFire exception frame and resume.
+
+        Frame layout (pushed by _apply_pending_irq_m68k):
+            SP+0 : FORMAT | FS | VECTOR | FS | SR[15:0]
+            SP+4 : PC
+
+        ORDER IS LOAD-BEARING. A7 is banked on m68k -- it is the supervisor
+        stack pointer only while SR.S is set. We are in supervisor state here
+        (we got in via an exception), so A7 is popped and written back BEFORE
+        SR is restored; restoring SR first could clear S and silently redirect
+        the write to the user stack pointer. Returns True if a frame was
+        consumed.
+        """
+        try:
+            sp = self.read_register("sp")
+            fmt_word = self.read_memory(sp, 4, 1)
+            ret_pc = self.read_memory(sp + 4, 4, 1)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k rte: cannot read the exception frame at "
+                      "sp=0x%08x (%s)", locals().get("sp", -1), exc)
+            return False
+        ret_sr = fmt_word & 0xFFFF
+        vector = (fmt_word >> 18) & 0xFF
+        try:
+            # supervisor bank still live -> pop, THEN restore SR
+            self.write_register("sp", (sp + 8) & 0xFFFFFFFF)
+            self.write_register("pc", ret_pc)
+            self.write_register("sr", ret_sr)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k rte: could not restore state (%s)", exc)
+            return False
+        hlog.info("m68k rte: vector %d -> resuming pc=0x%08x sr=0x%04x "
+                 "(sp 0x%08x -> 0x%08x)", vector, ret_pc, ret_sr, sp, sp + 8)
+        # Restart the emulator at the restored PC: the current translation
+        # block is mid-`rte`, so we cannot simply fall through.
+        self._exc_return_pending = True
+        try:
+            self._uc.emu_stop()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def _intr_hook(self, uc, intno, user_data):
         try:
             pc = self.read_register("pc")
@@ -991,6 +1039,16 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if (self.arch_name == "x86" and pc != -1
                 and self._x86_handle_seg_fault(uc, pc)):
             return
+        # m68k: unicorn does NOT implement `rte`. QEMU's m68k translator
+        # raises EXCP_RTE (0x100) out to the host and completes the return in
+        # m68k_cpu_do_interrupt(), which unicorn does not run -- so `rte` here
+        # traps to this hook forever and the ISR never returns. Emulate it: pop
+        # the exception frame the delivery path pushed and resume. Exact
+        # counterpart of the Cortex-M EXC_RETURN unwind below.
+        if self.arch_name == "m68k" and intno == _M68K_EXCP_RTE:
+            if self._m68k_handle_rte():
+                return
+
         # On cortex-m3, an ISR returning via `bx lr` jumps to an
         # EXC_RETURN magic value (top nibble 0xF). Unicorn raises an
         # exception here rather than firing the fetch-unmapped hook,
@@ -2113,7 +2171,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         _chunk_env = __os.environ.get("HAL_IRQ_CHUNK")
         if _chunk_env:
             irq_chunk = int(_chunk_env, 0)
-        elif self.arch_name in ("x86", "arm"):
+        elif self.arch_name in ("x86", "arm", "m68k"):
+            # m68k joins the bounded-chunk arches for the same reason: it has
+            # no native exception machinery in unicorn, so every interrupt is
+            # synthesised BETWEEN chunks by _apply_pending_irq_m68k. With an
+            # unbounded run (count=0) emu_start never returns on its own, the
+            # pending queue is never drained, and a configured HAL_DET_TICK
+            # simply never fires -- silently, with no diagnostic. Any future
+            # arch that delivers IRQs in-process must be added here too.
             irq_chunk = 2_000_000
         else:
             irq_chunk = 0
