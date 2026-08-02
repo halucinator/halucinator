@@ -1454,12 +1454,22 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         base, size, region.name, exc)
 
     def _make_mmio_hook(self, region: MemoryRegion) -> Callable:
+        # A modelled read is served by writing the value into the mapped page
+        # and letting the guest load complete, so the bytes must be laid out in
+        # the GUEST's byte order. Hardcoding "little" byte-swaps every read
+        # wider than one byte on a big-endian target: a peripheral model
+        # returning 0xFFFFF3F8 was read by big-endian SPARC firmware as
+        # 0xF8F3FFFF. Byte-sized reads are unaffected, which is why this
+        # survived so long -- a driver that polls a status register one byte at
+        # a time never produces a multi-byte modelled read.
+        order = "big" if self._is_be else "little"
+
         def _hook(uc, access, addr, size, value, user_data):
             offset = addr - region.base_addr
             if access == unicorn.UC_MEM_READ and region.read_hook:
                 result = region.read_hook(offset, size)
                 if result is not None:
-                    data = result.to_bytes(size, "little")
+                    data = result.to_bytes(size, order)
                     uc.mem_write(addr, data)
             elif access == unicorn.UC_MEM_WRITE and region.write_hook:
                 region.write_hook(offset, size, value)
