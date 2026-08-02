@@ -2253,6 +2253,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # PC/SP, only safe when emu_start is not running.
             while self._pending_irqs:
                 self._apply_pending_irq(self._pending_irqs.pop(0))
+            # m68k: interrupts that were masked when we tried to deliver them
+            # stay ASSERTED, like a real controller. Move them back now that
+            # the drain loop has finished (re-queuing inside it would spin).
+            _masked = getattr(self, "_m68k_masked_pending", None)
+            if _masked:
+                self._pending_irqs.extend(_masked)
+                _masked.clear()
             # m68k: apply a deferred condition-code transplant left by an
             # `rte` (see _m68k_handle_rte). Must happen HERE -- outside
             # emu_start -- or unicorn discards it on unwind.
@@ -2456,6 +2463,19 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             if getattr(self, "_x86_resume_eip", None) is not None:
                 self._x86_resume_eip = None
                 continue
+            # Deterministic system-clock tick accounting happens BEFORE the
+            # pending-IRQ short-circuit below. A peripheral that rings a
+            # doorbell frequently (a ColdFire INTC force-interrupt driving an
+            # RTOS yield, say) leaves _pending_irqs non-empty on almost every
+            # chunk; with the pacer behind that `continue` the system tick
+            # STARVES COMPLETELY -- the RTOS runs but every vTaskDelay blocks
+            # forever, with no diagnostic. Observed on m68k/FreeRTOS.
+            if (irq_chunk and not self._stopped
+                    and self._det_irq is not None and self._pending_irqs):
+                self._det_chunks += 1
+                if (self._det_chunks % self._det_period == 0
+                        and self._det_irq not in self._pending_irqs):
+                    self._pending_irqs.append(self._det_irq)
             if self._pending_irqs:
                 continue
             # x86 runs in bounded chunks: a clean return means the chunk's

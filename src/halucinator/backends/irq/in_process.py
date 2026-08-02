@@ -223,10 +223,36 @@ class InProcessIrqMixin:
         if 25 <= vector <= 31:
             level = vector - 24
         else:
-            try:
-                level = int(os.environ.get("HAL_M68K_IRQ_LEVEL", "4"), 0)
-            except ValueError:
-                level = 4
+            # HAL_M68K_IRQ_LEVEL takes either a bare default ("4") or a
+            # per-vector map ("64:6,80:3,*:4"). Per-vector matters: a system
+            # tick must be able to PREEMPT a lower-priority software-yield
+            # ISR, and with one shared level the yield handler (running at
+            # that level) masks the tick permanently -- the RTOS then runs but
+            # never advances time.
+            spec = os.environ.get("HAL_M68K_IRQ_LEVEL", "4")
+            level = 4
+            if ":" in spec:
+                default = 4
+                for tok in spec.split(","):
+                    tok = tok.strip()
+                    if not tok or ":" not in tok:
+                        continue
+                    key, _, val = tok.partition(":")
+                    try:
+                        lvl = int(val, 0)
+                    except ValueError:
+                        continue
+                    if key.strip() == "*":
+                        default = lvl
+                    elif key.strip().isdigit() and int(key) == vector:
+                        default = lvl
+                        break
+                level = default
+            else:
+                try:
+                    level = int(spec, 0)
+                except ValueError:
+                    level = 4
             level = min(max(level, 1), 7)
         cur_ipl = (sr >> 8) & 0x7
         if level != 7 and level <= cur_ipl:
@@ -242,10 +268,22 @@ class InProcessIrqMixin:
                 hlog.info("m68k: vector %d (level %d) MASKED -- firmware is at "
                           "IPL %d. The firmware must lower SR.IPL before this "
                           "interrupt can be delivered.", vector, level, cur_ipl)
-            # Dropping the interrupt is not enough: reading SR above already
-            # flushed the guest's condition codes, so put them back or a
-            # MASKED interrupt would corrupt the firmware just as badly as a
-            # delivered one.
+            # A real interrupt controller HOLDS the request asserted until it
+            # is serviced -- it does not discard it because the CPU happened to
+            # be masked. Dropping it here deadlocks level-triggered firmware:
+            # FreeRTOS's vPortEnterCritical spins until MCF_INTC0_INTFRCL reads
+            # 0, which only the yield ISR clears, so a yield dropped while the
+            # tick ISR held a higher IPL wedges the kernel forever. Re-queue it
+            # for the next chunk instead. (Held in a SEPARATE list: appending to
+            # _pending_irqs here would spin the caller's drain loop.)
+            deferred = getattr(self, "_m68k_masked_pending", None)
+            if deferred is None:
+                deferred = self._m68k_masked_pending = []
+            if vector not in deferred:
+                deferred.append(vector)
+            # Reading SR above already flushed the guest's condition codes, so
+            # put them back or a MASKED interrupt corrupts the firmware just as
+            # badly as a delivered one.
             if _ctx is not None:
                 try:
                     self._uc.context_restore(_ctx)
