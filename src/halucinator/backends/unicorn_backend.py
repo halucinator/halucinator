@@ -1140,9 +1140,52 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     "(unicorn binding lacks aux1/arg1); IN/OUT may fault",
                     insn_id)
 
+    def register_port_handler(self, lo: int, hi: int,
+                              reader: Optional[Callable[[int, int], Optional[int]]] = None,
+                              writer: Optional[Callable[[int, int, int], None]] = None,
+                              name: str = "") -> None:
+        """Claim the x86 I/O-port range [lo, hi] for a peripheral model.
+
+        On x86 the chipset lives in *port* space, not memory, so a model
+        registered through the `peripherals:` memory map can never see it —
+        the catch-all IN/OUT hooks below absorb the access instead. This is
+        the port-space equivalent of mapping a peripheral: a model (usually
+        from a bp_handler's `register_handler`, which is handed the backend)
+        claims a range and then serves it.
+
+          reader(port, size) -> int | None   None = "not mine, fall through"
+          writer(port, size, value) -> None
+
+        Handlers are consulted in registration order and take precedence
+        over the built-in absorb, so a real 16550 model can answer RBR/LSR/
+        IIR while unclaimed ports keep the old behaviour."""
+        if not hasattr(self, "_port_handlers"):
+            self._port_handlers: List[Tuple[int, int, Any, Any, str]] = []
+        self._port_handlers.append((int(lo), int(hi), reader, writer, name))
+        hlog.info("UnicornBackend: port handler %s claims 0x%x-0x%x",
+                  name or "<unnamed>", lo, hi)
+
+    def _port_handler_for(self, port: int):
+        """The (reader, writer) pair claiming `port`, or (None, None)."""
+        for lo, hi, reader, writer, _name in getattr(self, "_port_handlers", ()):
+            if lo <= port <= hi:
+                return reader, writer
+        return None, None
+
     def _x86_in_hook(self, uc, port, size, user_data):
         """Handle an `in` from an I/O port. Return value is written back
         into the destination register by unicorn (return it from here)."""
+        reader, _writer = self._port_handler_for(port)
+        if reader is not None:
+            try:
+                val = reader(port, size)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("x86 IN  port=0x%x: handler raised %s", port, exc)
+                val = None
+            if val is not None:
+                log.debug("x86 IN  port=0x%x size=%d -> 0x%x (modelled)",
+                          port, size, val)
+                return int(val)
         val = 0
         for base in self._X86_UART_BASES:
             if port == base + 5:  # Line Status Register
@@ -1155,6 +1198,15 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         """Handle an `out` to an I/O port. Capture printable bytes written
         to a UART transmit-holding register (base+0) as console output;
         otherwise drop the write (no-op, like the MMIO catch-all)."""
+        _reader, writer = self._port_handler_for(port)
+        if writer is not None:
+            try:
+                writer(port, size, value)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("x86 OUT port=0x%x: handler raised %s", port, exc)
+            log.debug("x86 OUT port=0x%x size=%d value=0x%x (modelled)",
+                      port, size, value)
+            return
         for base in self._X86_UART_BASES:
             if port == base:  # Transmit Holding Register
                 low = value & 0xFF
