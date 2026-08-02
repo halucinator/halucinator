@@ -46,6 +46,10 @@ try:
         import unicorn.x86_const as x86_const
     except ImportError:
         x86_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.m68k_const as m68k_const
+    except ImportError:
+        m68k_const = None  # type: ignore[assignment]
     _HAVE_UNICORN = True
 except ImportError:
     _HAVE_UNICORN = False
@@ -55,6 +59,7 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    m68k_const = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,10 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # Motorola 68000 family, BIG-endian. Covers both ColdFire (MCF5206/5208/
+    # V4e -- the embedded line) and the classic 68000/020/040/060, selected at
+    # run time by HAL_M68K_CPU_MODEL; see init(). 4-byte words, no thumb.
+    "m68k":           ("m68k",   "m68k_be",  False, True,  4),
 }
 
 _PERM_MAP = {
@@ -211,6 +220,36 @@ def _get_x86_reg_map() -> Dict[str, int]:
     return m
 
 
+def _get_m68k_reg_map() -> Dict[str, int]:
+    if "m68k" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["m68k"]
+    if m68k_const is None:
+        return {}
+    m: Dict[str, int] = {
+        **{f"d{i}": getattr(m68k_const, f"UC_M68K_REG_D{i}") for i in range(8)},
+        **{f"a{i}": getattr(m68k_const, f"UC_M68K_REG_A{i}") for i in range(8)},
+        "pc": m68k_const.UC_M68K_REG_PC,
+        "sr": m68k_const.UC_M68K_REG_SR,
+    }
+    # A7 IS the stack pointer on m68k, and A6 is the conventional frame
+    # pointer. halucinator's generic code (dispatch loop, MMIO pc capture,
+    # regs.sp) uses the neutral "sp"/"fp" names.
+    m["sp"] = m["a7"]
+    m["fp"] = m["a6"]
+    # Control registers that matter for exception work: VBR relocates the
+    # vector table, and the banked stack pointers separate user/supervisor.
+    for name, const_name in (("vbr", "UC_M68K_REG_CR_VBR"),
+                             ("usp", "UC_M68K_REG_CR_USP"),
+                             ("msp", "UC_M68K_REG_CR_MSP"),
+                             ("isp", "UC_M68K_REG_CR_ISP"),
+                             ("cacr", "UC_M68K_REG_CR_CACR")):
+        v = getattr(m68k_const, const_name, None)
+        if v is not None:
+            m[name] = v
+    _REG_MAPS_CACHE["m68k"] = m
+    return m
+
+
 def _reg_map_for_arch(arch: str) -> Dict[str, int]:
     info = _ARCH_MAP.get(arch)
     if info is None:
@@ -227,6 +266,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_ppc_reg_map(word)
     if uc_arch == "x86":
         return _get_x86_reg_map()
+    if uc_arch == "m68k":
+        return _get_m68k_reg_map()
     return {}
 
 
@@ -407,6 +448,10 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "m68k":
+            uc_arch = unicorn.UC_ARCH_M68K
+            # The 68000 family is big-endian in every variant we target.
+            uc_mode = unicorn.UC_MODE_BIG_ENDIAN
         else:
             raise ValueError(f"Unsupported arch for UnicornBackend: {arch_str!r}")
 
@@ -475,6 +520,56 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             else:
                 log.warning("UnicornBackend: unknown HAL_ARM_CPU_MODEL=%r",
                             model_name)
+
+        # m68k: TWO things must be set here or real firmware dies in its
+        # reset path, and neither is obvious from a failing run.
+        #
+        # (1) CPU MODEL. unicorn's default m68k core behaves like a ColdFire
+        #     V4e, whose ISA genuinely REMOVED word-sized immediate ops
+        #     (addi.w/eori.w) and the whole dbcc family (dbf/dbra). Classic
+        #     68k code using them therefore takes an illegal-instruction trap
+        #     (vector 4) and looks like "unicorn can't decode m68k" -- this is
+        #     the substance of unicorn issue #1502, which is a CPU-MODEL
+        #     SELECTION problem, not a decode gap. Verified across models:
+        #       addi.w / eori.w / dbf   ok on M5206, M68000, M68040
+        #                               vector-4 trap on M5208, CFV4E, default
+        #     Default to MCF5206 (ColdFire V2: the embedded line this fleet
+        #     targets, and the most permissive of the ColdFire models), and let
+        #     a classic-68k image pin its own core:
+        #       HAL_M68K_CPU_MODEL=UC_CPU_M68K_M68040
+        #
+        # (2) SUPERVISOR MODE. Real 68k/ColdFire parts RESET INTO SUPERVISOR
+        #     STATE (SR.S set). unicorn resets SR to 0x0004 -- user mode -- so
+        #     the first privileged instruction in any reset stub (`move to SR`,
+        #     `movec` to VBR/CACR, ...) takes a privilege-violation trap
+        #     (vector 8) before the firmware reaches main(). Seed SR to
+        #     0x2700: S=1, IPL=7 (interrupts masked until the firmware lowers
+        #     the level itself), matching the architectural reset state.
+        #     Same class of fix as the PPC64 MSR.SF seed below.
+        if arch_str == "m68k" and m68k_const is not None:
+            import os as _os
+            _m68k_name = _os.environ.get("HAL_M68K_CPU_MODEL",
+                                         "UC_CPU_M68K_M5206")
+            _m68k_model = (getattr(m68k_const, _m68k_name, None)
+                           if _m68k_name.startswith("UC_CPU_M68K_") else None)
+            if _m68k_model is None:
+                hlog.warning("UnicornBackend: unknown HAL_M68K_CPU_MODEL=%r;"
+                             " using UC_CPU_M68K_M5206", _m68k_name)
+                _m68k_model = m68k_const.UC_CPU_M68K_M5206
+            try:
+                self._uc.ctl_set_cpu_model(_m68k_model)
+                if _m68k_name != "UC_CPU_M68K_M5206":
+                    hlog.info("UnicornBackend: m68k CPU model = %s", _m68k_name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "UnicornBackend: ctl_set_cpu_model(%s) failed (%s) -- "
+                    "classic-68k opcodes may trap as illegal", _m68k_name, exc)
+            # Architectural reset SR: supervisor, all interrupts masked.
+            try:
+                self._uc.reg_write(m68k_const.UC_M68K_REG_SR, 0x2700)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("UnicornBackend: could not seed m68k SR "
+                            "(supervisor) -- privileged init will trap: %s", exc)
 
         # PPC64 needs MSR.SF=1 so the CPU decodes 64-bit instructions.
         # Without it, any ld/std fires UC_ERR_EXCEPTION immediately.
