@@ -46,6 +46,10 @@ try:
         import unicorn.x86_const as x86_const
     except ImportError:
         x86_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.riscv_const as riscv_const
+    except ImportError:
+        riscv_const = None  # type: ignore[assignment]
     _HAVE_UNICORN = True
 except ImportError:
     _HAVE_UNICORN = False
@@ -55,6 +59,7 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    riscv_const = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,10 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # RV32IMAC (RISC-V, 32-bit, little-endian). unicorn decodes the base
+    # I/M/A/C extensions + Zicsr with no CPU-model pin; bare-metal images link
+    # at DRAM base 0x8000_0000. No thumb, little-endian, 4-byte words.
+    "riscv32":        ("riscv",  "riscv32_le", False, False, 4),
 }
 
 _PERM_MAP = {
@@ -211,6 +220,36 @@ def _get_x86_reg_map() -> Dict[str, int]:
     return m
 
 
+def _get_riscv_reg_map() -> Dict[str, int]:
+    if "riscv" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["riscv"]
+    if riscv_const is None:
+        return {}
+    # unicorn exposes UC_RISCV_REG_X0..X31 AND the ABI alias names
+    # (ZERO, RA, SP, GP, TP, T0-T6, S0-S11, A0-A7); both resolve to the same
+    # id (e.g. A0 == X10). Expose x-names, ABI aliases, and the neutral
+    # "pc"/"sp" halucinator's generic code (dispatch loop, MMIO pc capture,
+    # regs.pc/regs.sp) relies on.
+    m: Dict[str, int] = {
+        f"x{i}": getattr(riscv_const, f"UC_RISCV_REG_X{i}") for i in range(32)
+    }
+    aliases = {
+        "zero": 0, "ra": 1, "sp": 2, "gp": 3, "tp": 4,
+        "t0": 5, "t1": 6, "t2": 7,
+        "s0": 8, "fp": 8, "s1": 9,
+        "a0": 10, "a1": 11, "a2": 12, "a3": 13,
+        "a4": 14, "a5": 15, "a6": 16, "a7": 17,
+        "s2": 18, "s3": 19, "s4": 20, "s5": 21, "s6": 22, "s7": 23,
+        "s8": 24, "s9": 25, "s10": 26, "s11": 27,
+        "t3": 28, "t4": 29, "t5": 30, "t6": 31,
+    }
+    for name, idx in aliases.items():
+        m[name] = m[f"x{idx}"]
+    m["pc"] = riscv_const.UC_RISCV_REG_PC
+    _REG_MAPS_CACHE["riscv"] = m
+    return m
+
+
 def _reg_map_for_arch(arch: str) -> Dict[str, int]:
     info = _ARCH_MAP.get(arch)
     if info is None:
@@ -227,6 +266,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_ppc_reg_map(word)
     if uc_arch == "x86":
         return _get_x86_reg_map()
+    if uc_arch == "riscv":
+        return _get_riscv_reg_map()
     return {}
 
 
@@ -407,6 +448,15 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "riscv":
+            uc_arch = unicorn.UC_ARCH_RISCV
+            # RV64 would be UC_MODE_RISCV64; only RV32 is wired today. RISC-V is
+            # always little-endian in these images, so no BIG_ENDIAN bit.
+            uc_mode = (
+                unicorn.UC_MODE_RISCV64
+                if mode_str.startswith("riscv64")
+                else unicorn.UC_MODE_RISCV32
+            )
         else:
             raise ValueError(f"Unsupported arch for UnicornBackend: {arch_str!r}")
 
