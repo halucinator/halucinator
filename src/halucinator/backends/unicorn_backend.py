@@ -387,6 +387,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
         self._x86_resume_eip: Optional[int] = None
+        # m68k: deferred condition-code transplant owed by an `rte`.
+        self._m68k_pending_ccr: Optional[tuple] = None
+        self._m68k_ctx_stack: List[Any] = []
 
         # Opt-in: skip an unhandled SVC instruction (advance past it and
         # zero r0) instead of aborting. Used to
@@ -979,6 +982,36 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         for pc, n in hist.most_common(top):
             log.info("  0x%08x  x%d", pc, n)
 
+    def _m68k_apply_pending_ccr(self) -> None:
+        """Apply a deferred condition-code transplant (see _m68k_handle_rte).
+
+        Restores the CPUState snapshot taken at exception entry -- whose only
+        irreplaceable content is the lazy flag state unicorn will not expose --
+        then re-applies the architectural registers the ISR left behind, plus
+        the return PC/SP, so a context-switching handler's deliberate changes
+        survive.
+        """
+        pending = getattr(self, "_m68k_pending_ccr", None)
+        self._m68k_pending_ccr = None
+        if pending is None:
+            return
+        ctx, post = pending
+        pc = self.read_register("pc")
+        sp = self.read_register("sp")
+        try:
+            self._uc.context_restore(ctx)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k: context_restore failed (%s) -- condition codes "
+                      "lost across this exception return", exc)
+            return
+        try:
+            for name, val in post.items():
+                self.write_register(name, val)
+            self.write_register("sp", sp)
+            self.write_register("pc", pc)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k: could not re-apply post-ISR registers (%s)", exc)
+
     def _m68k_handle_rte(self) -> bool:
         """Complete an `rte`: pop the ColdFire exception frame and resume.
 
@@ -1003,11 +1036,43 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             return False
         ret_sr = fmt_word & 0xFFFF
         vector = (fmt_word >> 18) & 0xFF
+
+        # Capture what the ISR actually leaves behind BEFORE any context
+        # restore. For a well-behaved handler these equal the pre-exception
+        # values (it saved and restored what it used); for a context-switching
+        # handler (an RTOS scheduler) they are deliberately different, and
+        # those differences must survive.
+        _gpr = [f"d{i}" for i in range(8)] + [f"a{i}" for i in range(8)]
         try:
-            # supervisor bank still live -> pop, THEN restore SR
+            post = {n: self.read_register(n) for n in _gpr}
+        except Exception:  # noqa: BLE001
+            post = {}
+
+        # Transplant the condition codes. See _apply_pending_irq_m68k: the CCR
+        # is invisible to unicorn and is destroyed by the SR write that
+        # entering an exception requires, so the only carrier is the CPUState
+        # snapshot taken at delivery. Restoring it rewinds the ARCHITECTURAL
+        # registers too, so re-apply the ISR's results on top -- what we want
+        # from the snapshot is only the lazy flag state.
+        ctx = None
+        stack = getattr(self, "_m68k_ctx_stack", None)
+        if stack:
+            ctx = stack.pop()
+        # DEFER the restore. context_restore() called from inside a hook while
+        # emu_start is on the stack is undone when unicorn unwinds -- the flags
+        # come back and are then immediately discarded. Stash it and apply it
+        # between chunks, the same place PC/SP mutation is already safe.
+        if ctx is not None:
+            self._m68k_pending_ccr = (ctx, post)
+
+        try:
+            # supervisor bank still live -> pop, THEN restore SR. Skip the SR
+            # write when it would be a no-op: writing SR clobbers the flags we
+            # just went to the trouble of recovering.
             self.write_register("sp", (sp + 8) & 0xFFFFFFFF)
             self.write_register("pc", ret_pc)
-            self.write_register("sr", ret_sr)
+            if ctx is None and (self.read_register("sr") & 0xFFFF) != ret_sr:
+                self.write_register("sr", ret_sr)
         except Exception as exc:  # noqa: BLE001
             log.error("m68k rte: could not restore state (%s)", exc)
             return False
@@ -2188,6 +2253,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # PC/SP, only safe when emu_start is not running.
             while self._pending_irqs:
                 self._apply_pending_irq(self._pending_irqs.pop(0))
+            # m68k: apply a deferred condition-code transplant left by an
+            # `rte` (see _m68k_handle_rte). Must happen HERE -- outside
+            # emu_start -- or unicorn discards it on unwind.
+            if getattr(self, "_m68k_pending_ccr", None) is not None:
+                self._m68k_apply_pending_ccr()
             pc = self.read_register("pc")
             # Unicorn Thumb mode needs the LSB set on the start
             # address.

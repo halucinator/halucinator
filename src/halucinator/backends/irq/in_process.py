@@ -184,6 +184,29 @@ class InProcessIrqMixin:
         """
         uc_regs = self.regs
         vector = int(irq_num) & 0xFF
+
+        # --- carry the CONDITION CODES across the exception ---------------
+        # This snapshot MUST be the very first thing done here -- before even
+        # READING SR. unicorn cannot expose the m68k CCR (QEMU evaluates flags
+        # lazily via cc_op/cc_dest), and both reading and writing SR flush that
+        # lazy state to zero. So by the time `sr = uc_regs.sr` has run the
+        # guest's condition codes are already gone, and an interrupt landing
+        # between a compare and its branch would silently send the firmware
+        # down the wrong path.
+        #
+        # context_save() captures the whole CPUState including the lazy flag
+        # fields; _m68k_handle_rte transplants them back. Stacked, so nested
+        # exceptions unwind in order.
+        stack = getattr(self, "_m68k_ctx_stack", None)
+        if stack is None:
+            stack = self._m68k_ctx_stack = []
+        try:
+            _ctx = self._uc.context_save()
+        except Exception as exc:  # noqa: BLE001
+            _ctx = None
+            hlog.warning("m68k: context_save failed (%s) -- condition codes "
+                         "will NOT survive this exception", exc)
+
         sr = uc_regs.sr
         pc = uc_regs.pc
 
@@ -219,7 +242,18 @@ class InProcessIrqMixin:
                 hlog.info("m68k: vector %d (level %d) MASKED -- firmware is at "
                           "IPL %d. The firmware must lower SR.IPL before this "
                           "interrupt can be delivered.", vector, level, cur_ipl)
+            # Dropping the interrupt is not enough: reading SR above already
+            # flushed the guest's condition codes, so put them back or a
+            # MASKED interrupt would corrupt the firmware just as badly as a
+            # delivered one.
+            if _ctx is not None:
+                try:
+                    self._uc.context_restore(_ctx)
+                except Exception:  # noqa: BLE001
+                    pass
             return
+
+        stack.append(_ctx)
 
         # Enter supervisor FIRST so A7 refers to the supervisor stack.
         new_sr = (sr | 0x2000) & ~0x0700          # S = 1, clear IPL...
@@ -243,9 +277,16 @@ class InProcessIrqMixin:
         if not getattr(self, "_m68k_vbr_checked", False):
             self._m68k_vbr_checked = True
             self._m68k_vbr_usable = False
+            # Probe by WRITE-THEN-READ-BACK. A plain read returns 0 rather
+            # than None on a no-op register, so "did the read succeed" cannot
+            # distinguish "VBR is 0" from "VBR is unimplemented" -- and getting
+            # that wrong means re-reading an unimplemented register on every
+            # single delivery (and re-emitting unicorn's deprecation warning).
             try:
-                probe = uc_regs.vbr
-                self._m68k_vbr_usable = probe is not None
+                _orig = uc_regs.vbr
+                uc_regs.vbr = 0x0BAD0000
+                self._m68k_vbr_usable = (uc_regs.vbr == 0x0BAD0000)
+                uc_regs.vbr = _orig
             except Exception:  # noqa: BLE001
                 self._m68k_vbr_usable = False
             if not self._m68k_vbr_usable:
@@ -269,6 +310,7 @@ class InProcessIrqMixin:
             uc_regs.sr = sr
             return
         uc_regs.pc = handler
+
         hlog.info("m68k exception: vector %d -> handler 0x%08x "
                  "(saved pc=0x%08x sr=0x%04x, sp=0x%08x)",
                  vector, handler, pc, sr, sp)
