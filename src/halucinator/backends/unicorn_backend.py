@@ -13,6 +13,7 @@ Supported: ARM Thumb / ARM Cortex-M (primary target for halucinator).
 from __future__ import annotations
 
 import logging
+import os
 import struct
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -1062,7 +1063,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # emu_start is on the stack is undone when unicorn unwinds -- the flags
         # come back and are then immediately discarded. Stash it and apply it
         # between chunks, the same place PC/SP mutation is already safe.
-        if ctx is not None:
+        if ctx is not None and not os.environ.get("HAL_M68K_NO_CCR_FIX"):
             self._m68k_pending_ccr = (ctx, post)
 
         try:
