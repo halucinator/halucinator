@@ -157,7 +157,7 @@ class InProcessIrqMixin:
         self._apply_cortex_m_fallback(irq_num)
 
     # -- m68k / ColdFire ---------------------------------------------------
-    def _apply_pending_irq_m68k(self, irq_num: int) -> None:
+    def _apply_pending_irq_m68k(self, irq_num: int) -> bool:
         """Synthesise an m68k exception entry for *irq_num* (a VECTOR NUMBER).
 
         The 68000 family takes an exception by pushing a frame on the
@@ -170,6 +170,9 @@ class InProcessIrqMixin:
 
             SP+0 : FORMAT[31:28] | FS[27:26] | VECTOR[25:18] | FS[17:16] | SR[15:0]
             SP+4 : PC
+
+        Returns True if the exception was actually taken, False if the current
+        SR.IPL masks it (the caller leaves it asserted and retries).
 
         Two m68k-specific hazards, both of which cost real debugging time:
 
@@ -276,11 +279,6 @@ class InProcessIrqMixin:
             # tick ISR held a higher IPL wedges the kernel forever. Re-queue it
             # for the next chunk instead. (Held in a SEPARATE list: appending to
             # _pending_irqs here would spin the caller's drain loop.)
-            deferred = getattr(self, "_m68k_masked_pending", None)
-            if deferred is None:
-                deferred = self._m68k_masked_pending = []
-            if vector not in deferred:
-                deferred.append(vector)
             # Reading SR above already flushed the guest's condition codes, so
             # put them back or a MASKED interrupt corrupts the firmware just as
             # badly as a delivered one.
@@ -289,7 +287,7 @@ class InProcessIrqMixin:
                     self._uc.context_restore(_ctx)
                 except Exception:  # noqa: BLE001
                     pass
-            return
+            return False
 
         stack.append(_ctx)
 
@@ -346,12 +344,13 @@ class InProcessIrqMixin:
             # Undo the frame push so the firmware is left untouched.
             uc_regs.sp = sp + 8
             uc_regs.sr = sr
-            return
+            return False
         uc_regs.pc = handler
 
         hlog.info("m68k exception: vector %d -> handler 0x%08x "
                  "(saved pc=0x%08x sr=0x%04x, sp=0x%08x)",
                  vector, handler, pc, sr, sp)
+        return True
 
     # -- shared SHADOW delivery -------------------------------------------
     def _apply_pending_irq_shadow(self, irq_num: int) -> None:

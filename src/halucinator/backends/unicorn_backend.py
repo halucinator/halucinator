@@ -103,6 +103,30 @@ _PERM_MAP = {
 # do_interrupt, so the backend must finish the return -- see _m68k_handle_rte.
 _M68K_EXCP_RTE = 0x100
 
+# Instruction budget per run chunk while an m68k interrupt is asserted but
+# masked. Small enough to land inside a short IPL-0 window in a spin loop,
+# large enough not to dominate when nothing is deferred.
+# Instruction budgets used for the run chunk while every asserted m68k
+# interrupt is masked by the current IPL.
+#
+# Firmware that spins waiting for its own ISR only opens a few-instruction
+# window per pass -- FreeRTOS's vPortEnterCritical drops to IPL 0 for about a
+# third of each iteration -- so the chunk has to be short enough to land inside
+# it. But a FIXED short chunk PHASE-LOCKS against a fixed-length spin loop: the
+# boundary lands at the same offset in the loop every time and, if that offset
+# is in the masked window, the interrupt is NEVER delivered no matter how many
+# times it is retried. That is not hypothetical -- it wedged FreeRTOS here with
+# the yield permanently pending and SR.IPL reading 7 at every single retry.
+#
+# Cycling through mutually-prime budgets makes the sample phase drift across
+# the loop, so the unmasked window is always reached within a few retries.
+# Mixed scales on purpose: the small budgets are what actually land inside a
+# spin loop's brief unmasked window, while the large ones keep average
+# throughput up so the guest still makes real progress. All mutually prime, so
+# the sample phase drifts instead of locking.
+_MASKED_RETRY_CHUNKS = (13, 509, 17, 1021, 23, 2039, 29, 4093, 11, 8191)
+_MASKED_RETRY_CHUNK = int(os.environ.get("HAL_M68K_MASKED_CHUNK", "1") or 0)
+
 _REG_MAPS_CACHE: Dict[str, Dict[str, int]] = {}
 
 
@@ -2253,6 +2277,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
             if self.arch_name == "m68k":
+                self._m68k_all_masked = False
                 # Deliver AT MOST ONE m68k interrupt per boundary. Entering an
                 # exception raises SR.IPL to that interrupt's level, so
                 # draining the rest of the batch in the same pass immediately
@@ -2264,8 +2289,24 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 # vPortEnterCritical spun with the scheduler suspended.
                 # Real hardware takes one exception at a time; the rest stay
                 # asserted and are taken as the IPL comes back down.
+                # Take the first DELIVERABLE vector -- one exception per
+                # boundary, but skip past any that the current IPL masks so a
+                # masked high-priority line cannot block a deliverable lower
+                # one. Anything not taken stays asserted for the next boundary.
                 if self._pending_irqs:
-                    self._apply_pending_irq(self._pending_irqs.pop(0))
+                    _delivered = False
+                    for _idx in range(len(self._pending_irqs)):
+                        _v = self._pending_irqs[_idx]
+                        if self._apply_pending_irq_m68k(_v):
+                            self._pending_irqs.pop(_idx)
+                            _delivered = True
+                            break
+                    # Nothing could be delivered: everything asserted is masked
+                    # by the current IPL. Shorten the next chunk so the mask is
+                    # re-sampled soon (firmware spinning for its own ISR only
+                    # opens a few-instruction window). Do NOT shorten when a
+                    # delivery succeeded -- that would throttle normal running.
+                    self._m68k_all_masked = not _delivered
             else:
                 while self._pending_irqs:
                     self._apply_pending_irq(self._pending_irqs.pop(0))
@@ -2285,8 +2326,38 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # Unicorn Thumb mode needs the LSB set on the start
             # address.
             start = (pc | 1) if self._is_thumb else pc
+            # ADAPTIVE CHUNK: an interrupt that is asserted but currently MASKED
+            # can only be re-tried at a chunk boundary. Firmware that spins
+            # waiting for that interrupt's handler to run -- FreeRTOS's
+            # vPortEnterCritical waits for the yield ISR to clear INTFRCL, and
+            # only opens a few-instruction window at IPL 0 each pass -- then
+            # burns a WHOLE chunk per attempt. Shorten the chunk while anything
+            # is deferred so the mask is re-sampled often enough to catch the
+            # window; back to the full chunk as soon as nothing is deferred.
+            _chunk = irq_chunk
+            if (_chunk and self.arch_name == "m68k"
+                    and _MASKED_RETRY_CHUNK
+                    and getattr(self, "_m68k_all_masked", False)):
+                # Something is still ASSERTED and undelivered -- either masked
+                # by the current IPL, or queued behind the one interrupt we
+                # take per boundary. Test _pending_irqs, NOT the masked list:
+                # the masked list is drained back into _pending_irqs just
+                # above, so it is always empty here and the adaptive chunk
+                # would never engage.
+                self._m68k_retry_i = getattr(self, "_m68k_retry_i", 0) + 1
+                _chunk = _MASKED_RETRY_CHUNKS[
+                    self._m68k_retry_i % len(_MASKED_RETRY_CHUNKS)]
+            # The deterministic tick paces on COMPLETED CHUNKS, so a shortened
+            # retry chunk must not count -- otherwise shortening the chunk to
+            # catch a masked interrupt also multiplies the tick rate by
+            # (irq_chunk / retry_chunk) and starves the guest of real work.
+            self._last_chunk_full = (_chunk == irq_chunk)
+            # Pace the deterministic tick on INSTRUCTIONS, not chunks: the
+            # chunk length is now adaptive, so a chunk-based pacer makes the
+            # tick rate swing by orders of magnitude with the interrupt state.
+            self._det_insns = getattr(self, "_det_insns", 0) + _chunk
             try:
-                self._uc.emu_start(start, until, timeout=0, count=irq_chunk)
+                self._uc.emu_start(start, until, timeout=0, count=_chunk)
             except unicorn.UcError as _uc_err:
                 if self._stopped:
                     return  # stopped by breakpoint hook — normal
@@ -2486,11 +2557,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # chunk; with the pacer behind that `continue` the system tick
             # STARVES COMPLETELY -- the RTOS runs but every vTaskDelay blocks
             # forever, with no diagnostic. Observed on m68k/FreeRTOS.
-            if (irq_chunk and not self._stopped
-                    and self._det_irq is not None and self._pending_irqs):
-                self._det_chunks += 1
-                if (self._det_chunks % self._det_period == 0
-                        and self._det_irq not in self._pending_irqs):
+            if (irq_chunk and not self._stopped and self._det_irq is not None
+                    and getattr(self, "_det_insns", 0)
+                    >= self._det_period * irq_chunk):
+                self._det_insns = 0
+                if self._det_irq not in self._pending_irqs:
                     self._pending_irqs.append(self._det_irq)
             if self._pending_irqs:
                 continue
@@ -2501,7 +2572,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 # Deterministic system-clock tick: every _det_period completed chunks, queue the
                 # clock IRQ (instruction-count-paced, not wall-clock). Drained at the top of the
                 # next iteration like any pending IRQ.
-                if self._det_irq is not None:
+                if (self._det_irq is not None
+                        and getattr(self, "_last_chunk_full", True)):
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
                         self._pending_irqs.append(self._det_irq)
