@@ -2251,8 +2251,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # Drain any IRQs queued from another thread before
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
-            while self._pending_irqs:
-                self._apply_pending_irq(self._pending_irqs.pop(0))
+            if self.arch_name == "m68k":
+                # Deliver AT MOST ONE m68k interrupt per boundary. Entering an
+                # exception raises SR.IPL to that interrupt's level, so
+                # draining the rest of the batch in the same pass immediately
+                # masks every lower-priority vector in it -- they get deferred,
+                # and on the next boundary the same higher-priority interrupt
+                # wins again. A lower-priority vector then NEVER runs.
+                # Concretely: the FreeRTOS tick (level 6) starved its yield
+                # (level 3) forever, so INTFRCL was never cleared and
+                # vPortEnterCritical spun with the scheduler suspended.
+                # Real hardware takes one exception at a time; the rest stay
+                # asserted and are taken as the IPL comes back down.
+                if self._pending_irqs:
+                    self._apply_pending_irq(self._pending_irqs.pop(0))
+            else:
+                while self._pending_irqs:
+                    self._apply_pending_irq(self._pending_irqs.pop(0))
             # m68k: interrupts that were masked when we tried to deliver them
             # stay ASSERTED, like a real controller. Move them back now that
             # the drain loop has finished (re-queuing inside it would spin).
