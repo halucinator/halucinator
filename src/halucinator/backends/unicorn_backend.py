@@ -2534,7 +2534,24 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                             self.read_register("r2"), self.read_register("r3"),
                             self.read_register("r12"), self.read_register("lr"),
                             self.read_register("pc"), xpsr)
-        sp = self._uc.reg_read(active) - 32     # RTOS/thread stacks are 8-aligned
+
+        # ARMv7E-M with an FPU (Cortex-M4F/M7): when the interrupted context
+        # has live floating-point state — CONTROL.FPCA set — the hardware
+        # stacks an EXTENDED frame (the 8 words above, then S0-S15, FPSCR and
+        # one reserved word: 104 bytes total) and clears bit 4 of EXC_RETURN
+        # to say so. Pushing the basic frame regardless is self-consistent
+        # only until the firmware does its own frame arithmetic: an RTOS that
+        # inspects EXC_RETURN, or code the compiler gave FP locals, then
+        # unwinds the wrong number of words. Observed on ArduPilot/ChibiOS
+        # (Cortex-M4F): a constructor returned into a heap pointer,
+        # deterministically, and never with interrupts disabled.
+        fpca = bool(control & 4)
+        if fpca and self._fp_regs_available():
+            fp_words = [self._uc.reg_read(getattr(_A, "UC_ARM_REG_S%d" % i))
+                        for i in range(16)]
+            fpscr = self._uc.reg_read(_A.UC_ARM_REG_FPSCR)
+            frame = frame + struct.pack("<18I", *fp_words, fpscr, 0)
+        sp = self._uc.reg_read(active) - len(frame)   # stacks are 8-aligned
         try:
             self._uc.mem_write(sp, frame)
         except Exception:  # noqa: BLE001 — unmapped/invalid SP: skip this tick
@@ -2544,11 +2561,38 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._uc.reg_write(active, sp)
         exc_ret = (0xFFFFFFF1 if not in_thread
                    else 0xFFFFFFFD if use_psp else 0xFFFFFFF9)
+        if len(frame) > 32:
+            exc_ret &= ~0x10          # bit4 clear: extended (FP) frame stacked
+            # Entering the handler clears FPCA, as the hardware does.
+            try:
+                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control & ~4)
+            except Exception:  # noqa: BLE001
+                pass
         self.write_register("lr", exc_ret)
         self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
         log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
                  irq_num, exc_num, isr_addr, exc_ret)
+
+    def _fp_regs_available(self) -> bool:
+        """True when this unicorn build exposes S0-S15 and FPSCR."""
+        cached = getattr(self, "_fp_regs_ok", None)
+        if cached is not None:
+            return cached
+        from unicorn import arm_const as _A
+        ok = hasattr(_A, "UC_ARM_REG_FPSCR") and hasattr(_A, "UC_ARM_REG_S15")
+        if ok:
+            try:
+                self._uc.reg_read(_A.UC_ARM_REG_FPSCR)
+            except Exception:  # noqa: BLE001
+                ok = False
+        if not ok:
+            hlog.warning("UnicornBackend: this unicorn build has no FP "
+                         "registers; exceptions taken with CONTROL.FPCA set "
+                         "will stack a basic frame, which an FPU firmware may "
+                         "unwind incorrectly")
+        self._fp_regs_ok = ok
+        return ok
 
     def set_vtor(self, vtor: int) -> None:
         """Remember the vector-table base so inject_irq can find ISRs."""
@@ -2743,6 +2787,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         return_thread = bool(addr & 0x8)       # bit3: return mode
         active = _A.UC_ARM_REG_PSP if return_psp else _A.UC_ARM_REG_MSP
         sp = self._uc.reg_read(active)
+        # EXC_RETURN bit 4 clear means the hardware stacked the EXTENDED
+        # (floating-point) frame: 8 words, then S0-S15, FPSCR and a reserved
+        # word. Unwinding 8 words from an extended frame leaves SP 72 bytes
+        # low and every later return goes to garbage.
+        extended = not (addr & 0x10)
         try:
             frame = struct.unpack("<8I", bytes(self._uc.mem_read(sp, 32)))
         except Exception:                      # noqa: BLE001
@@ -2753,7 +2802,17 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self.write_register("r3", frame[3])
         self.write_register("r12", frame[4])
         self.write_register("lr", frame[5])
-        self._uc.reg_write(active, sp + 32)
+        if extended and self._fp_regs_available():
+            try:
+                fp = struct.unpack("<18I", bytes(self._uc.mem_read(sp + 32, 72)))
+                for i in range(16):
+                    self._uc.reg_write(getattr(_A, "UC_ARM_REG_S%d" % i), fp[i])
+                self._uc.reg_write(_A.UC_ARM_REG_FPSCR, fp[16])
+                control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control | 4)  # FPCA
+            except Exception:  # noqa: BLE001
+                pass
+        self._uc.reg_write(active, sp + (104 if extended else 32))
         self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
         if return_thread:
             self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
