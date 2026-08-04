@@ -12,20 +12,22 @@ hardware, which makes firmware reachable for debugging, analysis, and fuzzing.
 ## Install
 
 ```sh
-pip install halucinator[unicorn]
+pip install halucinator
 ```
 
-The `unicorn` extra is the self-contained install: it is the only backend that
-needs no externally-built binary, so this yields a working rehosting setup from
-pip alone.
+That is a complete, working rehosting setup. The unicorn backend ships by
+default because it is the only one that needs no externally-built binary, so
+there is nothing else to install before emulating a binary.
 
 | Extra | Installs | For |
 | --- | --- | --- |
-| `[unicorn]` | unicorn, capstone | The pip-only backend. Start here. |
 | `[net]` | scapy, pyserial | Host network / serial external devices |
 | `[symbols]` | cle | ELF symbol extraction via `hal_make_addr` |
 | `[mcp]` | mcp[cli] | The `halucinator-mcp` server |
 | `[all]` | all of the above | Everything except the dev tooling |
+
+`[unicorn]` still resolves as a no-op alias, so older instructions saying
+`pip install halucinator[unicorn]` keep working.
 
 Requires Python 3.10 or newer.
 

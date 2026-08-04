@@ -76,13 +76,24 @@ classifiers = [
     "Topic :: System :: Emulators",
 ]
 
-# The core runtime set: exactly what importing halucinator.main pulls in.
+# What a working default install needs -- not merely what `import
+# halucinator.main` pulls in. A bare `pip install halucinator` that cannot
+# actually emulate anything is a trap, so the one backend that needs no
+# externally-built binary ships by default.
 #   PyYAML     -- hal_stats/hal_config parse every config file
 #   pyzmq      -- peripheral_server + the hal_dev_* external devices.
 #                 (The import is `zmq`; the DISTRIBUTION providing it is pyzmq.)
 #   pyelftools -- config/elf_program.py (ELFFile) on the import path
 #   IPython    -- bp_handlers/generic/debug.py imports it at module scope, and
 #                 bp_handlers/__init__ star-imports that package
+#   unicorn    -- the `--emulator unicorn` backend, imported lazily
+#   capstone   -- disassembly for that backend's tracing/diagnostics
+#
+# unicorn + capstone add ~48 MB but only those two distributions: no transitive
+# tree. The MCP SDK is deliberately NOT here -- it pulls ~35 packages including
+# an ASGI server (starlette/uvicorn), httpx, pydantic, cryptography and PyJWT,
+# which is a large supply-chain surface for a feature most users never touch.
+# It stays behind [mcp] (and is included in [all]).
 #
 # avatar2 is deliberately absent. HALucinator tracks a FORK installed from the
 # pinned submodule (`pip install -e deps/avatar2/`); declaring `avatar2` here
@@ -93,6 +104,8 @@ dependencies = [
     "pyzmq",
     "pyelftools",
     "IPython",
+    "unicorn>=2.0",
+    "capstone>=4.0",
 ]
 
 [project.urls]
@@ -103,9 +116,10 @@ Documentation = "https://github.com/halucinator/halucinator/tree/master/doc"
 Issues = "https://github.com/halucinator/halucinator/issues"
 
 [project.optional-dependencies]
-# The unicorn backend (`--emulator unicorn`) is the only one that needs no
-# externally-built binary, so this is the self-contained install:
-#     pip install halucinator[unicorn]
+# Retained as a no-op alias: unicorn + capstone are core dependencies as of
+# 1.9.0, so `pip install halucinator` already includes them. Existing docs,
+# scripts and CI that say `halucinator[unicorn]` keep working rather than
+# tripping pip's unknown-extra warning.
 unicorn = ["unicorn>=2.0", "capstone>=4.0"]
 
 # Host-network / serial external devices: hal_dev_host_eth,
