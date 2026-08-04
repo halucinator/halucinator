@@ -671,6 +671,38 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                                   "(delta %d)", addr, prev, sp, sp - prev)
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _sp_watch)
 
+        # Diagnostic: HAL_INSN_TRACE=<lo>-<hi> logs PC, SP, LR and the CPSR
+        # IT-state for every instruction executed inside that address window.
+        # HAL_LAST_PC only records basic-block STARTS, which is not enough when
+        # the question is "did this one instruction execute?" — a stack-pointer
+        # adjustment skipped inside a block is invisible at block granularity.
+        _tr = _os.environ.get("HAL_INSN_TRACE")
+        if _tr and arch_str == "arm":
+            _lo, _, _hi = _tr.partition("-")
+            _lo, _hi = int(_lo, 0), int(_hi, 0)
+            _tr_state = {"n": 0}
+            _tr_max = int(_os.environ.get("HAL_INSN_TRACE_MAX", "400"))
+
+            def _insn_trace(uc, addr, size, ud):  # noqa: ANN001
+                if _tr_state["n"] >= _tr_max:
+                    return
+                _tr_state["n"] += 1
+                try:
+                    sp = uc.reg_read(unicorn.arm_const.UC_ARM_REG_SP)
+                    lr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_LR)
+                    cpsr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_CPSR)
+                except Exception:  # noqa: BLE001
+                    return
+                it = ((cpsr >> 25) & 3) | (((cpsr >> 10) & 0x3F) << 2)
+                try:
+                    raw = bytes(uc.mem_read(addr, 8)).hex()
+                except Exception:  # noqa: BLE001
+                    raw = "??"
+                log.error("INSN: pc=0x%08x sz=%d sp=0x%08x lr=0x%08x it=%02x "
+                          "bytes=%s", addr, size, sp, lr, it, raw)
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _insn_trace,
+                              begin=_lo, end=_hi)
+
         # Diagnostic: HAL_PC_SAMPLE=1 records a PC execution histogram so a
         # non-MMIO hang ("stuck where?") can be located. Dumped by
         # dump_pc_sample(). Off by default (no overhead).
@@ -1425,6 +1457,10 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         base, size, region.name, exc)
 
     def _make_mmio_hook(self, region: MemoryRegion) -> Callable:
+        # Thumb-2 IT-block repair (ARM only). See _repair_itstate.
+        repair_it = self._is_thumb and self.arch_name in (
+            "cortex-m3", "arm", "armv7a")
+
         def _hook(uc, access, addr, size, value, user_data):
             offset = addr - region.base_addr
             if access == unicorn.UC_MEM_READ and region.read_hook:
@@ -1434,7 +1470,54 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     uc.mem_write(addr, data)
             elif access == unicorn.UC_MEM_WRITE and region.write_hook:
                 region.write_hook(offset, size, value)
+            if repair_it:
+                self._repair_itstate(uc)
         return _hook
+
+    @staticmethod
+    def _repair_itstate(uc) -> None:
+        """Clear a stale Thumb-2 ITSTATE left behind by a firing memory hook.
+
+        Unicorn 2.1.4 (and every 2.x before it) leaks the IT state when one of
+        our MMIO hooks fires on a load or store that sits INSIDE an `it` block:
+        dispatching the hook restores the CPU state mid-block, which writes the
+        block's ENTRY ITSTATE into the environment, and nothing advances or
+        clears it afterwards. The value is a translation-block flag, so the NEXT
+        block QEMU translates -- typically in the caller, after the peripheral
+        driver returns -- is generated as though its first four instructions
+        were that `it` block, and the ones whose condition now fails are
+        silently skipped.
+
+        This is not a rare corner. Compilers emit `it` blocks throughout
+        Thumb-2, peripheral drivers read status registers inside them, and
+        HALucinator hooks every modelled peripheral read. Worked example
+        (ArduPilot/ChibiOS on an STM32F405): `palReadLineMode` reads GPIO
+        registers inside an `iteet pl`; on return, the caller's
+        `add sp, #36` was skipped, so `pop {r4-r7, pc}` took the wrong stack
+        word and branched into a heap object. Deterministic, and it looks
+        exactly like firmware memory corruption -- there is no fault at the
+        peripheral, and the instruction that "did not happen" is four
+        instructions away in a different function.
+
+        Clearing the IT bits here is correct rather than merely convenient: the
+        currently-executing block already has its conditions compiled in, so the
+        real `it` block still runs exactly as it should; the write only stops
+        the stale value from reaching the next block's translation flags. With
+        this repair the executed instruction trace is identical to the same run
+        with no MMIO hook installed at all (tests/test_unicorn_itstate.py).
+        """
+        try:
+            cpsr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_CPSR)
+        except Exception:  # noqa: BLE001 — non-ARM or no CPSR exposed
+            return
+        # ITSTATE lives in CPSR[26:25] (IT[1:0]) and CPSR[15:10] (IT[7:2]).
+        if not (cpsr & ((3 << 25) | (0x3F << 10))):
+            return                      # not inside an `it` block: nothing to do
+        try:
+            uc.reg_write(unicorn.arm_const.UC_ARM_REG_CPSR,
+                         cpsr & ~((3 << 25) | (0x3F << 10)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _code_hook(self, uc, addr: int, size: int, user_data: Any) -> None:
         """Called for every instruction; checks if addr is a breakpoint."""
@@ -2570,9 +2653,62 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 pass
         self.write_register("lr", exc_ret)
         self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
+        self._icsr_enter(exc_num, nested=not in_thread)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
         log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
                  irq_num, exc_num, isr_addr, exc_ret)
+
+    # SCB->ICSR. Bits we own here: VECTACTIVE[8:0] — the exception number the
+    # CPU is currently executing — and RETTOBASE[11] — "returning from this
+    # exception returns to base level", i.e. no other exception is active.
+    # Everything else in the register (PENDSVSET etc.) belongs to the firmware
+    # and is preserved.
+    _ICSR = 0xE000ED04
+    _ICSR_VECTACTIVE = 0x1FF
+    _ICSR_RETTOBASE = 1 << 11
+
+    def _icsr_update(self, vectactive: int, rettobase: bool) -> None:
+        """Read-modify-write SCB->ICSR's VECTACTIVE/RETTOBASE.
+
+        This backend delivers Cortex-M exceptions itself and leaves the private
+        peripheral bus as plain RW memory, so nothing was maintaining ICSR: it
+        read 0 forever. That is not a cosmetic gap. ChibiOS' ARMv7-M ISR
+        epilogue is::
+
+            ldr  r3, [SCB_ICSR]
+            ands r3, #0x800          @ RETTOBASE
+            beq  no_reschedule
+
+        so with RETTOBASE stuck at 0 the kernel takes the interrupt, runs the
+        tick, readies the woken thread — and then skips the deferred context
+        switch every single time. Observed on ArduPilot/ChibiOS: the vehicle
+        clock advanced, virtual timers expired and the alarm was disarmed, but
+        execution returned to the idle thread on every tick and no ArduPilot
+        thread ever ran. Firmware that asks "am I in an interrupt?" via
+        VECTACTIVE (rather than IPSR) is wrong in the same silent way.
+        """
+        if self._uc is None:
+            return
+        try:
+            cur = int.from_bytes(self._uc.mem_read(self._ICSR, 4), "little")
+            new = cur & ~(self._ICSR_VECTACTIVE | self._ICSR_RETTOBASE)
+            new |= vectactive & self._ICSR_VECTACTIVE
+            if rettobase:
+                new |= self._ICSR_RETTOBASE
+            self._uc.mem_write(self._ICSR, new.to_bytes(4, "little"))
+        except Exception:  # noqa: BLE001 — PPB unmapped: nothing to maintain
+            pass
+
+    def _icsr_enter(self, exc_num: int, nested: bool) -> None:
+        """Entering exception `exc_num`. RETTOBASE is set unless this one
+        preempted another active exception."""
+        self._exc_depth = getattr(self, "_exc_depth", 0) + 1
+        self._icsr_update(exc_num, rettobase=not nested)
+
+    def _icsr_exit(self, new_ipsr: int) -> None:
+        """Leaving an exception for `new_ipsr` (0 = thread mode)."""
+        self._exc_depth = max(0, getattr(self, "_exc_depth", 0) - 1)
+        self._icsr_update(new_ipsr, rettobase=self._exc_depth <= 1)
 
     def _fp_regs_available(self) -> bool:
         """True when this unicorn build exposes S0-S15 and FPSCR."""
@@ -2819,6 +2955,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
             control = (control | 2) if return_psp else (control & ~2)
             self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+        # ICSR follows the mode change: VECTACTIVE is the exception we are
+        # returning TO (0 in thread mode).
+        self._icsr_exit(0 if return_thread else (frame[7] & 0x1FF))
         self.write_register("pc", frame[6])
         log.info("exc_return %#x: popped from %s, resuming at 0x%x",
                  addr, "PSP" if return_psp else "MSP", frame[6])
