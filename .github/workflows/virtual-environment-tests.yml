@@ -530,9 +530,9 @@ jobs:
         path: deps/build-qemu-upstream-v11.0.0
         key: upstream-qemu-overlay-v11.0.0-${{ matrix.os }}-${{ steps.overlay-ref.outputs.sha }}
 
-  # Proves the packaging story end-to-end: a plain `pip install halucinator[unicorn]`
-  # into a clean virtualenv -- no avatar2, no externally-built QEMU, no submodules --
-  # yields a working rehosting install. This job deliberately does NOT check out
+  # Proves the packaging story end-to-end: a plain `pip install halucinator`
+  # into a clean virtualenv -- no extras, no avatar2, no externally-built QEMU,
+  # no submodules -- yields a working rehosting install. This job deliberately does NOT check out
   # submodules or build QEMU, so any failure here is unambiguously a packaging or
   # unicorn-backend regression rather than a toolchain problem. It is also the
   # matrix that validates the declared `requires-python = ">=3.10"`.
@@ -558,21 +558,29 @@ jobs:
         python -m build
         ls -l dist/
 
-    - name: Install the wheel into a clean venv (with the [unicorn] extra)
+    - name: Install the wheel into a clean venv (no extras -- the default path)
       run: |
         set -e
         set -x
         python -m venv /tmp/wheelenv
         /tmp/wheelenv/bin/pip install --upgrade pip
-        /tmp/wheelenv/bin/pip install "$(ls dist/*.whl)[unicorn]"
+        # Deliberately NO extras: unicorn/capstone are core deps, so a bare
+        # install must already be able to emulate.
+        /tmp/wheelenv/bin/pip install "$(ls dist/*.whl)"
 
     - name: Assert the install is avatar2-free, complete and typed
       run: |
         set -e
         set -x
-        # The whole point of the [unicorn] tier: avatar2 must NOT be pulled in.
+        # A default install must be able to emulate without any extra.
+        /tmp/wheelenv/bin/python -c "import unicorn, capstone" \
+          || { echo "FATAL: default install cannot emulate"; exit 1; }
+        # ...and must NOT drag in avatar2 or the MCP server stack.
         if /tmp/wheelenv/bin/python -c "import avatar2" 2>/dev/null; then
-          echo "FATAL: avatar2 was installed by halucinator[unicorn]"; exit 1
+          echo "FATAL: avatar2 was installed by a default halucinator install"; exit 1
+        fi
+        if /tmp/wheelenv/bin/python -c "import mcp" 2>/dev/null; then
+          echo "FATAL: the MCP SDK leaked into the default install"; exit 1
         fi
         # Console scripts must resolve (qemulog2trace regressed silently for
         # years because `tools` was not a packaged subpackage).
@@ -613,7 +621,7 @@ jobs:
         set -x
         python -m venv /tmp/sdistenv
         /tmp/sdistenv/bin/pip install --upgrade pip
-        /tmp/sdistenv/bin/pip install "$(ls dist/*.tar.gz)[unicorn]"
+        /tmp/sdistenv/bin/pip install "$(ls dist/*.tar.gz)"
         /tmp/sdistenv/bin/halucinator --help > /dev/null
         echo "sdist install OK"
 

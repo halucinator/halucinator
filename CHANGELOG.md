@@ -20,8 +20,8 @@ and makes the project installable as a real Python distribution.
 
 ### Packaging
 
-Prepares HALucinator for a PyPI release. `pip install halucinator[unicorn]`
-now yields a working rehosting install with no avatar2 and no hand-built QEMU.
+Prepares HALucinator for a PyPI release. `pip install halucinator` now yields a
+working rehosting install with no avatar2 and no hand-built QEMU.
 
 - Replaced `src/setup.py` with a PEP 621 `pyproject.toml` at the repo root,
   keeping the importable tree under `src/` via `package-dir`. Consequence:
@@ -34,8 +34,12 @@ now yields a working rehosting install with no avatar2 and no hand-built QEMU.
   all imported but never declared; dropped `angr<9`, `protobuf<=3.20` and
   `deprecated`, none of which is imported anywhere in the package; unpinned
   `scapy`
-- Added extras: `[unicorn]`, `[net]`, `[symbols]`, `[mcp]`, `[dev]`, and
-  `[all]` for everything installable on the >=3.9 baseline
+- `unicorn` and `capstone` are core dependencies, so the default install can
+  emulate immediately; `[unicorn]` remains as a no-op alias for older
+  instructions
+- Added extras: `[net]`, `[symbols]`, `[mcp]`, `[dev]`, and `[all]`
+- Baseline is Python >=3.10 (3.9 reached end-of-life in October 2025), which
+  also lets `[mcp]` be part of `[all]` instead of needing its own interpreter
 - Ship `LICENSE` in the built distributions — the wheel previously contained
   no license file at all, a compliance problem for GPL-3.0 code
 - Ship `logging.cfg` as package data; without it a non-editable install
