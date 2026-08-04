@@ -329,6 +329,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._emulate_pc_write = (
             _os.environ.get("HAL_EMULATE_PC_WRITE") == "1")
         self._pc_write_emulated = 0
+        # Cortex-M `wfe` executed as a no-op (see _insn_invalid_hook).
+        self._wfe_skipped = 0
         # MMU flat-fallback (opt-in HAL_MMU_FLAT_FALLBACK=1): on an ARM data/
         # prefetch abort whose faulting address IS backed in physical memory
         # (uc.mem_read succeeds — i.e. the MMU translation failed but the page
@@ -594,6 +596,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         )
         # Log CPU exceptions (unhandled traps, illegal insns, FP faults)
         self._uc.hook_add(unicorn.UC_HOOK_INTR, self._intr_hook)
+
+        # Cortex-M `wfe` is rejected by unicorn's M-profile decoder. UC_HOOK_INTR
+        # does NOT fire for an undefined instruction, so the recovery has to hang
+        # off the dedicated invalid-instruction hook. See _insn_invalid_hook.
+        if self.arch_name == "cortex-m3":
+            self._uc.hook_add(unicorn.UC_HOOK_INSN_INVALID,
+                              self._insn_invalid_hook)
 
         # x86 uses *port* I/O (the IN/OUT instructions) for the PC chipset
         # — the 8259 PIC, 16550 UART, 8254 PIT, etc. — in addition to
@@ -2958,6 +2967,57 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # before re-entering at the handler. Same mechanism inject_irq/PendSV use.
         self._pending_irqs.append(self._SVCALL_IRQ)
         uc.emu_stop()
+        return True
+
+    _WFE_THUMB = 0xBF20                     # `wfe` -- the one M-profile hint
+                                            # unicorn's decoder rejects
+
+    def _insn_invalid_hook(self, uc, user_data) -> bool:
+        """Execute a Cortex-M ``wfe`` as the no-op it is permitted to be.
+
+        Unicorn's M-profile decoder accepts ``wfi`` and ``sev`` but NOT
+        ``wfe``: 0xBF20 raises UC_ERR_INSN_INVALID on every M-profile CPU model
+        it offers (M3, M4, M7, M33 all verified). That kills any firmware
+        idling on the wait-for-event idiom -- CMSIS ``__WFE()``, most RTOS idle
+        loops, and Nordic's CryptoCell driver, which spins
+        ``wfe; dmb; ldr; tst; beq`` waiting for its completion interrupt.
+
+        Skipping it is architecturally correct rather than a shortcut: WFE is a
+        hint, and the architecture explicitly permits it to complete
+        immediately (it returns as soon as the event register is set, and the
+        register may already be set on entry). Nothing is lost in a rehost,
+        where the event the firmware waits for is delivered by an injected
+        interrupt anyway.
+
+        WHEN THIS BITES, IT POINTS AT THE WRONG INSTRUCTION. Unicorn reports the
+        fault with PC already advanced past the ``wfe``, so the disassembly at
+        the reported address is an innocent bystander -- a ``dmb``, an ``ldr``
+        -- and the obvious next step (work out why unicorn cannot decode a
+        barrier) is a dead end. The opcode under test is therefore at ``pc-2``.
+
+        Returning True tells unicorn the instruction was handled and execution
+        continues; returning False lets a genuinely undefined instruction
+        surface as the error it is.
+        """
+        if self.arch_name != "cortex-m3":
+            return False
+        from unicorn import arm_const as _A
+        try:
+            pc = uc.reg_read(_A.UC_ARM_REG_PC)
+            if pc < 2:
+                return False
+            opcode = int.from_bytes(uc.mem_read(pc - 2, 2), "little")
+        except Exception:  # noqa: BLE001 — unicorn raises if unmapped
+            return False
+        if opcode != self._WFE_THUMB:
+            return False
+        self._wfe_skipped += 1
+        if self._wfe_skipped == 1:
+            log.info("cortex-m: `wfe` at 0x%08x executed as a no-op (unicorn's "
+                     "M-profile decoder rejects 0xBF20; the architecture "
+                     "permits WFE to complete immediately)", pc - 2)
+        # PC has already advanced past the wfe; keep the Thumb bit.
+        uc.reg_write(_A.UC_ARM_REG_PC, pc | 1)
         return True
 
     def _maybe_handle_exc_return(self, addr: int) -> bool:
