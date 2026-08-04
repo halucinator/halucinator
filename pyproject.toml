@@ -7,7 +7,8 @@
 # stays under src/ via the package-dir mapping below.
 
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+# >=77 for PEP 639 (`license` as an SPDX expression + `license-files`).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,7 +16,22 @@ name = "halucinator"
 description = "Firmware emulation and rehosting framework"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "GPL-3.0-or-later" }
+# PEP 639: an SPDX expression, not a TOML table. The old `{ text = ... }` form
+# and the matching "License :: OSI Approved ::" classifier are both deprecated
+# and warn at build time, so neither appears here.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+keywords = [
+    "firmware",
+    "emulation",
+    "rehosting",
+    "embedded",
+    "fuzzing",
+    "reverse-engineering",
+    "hal",
+    "qemu",
+    "unicorn",
+]
 # Core metadata has no "original author" field -- only Author and Maintainer,
 # with no role qualifiers -- so `authors` lists the principal authors and the
 # contributing organizations, ordered with the original author first, and
@@ -41,7 +57,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -77,6 +92,8 @@ dependencies = [
 Homepage = "https://github.com/halucinator/halucinator"
 Repository = "https://github.com/halucinator/halucinator"
 Changelog = "https://github.com/halucinator/halucinator/blob/master/CHANGELOG.md"
+Documentation = "https://github.com/halucinator/halucinator/tree/master/doc"
+Issues = "https://github.com/halucinator/halucinator/issues"
 
 [project.optional-dependencies]
 # The unicorn backend (`--emulator unicorn`) is the only one that needs no

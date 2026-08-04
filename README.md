@@ -293,8 +293,8 @@ Or from Ghidra's Debugger tool, use the **gdb** launcher with
 The `--gdb-server` and `--dap` flags can be combined to run both servers
 simultaneously.
 
-See [doc/debugging.md](doc/debugging.md) for a full walkthrough,
-architecture-specific notes, and troubleshooting.
+See [doc/debugging.md](https://github.com/halucinator/halucinator/blob/master/doc/debugging.md)
+for a full walkthrough, architecture-specific notes, and troubleshooting.
 
 ## Running
 
