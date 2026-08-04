@@ -3,6 +3,9 @@
 # LICENSE up automatically for the dist-info, and it is listed again here so the
 # sdist carries it too.
 include LICENSE
+# README-PyPI.md is the long_description (see pyproject.toml); README.md ships
+# too so the sdist is a faithful copy of the source tree.
+include README-PyPI.md
 include README.md
 include CHANGELOG.md
 
