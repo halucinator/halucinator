@@ -537,3 +537,31 @@ and the full pytest suite with coverage reporting.
 - **mbed**: Mbed OS (boot, serial, timer)
 - **vxworks**: VxWorks RTOS (boot, filesystem, ethernet, interrupts, scheduler, tasks)
 - **zephyr**: Zephyr RTOS (filesystem, UART)
+
+## License and credit
+
+GPL-3.0-or-later.
+
+HALucinator was initially created by Abraham Clements and Eric Gustafson at
+Sandia National Laboratories, together with their collaborators and PhD
+advisors at Purdue University, UC Santa Barbara, and EPFL. The work was
+published at the 29th USENIX Security Symposium:
+
+> [HALucinator: Firmware Re-hosting Through Abstraction Layer
+> Emulation](https://www.usenix.org/conference/usenixsecurity20/presentation/clements).
+> Abraham Clements, Eric Gustafson, Tobias Scharnowski, Paul Grosen, David
+> Fritz, Christopher Kruegel, Giovanni Vigna, Saurabh Bagchi, and Mathias
+> Payer. 29th USENIX Security Symposium (USENIX Security '20), August 2020.
+
+It has since been developed by the Sandia HALucinator team, with later
+contributions from the GrammaTech HALucinator team and Christopher Wright. The
+complete contributor list is the project's git history.
+
+Sandia National Laboratories is a multimission laboratory managed and operated
+by National Technology & Engineering Solutions of Sandia, LLC, a wholly owned
+subsidiary of Honeywell International Inc., for the U.S. Department of Energy's
+National Nuclear Security Administration under contract DE-NA0003525.
+
+Copyright 2019 National Technology & Engineering Solutions of Sandia, LLC
+(NTESS). Under the terms of Contract DE-NA0003525 with NTESS, the U.S.
+Government retains certain rights in this software.
