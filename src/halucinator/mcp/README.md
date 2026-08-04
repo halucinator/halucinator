@@ -34,19 +34,25 @@ wire codec).
 
 ## Install
 
-The MCP layer needs **Python 3.10+** (the MCP SDK's floor); the rest of
-HALucinator runs on 3.9. Use a dedicated virtualenv:
+The MCP SDK's Python floor is 3.10, which is HALucinator's baseline too, so no
+separate interpreter or virtualenv is needed -- the extra installs alongside
+everything else:
 
 ```sh
-python3.10 -m venv .venv-mcp
-.venv-mcp/bin/pip install -e '.[mcp]'      # mcp[cli] + capstone
-# Plus HALucinator's own runtime deps (not pulled by the extra):
-.venv-mcp/bin/pip install -r src/requirements.txt
-.venv-mcp/bin/pip install -e deps/avatar2/ --no-deps
+pip install -e '.[mcp]'        # mcp[cli] + capstone
+pip install -e '.[all]'        # or everything at once; [all] includes [mcp]
+```
+
+For the avatar2/QEMU backends, also install the forked avatar2 and the pinned
+runtime deps:
+
+```sh
+pip install -r src/requirements.txt
+pip install -e deps/avatar2/ --no-deps
 ```
 
 The `requirements.txt` pin of `setuptools<81` provides the `distutils` shim
-that the forked `avatar2` imports, so 3.10–3.12 all work; 3.10 or 3.11 are the
+that the forked `avatar2` imports, so 3.10-3.12 all work; 3.10 or 3.11 are the
 safest choices.
 
 ## Run
@@ -185,13 +191,12 @@ returns `state="timeout"` if it doesn't halt in time.
 ## Tests
 
 ```sh
-.venv-mcp/bin/python -m pytest test/pytest/mcp_server/ -q     # 3.10+: all
-PYTHONPATH=src python3 -m pytest test/pytest/mcp_server/ -q   # 3.9: SDK tests skip
+python -m pytest test/pytest/mcp_server/ -q
 ```
 
 `test_session.py`, `test_codec.py`, `test_worker.py`, `test_manager.py` are
-SDK-free and run on 3.9; `test_server.py` self-skips (`importorskip`) without
-the MCP SDK.
+SDK-free; `test_server.py` self-skips (`importorskip`) when the MCP SDK is not
+installed, so the suite still passes without the `[mcp]` extra.
 
 ## Notes
 

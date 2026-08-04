@@ -24,10 +24,10 @@ pip alone.
 | `[unicorn]` | unicorn, capstone | The pip-only backend. Start here. |
 | `[net]` | scapy, pyserial | Host network / serial external devices |
 | `[symbols]` | cle | ELF symbol extraction via `hal_make_addr` |
-| `[mcp]` | mcp[cli] | The `halucinator-mcp` server (needs Python ≥3.10) |
-| `[all]` | all of the above except `[mcp]` | Everything on the ≥3.9 baseline |
+| `[mcp]` | mcp[cli] | The `halucinator-mcp` server |
+| `[all]` | all of the above | Everything except the dev tooling |
 
-Requires Python 3.9 or newer.
+Requires Python 3.10 or newer.
 
 ### Other backends
 

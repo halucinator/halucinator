@@ -20,7 +20,10 @@ description = "Firmware emulation and rehosting framework"
 # that audience and is what renders on the project page; README.md stays the
 # GitHub landing page and is unaffected.
 readme = "README-PyPI.md"
-requires-python = ">=3.9"
+# 3.10 is the floor because 3.9 reached end-of-life in October 2025, and
+# because the MCP SDK requires it -- keeping the baseline there lets [mcp] be
+# part of [all] instead of a carve-out needing its own interpreter.
+requires-python = ">=3.10"
 # PEP 639: an SPDX expression, not a TOML table. The old `{ text = ... }` form
 # and the matching "License :: OSI Approved ::" classifier are both deprecated
 # and warn at build time, so neither appears here.
@@ -64,7 +67,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -116,18 +118,18 @@ net = ["scapy", "pyserial"]
 symbols = ["cle"]
 
 # MCP server (`halucinator-mcp`). Upper-bounded below 2.0: the FastMCP API the
-# server uses is 1.x. Verified against mcp 1.27. Needs Python >=3.10 (the SDK's
-# floor), which is why it is not part of `all`.
+# server uses is 1.x. Verified against mcp 1.27. The SDK's Python floor is
+# 3.10, which is now the package baseline too, so this is a plain extra.
 mcp = ["mcp[cli]>=1.2,<2", "capstone>=4.0"]
 
-# Everything runnable on the >=3.9 baseline, in one shot. Excludes [mcp]
-# (Python >=3.10) and [dev].
+# Everything runnable, in one shot. Excludes only [dev].
 all = [
     "unicorn>=2.0",
     "capstone>=4.0",
     "scapy",
     "pyserial",
     "cle",
+    "mcp[cli]>=1.2,<2",
 ]
 
 # Lint + test tooling. pycparser is used only by halucinator/tools/, never by

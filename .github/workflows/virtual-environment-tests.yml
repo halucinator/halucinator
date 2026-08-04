@@ -535,13 +535,13 @@ jobs:
   # yields a working rehosting install. This job deliberately does NOT check out
   # submodules or build QEMU, so any failure here is unambiguously a packaging or
   # unicorn-backend regression rather than a toolchain problem. It is also the
-  # matrix that validates the declared `requires-python = ">=3.9"`.
+  # matrix that validates the declared `requires-python = ">=3.10"`.
   pip-install-unicorn:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.9', '3.11', '3.13']
+        python: ['3.10', '3.11', '3.13']
 
     steps:
     - uses: actions/checkout@v5
