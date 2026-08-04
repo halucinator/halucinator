@@ -14,7 +14,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "halucinator"
 description = "Firmware emulation and rehosting framework"
-readme = "README.md"
+# PyPI gets its own front page. README.md is the contributor-facing document --
+# Docker builds, submodule clones, building QEMU -- none of which applies to
+# someone who just ran `pip install halucinator`. README-PyPI.md is written for
+# that audience and is what renders on the project page; README.md stays the
+# GitHub landing page and is unaffected.
+readme = "README-PyPI.md"
 requires-python = ">=3.9"
 # PEP 639: an SPDX expression, not a TOML table. The old `{ text = ... }` form
 # and the matching "License :: OSI Approved ::" classifier are both deprecated
@@ -36,8 +41,8 @@ keywords = [
 # with no role qualifiers -- so `authors` lists the principal authors and the
 # contributing organizations, ordered with the original author first, and
 # `maintainers` is who carries the project now. The narrative credit (who
-# created it, who wrote which era of the code) is in README.md, which is the
-# long_description and therefore what actually renders on the project page.
+# created it, who wrote which era of the code) is in README-PyPI.md, which is
+# the long_description and therefore what actually renders on the project page.
 # The complete contributor list is the git history. Emails are deliberately
 # omitted from published metadata.
 authors = [
