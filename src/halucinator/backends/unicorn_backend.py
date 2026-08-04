@@ -1135,7 +1135,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # traps to this hook forever and the ISR never returns. Emulate it: pop
         # the exception frame the delivery path pushed and resume. Exact
         # counterpart of the Cortex-M EXC_RETURN unwind below.
-        if self.arch_name == "m68k" and intno == _M68K_EXCP_RTE:
+        if (self.arch_name == "m68k" and intno == _M68K_EXCP_RTE
+                and not os.environ.get("HAL_M68K_NO_RTE_FIX")):
             if self._m68k_handle_rte():
                 return
 

@@ -302,10 +302,14 @@ class InProcessIrqMixin:
         self.write_memory(sp + 4, 4, pc, num_words=1)
         uc_regs.sp = sp
 
-        # VBR relocates the vector table on real hardware, but unicorn 2.1.4
-        # does NOT implement the m68k VBR control register: reads are a no-op
-        # (register id 21) and emit a deprecation warning, and `movec ax,%vbr`
-        # does not stick. So the table is only reachable at address 0. Probe
+        # VBR relocates the vector table on real hardware. unicorn 2.1.4's HOST
+        # register API cannot read or write m68k VBR: the access is a no-op
+        # (register id 21) and unicorn itself warns that it "is either no-op or
+        # not defined". NOTE the precise claim -- a guest `movec ax,%vbr`
+        # executes without faulting, and whether it updates the CPU's own VBR
+        # is NOT observable from here, because the only observation channel is
+        # the broken host accessor. Either way this delivery path cannot learn
+        # the vector base, so it assumes 0. Probe
         # once, cache the answer, and say so ONCE -- a firmware that relocates
         # its vector table (an RTOS moving it to RAM) will not work until
         # unicorn implements VBR, and that must not be a silent wrong answer.
@@ -327,9 +331,10 @@ class InProcessIrqMixin:
                 self._m68k_vbr_usable = False
             if not self._m68k_vbr_usable:
                 log.warning(
-                    "m68k: unicorn does not implement VBR -- assuming the "
-                    "exception vector table is at address 0. Firmware that "
-                    "RELOCATES its vector table will vector incorrectly.")
+                    "m68k: unicorn's host register API cannot read VBR -- "
+                    "assuming the exception vector table is at address 0. "
+                    "Firmware that RELOCATES its vector table will vector "
+                    "incorrectly.")
         if getattr(self, "_m68k_vbr_usable", False):
             try:
                 vbr = uc_regs.vbr or 0
