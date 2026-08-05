@@ -294,6 +294,8 @@ def emulate_binary(
     singlestep: bool = False,
     qemu_args: Optional[str] = None,
     gdb_server_port: Optional[int] = None,
+    dap_port: Optional[int] = None,
+    dap_bind: str = "127.0.0.1",
     print_qemu_command: Optional[bool] = None,
     emulator: str = "avatar2",
     snapshot_at: Optional[str] = None,
@@ -317,6 +319,17 @@ def emulate_binary(
 
     # Non-avatar2 backends go through the new HalBackend factory path.
     if emulator != "avatar2":
+        if dap_port is not None:
+            # The DAP server drives bp_handlers.debugger.Debugger, which is
+            # built on avatar2's QemuTarget/TargetStates. Fail loudly rather
+            # than silently ignoring --dap and leaving a client hanging on a
+            # port that will never be bound.
+            log.error(
+                "--dap requires the avatar2 backend (got %r). Re-run with "
+                "--emulator avatar2, or use --gdb-server for an in-process "
+                "backend.", emulator,
+            )
+            sys.exit(-1)
         return _emulate_with_backend(
             config=config,
             emulator=emulator,
@@ -380,7 +393,15 @@ def emulate_binary(
     if gdb_server_port is not None and gdb_server_port >= 0:
         avatar.load_plugin("gdbserver")
         # pylint: disable=no-member
-        avatar.spawn_gdb_server(qemu, gdb_server_port, do_forwarding=False)
+        # stop_filter tells the RSP server which stops belong to HALucinator's
+        # own HAL intercepts rather than to a client breakpoint, so it can
+        # resume them instead of reporting them to the attached debugger.
+        avatar.spawn_gdb_server(
+            qemu,
+            gdb_server_port,
+            do_forwarding=False,
+            stop_filter=lambda target, pc: intercepts.check_hal_bp(pc),
+        )
 
     register_intercepts(config, avatar, qemu)
 
@@ -406,7 +427,51 @@ def emulate_binary(
     except Exception:  # noqa: BLE001
         qemu._irq_controller = None
 
-    _start_execution(avatar, qemu, rx_port, tx_port, gdb_server_port)
+    if dap_port is not None:
+        _start_dap_server(avatar, qemu, dap_port, dap_bind)
+
+    _start_execution(avatar, qemu, rx_port, tx_port, gdb_server_port,
+                     dap_port=dap_port)
+
+
+def _start_dap_server(
+    avatar: Avatar, qemu: Any, dap_port: int, dap_bind: str,
+) -> None:
+    """
+    Start the Debug Adapter Protocol server so an IDE (the halucinator-vscode
+    extension, or any DAP client) can attach.
+
+    Imported lazily: halucinator.debug_adapter pulls in bp_handlers.debugger,
+    which imports avatar2 at module scope. A module-level import here would
+    make avatar2 a hard dependency of main.py again and break the
+    avatar2-optional install that the unicorn/ghidra/renode backends rely on.
+    """
+    # pylint: disable=import-outside-toplevel
+    from .debug_adapter.debug_adapter import DAPServer
+    from .bp_handlers.debugger import Debugger
+
+    debugger = Debugger(qemu, avatar, None)
+    # Tell the intercept machinery we're in a debug session. HAL intercept
+    # handlers then wait for the monitor thread's emulation_detected ack
+    # before calling target.cont(), which removes the race where
+    # monitor_running observes STOPPED, takes the post-loop branch, and then
+    # finds the target RUNNING again by the time it reads the PC.
+    intercepts.debug_session = True
+    # Start the monitor thread now so request_queue is always being serviced.
+    # Without this, send_request from a DAP handler blocks forever waiting on
+    # a queue nobody is draining.
+    debugger.start_monitoring(add_shell_callback=False)
+    dap_thread = threading.Thread(
+        target=DAPServer(debugger, dap_port, bind_addr=dap_bind),
+        daemon=True,
+    )
+    dap_thread.start()
+    log.info(
+        "DAP server listening on %s:%d%s",
+        dap_bind,
+        dap_port,
+        "" if dap_bind == "127.0.0.1" else " (EXPOSED: no authentication)",
+    )
 
 
 def _start_execution(
@@ -415,6 +480,7 @@ def _start_execution(
     rx_addr: int,
     tx_addr: int,
     gdb_server_port: Optional[int],
+    dap_port: Optional[int] = None,
 ) -> None:
     """
     Starts the actual execution of qemu,
@@ -450,12 +516,18 @@ def _start_execution(
 
     signal.signal(signal.SIGINT, int_signal_handler)
     qemu.halucinator_shutdown = halucinator_shutdown
-    log.info("Letting QEMU Run")
 
-    if gdb_server_port is not None:
-        print(f"GDB Server Running on localhost:{gdb_server_port}")
-        print("Connect GDB and continue to run")
+    if gdb_server_port is not None or dap_port is not None:
+        # With a debug server enabled, leave QEMU paused at the entry point so
+        # the client can attach and set breakpoints before anything runs.
+        # Resuming here would race the client past the code it wants to stop on.
+        if gdb_server_port is not None:
+            print(f"GDB Server Running on localhost:{gdb_server_port}")
+        if dap_port is not None:
+            print(f"DAP Server Running on localhost:{dap_port}")
+        print("QEMU paused at entry - connect a debug client to start execution")
     else:
+        log.info("Letting QEMU Run")
         qemu.cont()
     try:
         periph_server.run_server()  # Blocks Forever
@@ -1629,6 +1701,42 @@ def main() -> None:
         help="Port to run GDB Server port",
     )
     parser.add_argument(
+        "--gdb-server",
+        type=int,
+        nargs="?",
+        const=3333,
+        default=None,
+        metavar="PORT",
+        dest="gdb_server",
+        help=(
+            "Start GDB RSP server for external debuggers (default port: 3333). "
+            "Alias for --gdb_server_port, kept for the halucinator-vscode "
+            "extension and existing launch configs."
+        ),
+    )
+    parser.add_argument(
+        "--dap",
+        type=int,
+        nargs="?",
+        const=34157,
+        default=None,
+        metavar="PORT",
+        help="Start Debug Adapter Protocol server (default port: 34157)",
+    )
+    parser.add_argument(
+        "--dap-bind",
+        type=str,
+        default="127.0.0.1",
+        metavar="ADDR",
+        dest="dap_bind",
+        help=(
+            "Interface for the DAP server to bind. Defaults to 127.0.0.1 "
+            "(loopback-only) because no authentication is implemented. "
+            "Use 0.0.0.0 to accept remote connections - only on trusted "
+            "networks."
+        ),
+    )
+    parser.add_argument(
         "-e", "--elf", default=None, help="Elf file, required to use recorder"
     )
     parser.add_argument(
@@ -1712,6 +1820,13 @@ def main() -> None:
     # emulator key can come from YAML config options or CLI
     emulator = getattr(args, "emulator", None) or config.options.get("emulator", "avatar2")
 
+    # --gdb-server and -d/--gdb_server_port are two spellings of one setting.
+    # --gdb-server wins when both are given; it's the explicit, newer spelling
+    # and the one the halucinator-vscode extension emits.
+    gdb_server_port = (
+        args.gdb_server if args.gdb_server is not None else args.gdb_server_port
+    )
+
     emulate_binary(
         config,
         args.name,
@@ -1722,7 +1837,9 @@ def main() -> None:
         gdb_port=args.gdb_port,
         singlestep=args.singlestep,
         qemu_args=qemu_args,
-        gdb_server_port=args.gdb_server_port,
+        gdb_server_port=gdb_server_port,
+        dap_port=args.dap,
+        dap_bind=args.dap_bind,
         print_qemu_command=args.print_qemu_command,
         emulator=emulator,
         snapshot_at=args.snapshot_at,
