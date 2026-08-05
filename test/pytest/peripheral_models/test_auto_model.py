@@ -1,0 +1,157 @@
+"""
+Tests for halucinator.peripheral_models.auto_model
+(RecordingPeripheral and AutoPeripheral, plus the env-knob parsers).
+"""
+import pytest
+
+from halucinator.peripheral_models.auto_model import (
+    AutoPeripheral,
+    RecordingPeripheral,
+    parse_counter_addrs,
+    parse_counter64_addrs,
+    parse_counter_step,
+    trace_db_path,
+)
+from halucinator.peripheral_models.generic import GenericPeripheral
+
+
+# ===================== env-knob parsers =====================
+
+class TestEnvParsers:
+
+    def test_parse_counter_addrs_ok(self):
+        addrs, bad = parse_counter_addrs("0x10, 0x20,0x30")
+        assert addrs == {0x10, 0x20, 0x30}
+        assert bad == []
+
+    def test_parse_counter_addrs_reports_bad(self):
+        addrs, bad = parse_counter_addrs("0x10,nope")
+        assert addrs == {0x10}
+        assert bad == ["nope"]
+
+    def test_parse_counter_addrs_empty(self):
+        assert parse_counter_addrs(None) == (set(), [])
+
+    def test_parse_counter64_pair_explicit(self):
+        pairs, bad = parse_counter64_addrs("0x200:0x204")
+        assert pairs == {0x204: 0x200}  # hi -> lo
+        assert bad == []
+
+    def test_parse_counter64_pair_implicit_hi(self):
+        pairs, _ = parse_counter64_addrs("0x300")
+        assert pairs == {0x304: 0x300}  # bare lo implies hi = lo + 4
+
+    def test_parse_counter_step_default(self):
+        assert parse_counter_step(None) == 0x1000
+        assert parse_counter_step("garbage") == 0x1000
+
+    def test_parse_counter_step_value(self):
+        assert parse_counter_step("0x40") == 0x40
+
+    def test_trace_db_path_passthrough(self):
+        assert trace_db_path("x.sqlite", environ={}) == "x.sqlite"
+
+    def test_trace_db_path_suppressed(self):
+        assert trace_db_path("x.sqlite",
+                             environ={"HAL_NO_MMIO_TRACE": "1"}) is None
+
+
+# ===================== RecordingPeripheral =====================
+
+class TestRecordingPeripheral:
+
+    def test_is_a_generic_peripheral(self):
+        assert issubclass(RecordingPeripheral, GenericPeripheral)
+
+    def test_reads_return_zero_and_record(self):
+        p = RecordingPeripheral("rec", 0x40000000, 0x1000)
+        assert p.hw_read(0x0, 4, pc=0x8000) == 0
+        p.hw_write(0x4, 4, 0xdead, pc=0x8004)
+        assert len(p.trace) == 2
+        # (seq, pc, addr, size, value, rw)
+        assert p.trace[0][5] == "r"
+        assert p.trace[1] == (1, 0x8004, 0x40000004, 4, 0xdead, "w")
+
+
+# ===================== AutoPeripheral =====================
+
+class TestAutoPeripheral:
+
+    def test_mro_is_recording_then_generic(self):
+        mro = [c.__name__ for c in AutoPeripheral.__mro__]
+        assert mro[:3] == ["AutoPeripheral", "RecordingPeripheral",
+                           "GenericPeripheral"]
+
+    def test_class_name_is_stable(self):
+        # main._instantiate_peripheral name-checks "AutoPeripheral" for skip_svc;
+        # renaming the class silently breaks that hook.
+        assert AutoPeripheral.__name__ == "AutoPeripheral"
+
+    def test_busywait_breaker_escalates_off_zero(self):
+        p = AutoPeripheral("a", 0x40000000, 0x1000, stall_threshold=4)
+        # First reads return 0; once the same (pc,addr) spins past the
+        # threshold the breaker escalates to all-ones so a wait-for-SET exits.
+        vals = [p.hw_read(0x0, 4, pc=0x8000) for _ in range(12)]
+        assert vals[0] == 0
+        assert 0xFFFFFFFF in vals
+
+    def test_breaker_then_zero_tier(self):
+        p = AutoPeripheral("a", 0x40000000, 0x1000, stall_threshold=4)
+        seen = set(p.hw_read(0x0, 4, pc=0x8000) for _ in range(20))
+        # both tiers observed: all-ones (wait-for-SET) and zero (wait-while-BUSY)
+        assert 0xFFFFFFFF in seen
+        assert 0 in seen
+
+    def test_write_clears_stall_state(self):
+        p = AutoPeripheral("a", 0x40000000, 0x1000, stall_threshold=4)
+        for _ in range(6):
+            p.hw_read(0x0, 4, pc=0x8000)
+        p.hw_write(0x0, 4, 1, pc=0x8000)   # a write to the polled reg
+        assert p._last_key is None
+
+    def test_free_running_counter_monotonic(self):
+        p = AutoPeripheral("c", 0x50000000, 0x1000,
+                          counter_addrs=[0x50000000], counter_step=0x100)
+        vals = [p.hw_read(0x0, 4, pc=0x9000) for _ in range(3)]
+        assert vals == [0x100, 0x200, 0x300]
+
+    def test_counter64_high_word_stable_across_reads(self):
+        # hi must not advance on its own read, or a do/while(hi1!=hi2) loop
+        # never converges.
+        p = AutoPeripheral("c64", 0x60000000, 0x1000,
+                          counter64_addrs={0x60000004: 0x60000000},
+                          counter_step=0x1000)
+        hi1 = p.hw_read(0x4, 4, pc=0x9000)
+        hi2 = p.hw_read(0x4, 4, pc=0x9000)
+        assert hi1 == hi2   # stable
+
+    def test_output_capture_emits_line(self):
+        p = AutoPeripheral("uart", 0x40004400, 0x400)
+        for ch in b"HI\n":
+            p.hw_write(0x0, 1, ch, pc=0x8000)
+        # the newline flushes the buffer
+        assert p._out.get(0x40004400) == bytearray()
+
+
+# ===================== bare-name resolution in main =====================
+
+class TestBareNameResolution:
+    """`emulate: AutoPeripheral` (no dotted path) must resolve, via both
+    resolvers in halucinator.main."""
+
+    def test_instantiate_peripheral_resolves_bare_name(self):
+        import types
+        from halucinator import main
+        mem = types.SimpleNamespace(name="mmio", base_addr=0x40000000,
+                                    size=0x1000, properties=None)
+        periph = main._instantiate_peripheral("AutoPeripheral", mem, None)
+        assert periph is not None
+        assert periph.__class__.__name__ == "AutoPeripheral"
+
+    def test_instantiate_peripheral_bare_recording(self):
+        import types
+        from halucinator import main
+        mem = types.SimpleNamespace(name="mmio", base_addr=0x40000000,
+                                    size=0x1000, properties=None)
+        periph = main._instantiate_peripheral("RecordingPeripheral", mem, None)
+        assert periph.__class__.__name__ == "RecordingPeripheral"

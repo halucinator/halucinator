@@ -181,9 +181,15 @@ def setup_memory(
             mod_path, _, cls_name = memory.emulate.rpartition(".")
             emulate = getattr(importlib.import_module(mod_path), cls_name)
         else:
-            # Bare name: resolve on the generic peripheral_models module
-            # (backward-compatible with existing configs).
-            emulate = getattr(peripheral_emulators, memory.emulate)
+            # Bare name: resolve on the generic peripheral_models module, then
+            # the auto_model module (so `emulate: AutoPeripheral` works without
+            # the fully-qualified path). Backward-compatible with existing configs.
+            from .peripheral_models import auto_model as _auto_model
+            emulate = (getattr(peripheral_emulators, memory.emulate, None)
+                       or getattr(_auto_model, memory.emulate, None))
+            if emulate is None:
+                raise AttributeError(
+                    "unknown emulate peripheral %r" % memory.emulate)
     else:
         emulate = None
     log.info(
@@ -946,9 +952,10 @@ def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
     class path (``module.path.ClassName``) is imported directly — letting a
     device-specific model live in its own subpackage (e.g.
     ``peripheral_models.bpv5.*``) without polluting the generic module. A bare
-    name searches the at91 module (At91SysCtrl/At91Emac/At91Dbgu) then the
-    generic module (GenericPeripheral/HaltPeripheral). Returns None if unknown
-    (region falls back to plain RAM)."""
+    name searches the at91 module (At91SysCtrl/At91Emac/At91Dbgu), the auto_model
+    module (AutoPeripheral/RecordingPeripheral), then the generic module
+    (GenericPeripheral/HaltPeripheral). Returns None if unknown (region falls back
+    to plain RAM)."""
     if "." in name:
         import importlib
         mod_path, _, cls_name = name.rpartition(".")
@@ -957,8 +964,9 @@ def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
         except ImportError:
             cls = None
     else:
-        from halucinator.peripheral_models import at91, generic
+        from halucinator.peripheral_models import at91, auto_model, generic
         cls = (getattr(at91, name, None)
+               or getattr(auto_model, name, None)
                or getattr(generic, name, None))
     if cls is None:
         log.warning("Unknown emulate peripheral %r; region %s left as RAM",
