@@ -30,6 +30,29 @@ class Interrupts:
     Active_Interrupts: Dict[Any, bool] = active  # alias used by tests
     enabled: Dict[int, bool] = defaultdict(bool)
 
+    # ------------------------------------------------------------------
+    # Snapshot (Layer 2): the active + enabled interrupt maps. Restore keeps
+    # ``Active_Interrupts`` pointing at the very same live ``active`` dict —
+    # code that captured that alias before the snapshot must keep working.
+    # ------------------------------------------------------------------
+    @classmethod
+    def save_state(cls) -> Dict[str, Any]:
+        import copy
+        return {"active": copy.deepcopy(cls.active),
+                "enabled": copy.deepcopy(cls.enabled)}
+
+    @classmethod
+    def restore_state(cls, state: Dict[str, Any]) -> bool:
+        import copy
+        cls.active.clear()
+        cls.active.update(copy.deepcopy(state.get("active", {})))
+        cls.enabled.clear()
+        cls.enabled.update(copy.deepcopy(state.get("enabled", {})))
+        # Re-point the alias at the same live dict (it never rebinds, but be
+        # explicit so the invariant is obvious).
+        cls.Active_Interrupts = cls.active
+        return True
+
     @classmethod
     @peripheral_server.reg_rx_handler
     def interrupt_request(cls, msg: Dict[str, Any]) -> None:

@@ -18,6 +18,23 @@ class GPIO(object):
     # TODO: Should maybe be DefaultDict[int, bool] too
     gpio_state: DefaultDict[str, int] = defaultdict(int)
 
+    # ------------------------------------------------------------------
+    # Snapshot (Layer 2): the pin-level state map.
+    # ------------------------------------------------------------------
+    @classmethod
+    def save_state(cls) -> Dict[str, Any]:
+        import copy
+        return {"gpio_state": copy.deepcopy(cls.gpio_state)}
+
+    @classmethod
+    def restore_state(cls, state: Dict[str, Any]) -> bool:
+        """Restore pin state IN PLACE so any held alias stays valid."""
+        import copy
+        saved = copy.deepcopy(state.get("gpio_state", {}))
+        cls.gpio_state.clear()
+        cls.gpio_state.update(saved)
+        return True
+
     @classmethod
     @peripheral_server.tx_msg
     def write_pin(cls, gpio_id: str, value: int) -> Dict[str, Any]:

@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from avatar2 import QemuTarget
 
+from halucinator.qemu_targets.qemu_connect import RobustQemuConnectMixin
+
 log = logging.getLogger(__name__)
 
 
@@ -47,7 +49,7 @@ class AllocedMemory:
         )
 
 
-class HALQemuTarget(QemuTarget):
+class HALQemuTarget(RobustQemuConnectMixin, QemuTarget):
     """
         Implements a QEMU target that has function args for use with
         halucinator.  Enables read/writing and returning from
