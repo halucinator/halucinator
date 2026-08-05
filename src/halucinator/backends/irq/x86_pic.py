@@ -60,22 +60,15 @@ scheduler reschedule lives in `intExit`.
 from __future__ import annotations
 
 import logging
-import struct
 import threading
 from typing import TYPE_CHECKING, List, Optional
 
 from . import IrqController
-from halucinator import hal_log
 
 if TYPE_CHECKING:
     from halucinator.backends.hal_backend import HalBackend
 
 log = logging.getLogger(__name__)
-hlog = hal_log.getHalLogger()
-
-# EFLAGS bits.
-_EFLAGS_IF = 1 << 9   # interrupt-enable flag
-_EFLAGS_RESERVED = 0x2  # bit1 is always 1
 
 
 class X86PicController(IrqController):
@@ -105,8 +98,6 @@ class X86PicController(IrqController):
         self.stub_addr: int = stub_addr
         self.isr_arg: int = isr_arg
         self.vector: int = vector
-        self._stub_written: bool = False
-        self._stub_entry: Optional[int] = None
         # Re-entrancy guard: don't nest a tick inside the clock ISR.
         self._in_isr: bool = False
         self._lock = threading.Lock()
@@ -157,92 +148,25 @@ class X86PicController(IrqController):
     # Delivery — runs on the dispatch thread (single-threaded CPU state)
     # ------------------------------------------------------------------
 
-    def _ensure_stub(self, backend: "HalBackend") -> Optional[int]:
-        """Assemble the VxWorks-style interrupt stub in guest RAM once.
-
-        Returns the stub entry EIP, or None when no kernel int_ent/
-        int_exit are configured (caller then vectors at the ISR
-        directly with a bare iret frame).
-        """
-        if self.int_ent is None or self.int_exit is None:
-            return None
-        if self._stub_written:
-            return self._stub_entry
-        if self.isr_addr is None:
-            return None
-        base = self.stub_addr
-        code = bytearray()
-        # cli
-        code += b"\xfa"
-        # call intEnt   (rel32 from end of this instruction)
-        code += b"\xe8" + struct.pack("<i", self.int_ent - (base + len(code) + 5))
-        # push <isr_arg>
-        code += b"\x68" + struct.pack("<I", self.isr_arg & 0xFFFFFFFF)
-        # call <isr>
-        code += b"\xe8" + struct.pack("<i", self.isr_addr - (base + len(code) + 5))
-        # add esp, 4
-        code += b"\x83\xc4\x04"
-        # jmp intExit
-        code += b"\xe9" + struct.pack("<i", self.int_exit - (base + len(code) + 5))
-        if not backend.write_memory(base, 1, bytes(code)):
-            log.warning("x86_pic: could not write interrupt stub at "
-                        "0x%08x; falling back to direct ISR vector", base)
-            self.int_ent = None
-            self.int_exit = None
-            return None
-        self._stub_written = True
-        self._stub_entry = base
-        log.info("x86_pic: assembled interrupt stub @ 0x%08x "
-                 "(intEnt=0x%x isr=0x%x intExit=0x%x, %d bytes)",
-                 base, self.int_ent, self.isr_addr, self.int_exit, len(code))
-        return base
-
     def deliver(self, backend: "HalBackend") -> bool:
-        """Synthesise the CPU interrupt entry. Must run single-threaded.
+        """Deliver a queued tick. Thin shim over ``X86ExceptionDeliverer`` —
+        the exception-entry logic now lives in the deliverer (mirroring how
+        ``ArmVicController`` delegates to ``ArmExceptionDeliverer``). This
+        entry point stays because the in-process dispatch loop calls it; it
+        builds a plan from this controller's live fields (``isr_addr`` is
+        learned at run time via ``register_clock_isr``) and delegates.
 
-        Returns True if the entry was set up (EIP now points at the
-        handler), False if it was suppressed (interrupts masked, no ISR,
-        or already inside the ISR)."""
-        if self.isr_addr is None:
-            log.warning("x86_pic: tick fired but no clock ISR known yet "
-                        "(sysClkConnect not seen, no isr_addr configured) "
-                        "— dropping")
-            return False
-        with self._lock:
-            eflags = backend.read_register("eflags")
-            if not (eflags & _EFLAGS_IF):
-                # Interrupts masked (cli). The firmware will re-enable;
-                # the next tick will land. Dropping a masked tick matches
-                # real edge-PIC behaviour closely enough for the clock.
-                log.debug("x86_pic: IF=0 (interrupts masked) — tick dropped")
-                return False
-
-            eip = backend.read_register("eip")
-            cs = backend.read_register("cs")
-            esp = backend.read_register("esp")
-
-            target = self._ensure_stub(backend)
-            if target is None:
-                target = self.isr_addr
-
-            # Build the hardware interrupt frame the handler/iret expects:
-            #   [esp]   = EIP   (return address)
-            #   [esp+4] = CS
-            #   [esp+8] = EFLAGS
-            esp -= 12
-            backend.write_memory(esp, 4, eip & 0xFFFFFFFF)
-            backend.write_memory(esp + 4, 4, cs & 0xFFFFFFFF)
-            backend.write_memory(esp + 8, 4, eflags & 0xFFFFFFFF)
-            backend.write_register("esp", esp)
-            # Mask IF for the duration of the handler (the stub's cli does
-            # this on hardware; set it now so a re-entrant tick is dropped
-            # by the IF check above until the handler's iret restores it).
-            backend.write_register("eflags", eflags & ~_EFLAGS_IF)
-            backend.write_register("eip", target)
-            hlog.info("x86_pic: delivering IRQ -> stub/ISR 0x%08x "
-                      "(interrupted eip=0x%08x, frame@0x%08x)",
-                      target, eip, esp)
-            return True
+        Returns True if the entry was set up, False if suppressed (IRQs
+        masked or no ISR known)."""
+        from .delivery import (
+            DeliveryModel, DeliveryPlan, X86ExceptionDeliverer)
+        plan = DeliveryPlan(
+            model=DeliveryModel.FRAME,
+            isr_addr=self.isr_addr,
+            extra={"int_ent": self.int_ent, "int_exit": self.int_exit,
+                   "stub_addr": self.stub_addr, "isr_arg": self.isr_arg},
+        )
+        return X86ExceptionDeliverer().deliver(backend, 0, plan)
 
     def on_isr_return(self) -> None:
         """Clear the in-ISR guard. Called by the backend when the

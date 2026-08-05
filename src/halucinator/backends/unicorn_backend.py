@@ -17,6 +17,7 @@ import struct
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .hal_backend import ABI_MIXINS, ARM32HalMixin, ARMHalMixin, HalBackend, MemoryRegion
+from .irq.in_process import InProcessIrqMixin
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +228,7 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
 # UnicornBackend
 # ---------------------------------------------------------------------------
 
-class UnicornBackend(ARMHalMixin, HalBackend):
+class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
     """
     In-process emulation backend using unicorn-engine.
 
@@ -310,10 +311,9 @@ class UnicornBackend(ARMHalMixin, HalBackend):
             _os.environ.get("HAL_MMU_FLAT_FALLBACK") == "1")
         self._mmu_flat_count: Dict[int, int] = {}
         self._bp_callbacks: Dict[int, Callable] = {}  # bp_id → callback
-        # Pending IRQ injected from another thread (peripheral_server zmq
-        # handler). cont() drains the queue before re-entering emu_start
-        # so the synthetic exception frame is set up single-threaded.
-        self._pending_irqs: List[int] = []
+        # In-process IRQ state: the cross-thread pending-IRQ queue and the
+        # HAL_DET_TICK deterministic-tick config (see InProcessIrqMixin).
+        self._init_in_process_irq()
         # x86: when _intr_hook resolves a far control transfer (#GP from a
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
@@ -341,16 +341,7 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         # Bind the arch-specific ABI mixin onto the instance (ARM32 stays the
         # default via inheritance so existing arm/cortex-m callers are
         # unchanged).
-        abi_cls = ABI_MIXINS.get(arch, ARM32HalMixin)
-        self._abi = abi_cls
-        if abi_cls is not ARM32HalMixin:
-            for method_name in ("get_arg", "set_args", "get_ret_addr",
-                                "set_ret_addr", "execute_return",
-                                "read_string"):
-                method = getattr(abi_cls, method_name, None)
-                if method is not None:
-                    setattr(self, method_name,
-                            method.__get__(self, type(self)))
+        self._bind_abi(arch)
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -580,23 +571,9 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                     self.dump_pc_sample()
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _pc_sample)
 
-        # HAL_DET_TICK="<irq>:<chunks>" -- drive the system clock IRQ DETERMINISTICALLY from
-        # instruction count (one tick every <chunks> emu_start chunks in cont()) instead of the
-        # wall-clock timer thread. Wall-clock ticks fire at nondeterministic instruction
-        # boundaries, so run-state/scan scheduling becomes timing-fragile (any bp-handler overhead
-        # perturbs it). Tying the tick to instruction count makes scheduling reproducible
-        # regardless of handler overhead -> the run-drive stays stable and can be observed.
-        self._det_irq = None
-        self._det_period = 0
-        self._det_chunks = 0
-        _det = _os.environ.get("HAL_DET_TICK")
-        if _det:
-            try:
-                _di, _dp = _det.split(":")
-                self._det_irq = int(_di, 0)
-                self._det_period = max(1, int(_dp, 0))
-            except Exception:  # noqa: BLE001
-                self._det_irq = None
+        # HAL_DET_TICK deterministic system-clock tick is parsed in
+        # _init_in_process_irq() (InProcessIrqMixin); cont() consumes
+        # self._det_irq / _det_period / _det_chunks below.
 
         # Diagnostic: HAL_LAST_PC=1 keeps a ring of the last basic-block start PCs
         # (low per-block overhead) so that on a UcError the code path leading INTO
@@ -1834,10 +1811,7 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     # with LR holding one of these, cortex-m normally pops the exception
     # frame and resumes. Unicorn doesn't model that transition, so we
     # catch the invalid fetch and unwind manually.
-    _EXC_RETURN_THREAD_MSP = 0xFFFFFFF9
-    _EXC_RETURN_MASK = 0xFFFFFFF0
-    _EXC_RETURN_MAGIC = 0xFFFFFFF0  # any PC matching this top nibble is
-                                     # an exception-return attempt
+    # EXC_RETURN constants + frame decode now live in InProcessIrqMixin.
 
     # The avatar2/QEMU path implements these by writing to the halucinator-irq
     # controller MMIO region. Unicorn doesn't model a NVIC/GIC, so IRQ
@@ -1853,6 +1827,22 @@ class UnicornBackend(ARMHalMixin, HalBackend):
 
     def irq_enable_bp(self, irq_num: int = 1) -> None:
         return None
+
+    @property
+    def arch(self) -> str:
+        """Alias for arch_name, so the shared InProcessIrqMixin can read a
+        uniform ``arch`` attribute across backends."""
+        return self.arch_name
+
+    def _request_break(self) -> None:
+        """Thread-safe stop of the running emulator (InProcessIrqMixin
+        primitive). Unicorn raises if not currently running — ignore."""
+        if self._uc is None:
+            return
+        try:
+            self._uc.emu_stop()
+        except Exception:  # noqa: BLE001
+            pass
 
     def inject_irq(self, irq_num: int) -> None:
         """Deliver an external IRQ.
@@ -1935,65 +1925,12 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         except Exception:  # noqa: BLE001 — uc raises if not running
             pass
 
-    def _apply_pending_irq(self, irq_num: int) -> None:
-        """Set up the synthetic exception entry for a pended IRQ.
-        Must run on the dispatch thread (between emu_start chunks)
-        — Unicorn isn't safe against PC/SP writes mid-run."""
+    def _apply_cortex_m_fallback(self, irq_num: int) -> None:
+        """Cortex-M (and any un-migrated arch) fallback: push the 8-word
+        exception frame on the main stack and vector to vector[16+N].
+        Called by InProcessIrqMixin._apply_pending_irq. Must run on the
+        dispatch thread — Unicorn isn't safe against PC/SP writes mid-run."""
         if self._uc is None:
-            return
-        if self.arch_name == "arm":
-            # A-profile ARM IRQ delivery. Preferred path: the refactored
-            # ExceptionDeliverer + DeliveryPlan (set via main._wire_irq).
-            # It subsumes both the ArmVicController.deliver synth path and
-            # the built-in _apply_pending_irq_armv7a GIC path (proven
-            # equivalent in test_arm_deliverer_equivalence.py). Only the
-            # FRAME/TRAMPOLINE models are handled by ArmExceptionDeliverer;
-            # SHADOW (ghidra) and the unconfigured case fall through to the
-            # legacy logic below.
-            from halucinator.backends.irq.delivery import DeliveryModel
-            deliverer = getattr(self, "_exception_deliverer", None)
-            plan = getattr(self, "_delivery_plan", None)
-            if (deliverer is not None and plan is not None
-                    and plan.model in (DeliveryModel.FRAME,
-                                       DeliveryModel.TRAMPOLINE)):
-                deliverer.deliver(self, irq_num, plan)
-                return
-            # Legacy: if the configured controller synthesises the
-            # exception itself (ArmVicController), route through it;
-            # otherwise the built-in ARMv7-A/GIC entry (VBAR+0x18 +
-            # GICC_IAR shadow).
-            ctrl = getattr(self, "_irq_controller", None)
-            if ctrl is not None and hasattr(ctrl, "deliver"):
-                # deliver() returns False when CPSR.I masks IRQs — like the
-                # x86_pic path we simply drop that tick (the next periodic
-                # tick lands once the firmware re-enables IRQs). We do NOT
-                # re-queue, which would busy-spin this chunk re-applying a
-                # tick that can never enter.
-                ctrl.deliver(self, irq_num)
-                return
-            self._apply_pending_irq_armv7a(irq_num)
-            return
-        if self.arch_name == "arm64":
-            self._apply_pending_irq_arm64(irq_num)
-            return
-        if self.arch_name == "mips":
-            self._apply_pending_irq_mips(irq_num)
-            return
-        if self.arch_name in ("powerpc", "powerpc:MPC8XX", "ppc64"):
-            self._apply_pending_irq_ppc(irq_num)
-            return
-        if self.arch_name == "x86":
-            # x86 PC interrupt delivery is owned entirely by the
-            # configured X86PicController (backends/irq/x86_pic.py): it
-            # synthesises the CPU interrupt frame and vectors to the
-            # VxWorks interrupt stub. This runs on the dispatch thread
-            # (here), so it is safe to mutate EIP/ESP.
-            ctrl = getattr(self, "_irq_controller", None)
-            if ctrl is not None and hasattr(ctrl, "deliver"):
-                ctrl.deliver(self)
-            else:
-                log.warning("inject_irq(%d): x86 has no X86PicController "
-                            "configured; tick dropped", irq_num)
             return
 
         # Vector table offset: caller plumbs it in via set_vtor(); fall
@@ -2043,43 +1980,42 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     _ARM_CPSR_T    = 0x20   # Thumb
 
     def _apply_pending_irq_armv7a(self, irq_num: int) -> None:
-        """Synthesise an ARMv7-A IRQ exception entry (legacy GIC path).
-
-        Thin wrapper over the shared ``ArmExceptionDeliverer``: builds a
-        FRAME ``DeliveryPlan`` from the vector base (``_vtor``) and the
-        configured GIC's ``gicc_base`` (for the GICC_IAR shadow), then
-        delegates. The only behaviour this wrapper adds over the deliverer
-        is the legacy *masked-IRQ re-queue*: when delivery is suppressed
-        (CPSR.I=1) it re-queues the tick and stops the run so the firmware
-        can unmask, rather than dropping it (the ArmVicController path
-        drops). That policy difference is intentionally preserved here.
-        """
+        """A-profile ARM IRQ delivery (Unicorn). Preferred path: the
+        ExceptionDeliverer + DeliveryPlan set via main._wire_irq (subsumes
+        the ArmVicController synth path and the legacy GIC path, proven
+        equivalent in test_arm_deliverer_equivalence.py). Falls back to the
+        legacy ArmVicController.deliver, then the built-in ARMv7-A/GIC entry
+        (VBAR+0x18 + GICC_IAR shadow). Only the legacy GIC path adds the
+        masked-IRQ re-queue (CPSR.I=1 -> re-queue + stop so the firmware can
+        unmask); the deliverer / ArmVicController paths drop the tick."""
         from halucinator.backends.irq.delivery import (
             ArmExceptionDeliverer, DeliveryModel, DeliveryPlan)
+        deliverer = getattr(self, "_exception_deliverer", None)
+        plan = getattr(self, "_delivery_plan", None)
+        if (deliverer is not None and plan is not None
+                and plan.model in (DeliveryModel.FRAME,
+                                   DeliveryModel.TRAMPOLINE)):
+            deliverer.deliver(self, irq_num, plan)
+            return
         ctrl = getattr(self, "_irq_controller", None)
+        if ctrl is not None and hasattr(ctrl, "deliver"):
+            # deliver() returns False when CPSR.I masks IRQs — drop that tick
+            # (the next periodic tick lands once firmware re-enables IRQs); do
+            # NOT re-queue, which would busy-spin re-applying an un-enterable
+            # tick.
+            ctrl.deliver(self, irq_num)
+            return
         gicc_base = getattr(ctrl, "gicc_base", None) if ctrl else None
         vbar = getattr(self, "_vtor", 0)
-        plan = DeliveryPlan(model=DeliveryModel.FRAME, vector_base=vbar,
-                            gicc_base=gicc_base)
-        delivered = ArmExceptionDeliverer().deliver(self, irq_num, plan)
+        lplan = DeliveryPlan(model=DeliveryModel.FRAME, vector_base=vbar,
+                             gicc_base=gicc_base)
+        delivered = ArmExceptionDeliverer().deliver(self, irq_num, lplan)
         if not delivered:
-            # IRQs masked — re-queue and let the firmware unmask itself;
-            # otherwise we'd nest exceptions.
+            # IRQs masked — re-queue and let the firmware unmask itself.
             self._pending_irqs.insert(0, irq_num)
-            self._uc.emu_stop()
+            self._request_break()
             return
         log.info("inject_irq(%d): ARMv7-A entry @ 0x%x", irq_num, vbar + 0x18)
-
-    def _resolve_delivery_plan(self, build_legacy):
-        """Return the attached DeliveryPlan (new `irq_delivery` config) or,
-        when none was set, a plan built from the legacy controller fields
-        via ``build_legacy(ctrl)``. Centralises the new-vs-legacy choice so
-        each per-arch wrapper stays a one-liner."""
-        plan = getattr(self, "_delivery_plan", None)
-        if plan is not None:
-            return plan
-        ctrl = getattr(self, "_irq_controller", None)
-        return build_legacy(ctrl)
 
     def _apply_pending_irq_arm64(self, irq_num: int) -> None:
         """AArch64 IRQ entry — thin wrapper over Arm64ExceptionDeliverer."""
@@ -2098,53 +2034,14 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         Arm64ExceptionDeliverer().deliver(self, irq_num,
                                           self._resolve_delivery_plan(_legacy))
 
-    def _apply_pending_irq_mips(self, irq_num: int) -> None:
-        """MIPS IRQ delivery — thin wrapper over ShadowExceptionDeliverer.
-
-        Unicorn's MIPS model doesn't take CP0 exceptions reliably, so the
-        shadow deliverer writes the firmware's post-ack globals directly."""
-        from halucinator.backends.irq.delivery import (
-            DeliveryModel, DeliveryPlan, ShadowExceptionDeliverer)
-
-        def _legacy(ctrl):
-            return DeliveryPlan(
-                model=DeliveryModel.SHADOW,
-                irq_fired_addr=getattr(ctrl, "irq_fired_addr", None) if ctrl else None,
-                irq_number_addr=getattr(ctrl, "irq_number_addr", None) if ctrl else None,
-            )
-        ShadowExceptionDeliverer().deliver(self, irq_num,
-                                           self._resolve_delivery_plan(_legacy))
-
-    def _apply_pending_irq_ppc(self, irq_num: int) -> None:
-        """PowerPC IRQ delivery — thin wrapper over ShadowExceptionDeliverer
-        (same SHADOW pattern as MIPS; Unicorn doesn't model the OpenPIC /
-        SRR0/SRR1 entry reliably for our use-case)."""
-        from halucinator.backends.irq.delivery import (
-            DeliveryModel, DeliveryPlan, ShadowExceptionDeliverer)
-
-        def _legacy(ctrl):
-            return DeliveryPlan(
-                model=DeliveryModel.SHADOW,
-                irq_fired_addr=getattr(ctrl, "irq_fired_addr", None) if ctrl else None,
-                irq_number_addr=getattr(ctrl, "irq_number_addr", None) if ctrl else None,
-            )
-        ShadowExceptionDeliverer().deliver(self, irq_num,
-                                           self._resolve_delivery_plan(_legacy))
-
     def _maybe_handle_exc_return(self, addr: int) -> bool:
         """Called from the invalid-fetch hook. If the fetch address looks
         like an EXC_RETURN magic value, pop the exception frame and
         restore pre-interrupt state. Returns True when handled."""
-        if self.arch_name != "cortex-m3":
+        decoded = self._decode_exc_return_frame(addr)
+        if decoded is None:
             return False
-        if (addr & self._EXC_RETURN_MASK) != self._EXC_RETURN_MAGIC:
-            return False
-        import struct
-        sp = self.read_register("sp")
-        try:
-            frame = struct.unpack("<8I", bytes(self._uc.mem_read(sp, 32)))
-        except Exception:
-            return False
+        sp, frame = decoded
         self.write_register("r0", frame[0])
         self.write_register("r1", frame[1])
         self.write_register("r2", frame[2])
