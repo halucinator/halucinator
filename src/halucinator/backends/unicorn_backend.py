@@ -2194,11 +2194,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         else:
             irq_chunk = 0
         while True:
+            # Let anything that needs a periodic tick have one, BEFORE the
+            # queue is drained so a model can raise an interrupt here and see
+            # it delivered on this same pass. See add_chunk_hook.
+            self._run_chunk_hooks()
             # Drain any IRQs queued from another thread before
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
-            while self._pending_irqs:
-                self._apply_pending_irq(self._pending_irqs.pop(0))
+            self._drain_pending_irqs()
             # Deliver a PendSV requested from thread mode (the ICSR write hook
             # emu_stop'd us and parked PC on the store). Done here, at the top of
             # the loop, so it survives an intervening breakpoint stop: the parked
@@ -3054,6 +3057,92 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._pending_irqs.append(self._SVCALL_IRQ)
         uc.emu_stop()
         return True
+
+    def add_chunk_hook(self, callback) -> None:
+        """Register a callable to run at every instruction-chunk boundary.
+
+        A PERIODIC TICK THAT DOES NOT DEPEND ON THE FIRMWARE TOUCHING ANYTHING.
+        Peripheral models normally advance their notion of time from MMIO
+        activity, because that is the only thing they are called for. That
+        works right up until the firmware idles -- and idling is exactly when
+        the timers matter, because the interrupt that ends the idle is the one
+        a timer is supposed to raise.
+
+        Nordic's S132 shows the shape clearly. Its scheduler arms RTC0 for the
+        next advertising event and then waits in
+
+            wfe ; ldr r0,[r4] ; ldrb r0,[r0,#0x1c] ; bl … ; cmp r0,#0 ; beq
+
+        which reads only RAM. No MMIO, so an MMIO-driven clock stops dead, the
+        RTC never reaches the compare it was armed for, and the device
+        advertises twice and then sleeps for ever. Nothing faults, and the
+        firmware is behaving perfectly correctly.
+
+        A chunk boundary is the natural place for this: it is reached every
+        HAL_IRQ_CHUNK instructions regardless of what the guest is doing, it is
+        where CPU state is already safe to mutate, and it is where queued
+        interrupts are delivered. Hooks run *before* that drain, so a model can
+        raise a line and have it taken on the same pass.
+
+        Exceptions from a hook are logged and swallowed: a model must not be
+        able to kill the run from its own timekeeping.
+        """
+        if not hasattr(self, "_chunk_hooks"):
+            self._chunk_hooks = []
+        if callback not in self._chunk_hooks:
+            self._chunk_hooks.append(callback)
+
+    def _run_chunk_hooks(self) -> None:
+        for callback in getattr(self, "_chunk_hooks", ()):  # noqa: B007
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 — a model's tick must not abort
+                log.exception("chunk hook %r failed", callback)
+
+    def _drain_pending_irqs(self) -> None:
+        """Apply every queued exception -- SYNCHRONOUS ONES FIRST.
+
+        WHY THE ORDER IS NOT ARBITRARY. This queue mixes two different kinds of
+        thing. An external interrupt is *asynchronous*: it may be taken between
+        any two instructions, so stacking whatever PC the CPU happens to be at
+        is always right. A ``svc`` is *synchronous and precise*: by the time it
+        reaches this queue the instruction has already executed, and the frame
+        must stack the address **immediately after it**, because that is the
+        only state consistent with what the CPU actually did.
+
+        Take an interrupt first and that invariant is broken. PC has already
+        moved to the interrupt's handler, so the SVCall frame stacks the
+        handler's entry address instead -- and every ARMv7-M SVC dispatcher in
+        existence recovers the call number by reading ``stacked_PC - 2`` and
+        taking the low byte of the ``svc`` opcode. It therefore reads a byte of
+        whatever code the interrupt vectored to, and dispatches on it.
+
+        Observed on the nRF52832 + S132 device, and it is worth recording
+        because the failure has no fault and no console output:
+
+            svc #0x48 from 0x0002032c        the guest's real call
+            inject_irq(20): exc 36 @ 0x687   drained first -- PC moves to the
+                                             MBR's SWI0 forwarder
+            inject_irq(-5): exc 11 @ 0x909   SVCall stacks PC=0x687
+
+        The SoftDevice's dispatcher then read ``[0x685]`` -- a byte of MBR
+        forwarder code -- as the call number, found it below 0x10, and forwarded
+        it to the *application's* SVCall handler, which in this image is the
+        default ``b .``. The machine sat there executing one instruction 82
+        million times.
+
+        The interrupt is still delivered, immediately afterwards, stacking the
+        SVCall handler's entry address. That is a legal and ordinary nesting: a
+        higher-priority interrupt pre-empting a supervisor call is exactly what
+        the priority scheme is for, and the SVCall handler runs when it returns.
+        """
+        queue = self._pending_irqs
+        while queue:
+            if self._SVCALL_IRQ in queue:
+                queue.remove(self._SVCALL_IRQ)
+                self._apply_pending_irq(self._SVCALL_IRQ)
+                continue
+            self._apply_pending_irq(queue.pop(0))
 
     _WFE_THUMB = 0xBF20                     # `wfe` -- the one M-profile hint
                                             # unicorn's decoder rejects
