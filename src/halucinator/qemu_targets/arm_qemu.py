@@ -18,6 +18,7 @@ from avatar2 import QemuTarget, TargetStates
 
 from halucinator import hal_log
 from halucinator.bp_handlers import intercepts
+from halucinator.qemu_targets.qemu_connect import RobustQemuConnectMixin
 
 log = logging.getLogger(__name__)
 hal_log = hal_log.getHalLogger()
@@ -66,7 +67,7 @@ class AllocedMemory:
         )
 
 
-class ARMQemuTarget(QemuTarget):
+class ARMQemuTarget(RobustQemuConnectMixin, QemuTarget):
     """
     Implements a QEMU target that has function args for use with
     halucinator.  Enables read/writing and returning from

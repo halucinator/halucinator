@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import uuid
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -91,6 +92,9 @@ class HalucinatorSession:
     _last_run: _RunResult = field(default_factory=_RunResult)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _worker: Optional[threading.Thread] = None
+    # In-memory checkpoints (snapshot_id -> SystemSnapshot). Live only as
+    # long as this worker process — use save_snapshot(path=...) to persist.
+    _snapshots: Dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -344,6 +348,12 @@ class HalucinatorSession:
         self.debug_breakpoints.clear()
         self.watchpoints.clear()
         self._intercept_addr_to_bp.clear()
+        for snap in self._snapshots.values():
+            try:
+                snap.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self._snapshots.clear()
         self._running = False
         self._exited = False
         self._last_run = _RunResult()
@@ -649,6 +659,105 @@ class HalucinatorSession:
                 raise SessionError(str(exc)) from None
             except Exception as exc:  # noqa: BLE001
                 raise SessionError(f"inject_irq failed: {exc}") from None
+        return True
+
+    # ------------------------------------------------------------------
+    # Snapshot / restore (see doc/snapshot_restore.md)
+    # ------------------------------------------------------------------
+
+    def save_snapshot(self, path: Optional[str] = None,
+                      include_devices: bool = False,
+                      device_timeout: float = 1.0) -> Dict[str, Any]:
+        """Checkpoint the whole machine (guest CPU+RAM + peripheral models,
+        optionally external zmq devices).
+
+        Without *path*: fast in-memory checkpoint, returns a snapshot_id
+        (lives only as long as this session's worker). With *path*: portable
+        snapshot written to a .halsnap file that survives the process.
+        """
+        self.assert_active()
+        self.assert_idle()
+        from ..backends.hal_backend import SnapshotError
+        from ..snapshot import (DeviceLayer, save_snapshot_file,
+                                system_snapshot)
+        device_layer = (DeviceLayer(timeout=device_timeout)
+                        if include_devices else None)
+        with self._lock:
+            try:
+                snap = system_snapshot(self.backend, portable=bool(path),
+                                       device_layer=device_layer)
+            except (SnapshotError, RuntimeError) as exc:
+                raise SessionError(f"save_snapshot failed: {exc}") from None
+        pc = self.backend.read_register("pc")
+        if path:
+            try:
+                out = save_snapshot_file(snap, path)
+            except SnapshotError as exc:
+                raise SessionError(str(exc)) from None
+            finally:
+                snap.release()
+            return {"kind": "file", "path": str(out),
+                    "bytes": out.stat().st_size, "pc": pc,
+                    "devices": len(snap.devices)}
+        snap_id = f"snap-{uuid.uuid4().hex[:8]}"
+        self._snapshots[snap_id] = snap
+        return {"kind": "memory", "snapshot_id": snap_id, "pc": pc,
+                "devices": len(snap.devices)}
+
+    def restore_snapshot(self, snapshot_id: Optional[str] = None,
+                         path: Optional[str] = None,
+                         device_timeout: float = 1.0) -> Dict[str, Any]:
+        """Restore a checkpoint made by save_snapshot — *snapshot_id* for an
+        in-memory one, *path* for a .halsnap file (exactly one required)."""
+        self.assert_active()
+        self.assert_idle()
+        if bool(snapshot_id) == bool(path):
+            raise SessionError(
+                "restore_snapshot needs exactly one of snapshot_id / path")
+        from ..backends.hal_backend import Snapshot, SnapshotError
+        from ..snapshot import (DeviceLayer, SystemSnapshot,
+                                load_snapshot_file, system_restore)
+        if path:
+            try:
+                snap, _header = load_snapshot_file(path)
+            except SnapshotError as exc:
+                raise SessionError(str(exc)) from None
+            if isinstance(snap, Snapshot):  # backend-only file
+                snap = SystemSnapshot(backend=snap, peripherals={})
+        else:
+            snap = self._snapshots.get(snapshot_id)
+            if snap is None:
+                raise SessionError(
+                    f"no such snapshot: {snapshot_id!r} "
+                    f"(have: {sorted(self._snapshots) or 'none'})")
+        with self._lock:
+            result = system_restore(self.backend, snap,
+                                    device_layer=DeviceLayer(
+                                        timeout=device_timeout))
+        if result.ok:
+            # The machine is whole again at the snapshot's PC; a previous
+            # off-the-rails exit no longer describes it.
+            self._exited = False
+            self._last_run = _RunResult(
+                pc=self.backend.read_register("pc"), state="restored")
+        return {"ok": result.ok, "layer": result.layer,
+                "message": result.message,
+                "pc": self.backend.read_register("pc")}
+
+    def list_snapshots(self) -> List[Dict[str, Any]]:
+        """In-memory snapshot ids held by this session (files are yours to
+        track)."""
+        self.assert_active()
+        return [{"snapshot_id": sid, "devices": len(s.devices)}
+                for sid, s in sorted(self._snapshots.items())]
+
+    def delete_snapshot(self, snapshot_id: str) -> bool:
+        """Free an in-memory snapshot."""
+        self.assert_active()
+        snap = self._snapshots.pop(snapshot_id, None)
+        if snap is None:
+            raise SessionError(f"no such snapshot: {snapshot_id!r}")
+        snap.release()
         return True
 
     # ------------------------------------------------------------------

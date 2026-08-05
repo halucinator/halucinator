@@ -104,6 +104,19 @@ class TestRenodeBackendLive:
         v = backend.read_register("r5")
         assert isinstance(v, int)
 
+    def test_snapshot_restore_round_trip(self, backend):
+        # Renode drops register writes while paused at reset (see
+        # test_register_rw), so assert the RAM round-trip only. The register
+        # capture path is still exercised (save reads them) — restore's
+        # dropped writes are tolerated by the generic path.
+        from backend_snapshot_helpers import (
+            assert_backend_snapshot_round_trip,
+            assert_restore_rejects_wrong_backend_type,
+        )
+        assert_backend_snapshot_round_trip(backend, _RAM_BASE,
+                                           check_registers=False)
+        assert_restore_rejects_wrong_backend_type(backend)
+
     def test_set_remove_breakpoint_does_not_crash(self, backend):
         # Renode boots a real Cortex-M3 model; without a proper
         # vector table at flash[0..7] the CPU faults on first

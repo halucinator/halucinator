@@ -252,6 +252,48 @@ def build_server(name: str = "halucinator", max_sessions: int = 4,
         return manager.call(session_id, "inject_irq", irq_num=irq_num)
 
     # ------------------------------------------------------------------
+    # Snapshot / restore (whole-machine checkpoints)
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    def save_snapshot(path: Optional[str] = None,
+                      include_devices: bool = False,
+                      session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Checkpoint the whole machine (guest CPU+RAM + python peripheral
+        state). Take it while stopped.
+
+        Without *path*: fast in-memory checkpoint — returns a snapshot_id
+        valid for this session only. With *path*: writes a portable .halsnap
+        file that survives the session (restore it here or in a future
+        session started from the same configs). include_devices=True also
+        polls external zmq device processes for their state (costs ~1s)."""
+        return manager.call(session_id, "save_snapshot", path=path,
+                            include_devices=include_devices)
+
+    @mcp.tool()
+    def restore_snapshot(snapshot_id: Optional[str] = None,
+                         path: Optional[str] = None,
+                         session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Rewind the machine to a checkpoint: *snapshot_id* from an
+        in-memory save_snapshot, or *path* to a .halsnap file (exactly one).
+        Returns {ok, layer, message, pc}; on ok the machine resumes from the
+        snapshot's PC with cont()/step()."""
+        return manager.call(session_id, "restore_snapshot",
+                            snapshot_id=snapshot_id, path=path)
+
+    @mcp.tool()
+    def list_snapshots(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """In-memory snapshot ids held by this session."""
+        return manager.call(session_id, "list_snapshots")
+
+    @mcp.tool()
+    def delete_snapshot(snapshot_id: str,
+                        session_id: Optional[str] = None) -> bool:
+        """Free an in-memory snapshot."""
+        return manager.call(session_id, "delete_snapshot",
+                            snapshot_id=snapshot_id)
+
+    # ------------------------------------------------------------------
     # Symbol + memory layout introspection
     # ------------------------------------------------------------------
 

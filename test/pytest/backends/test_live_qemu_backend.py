@@ -162,6 +162,14 @@ class TestQEMUBackendLive:
         backend.write_register("r5", 0xDEADBEEF)
         assert backend.read_register("r5") == 0xDEADBEEF
 
+    def test_snapshot_restore_round_trip(self, backend):
+        from backend_snapshot_helpers import (
+            assert_backend_snapshot_round_trip,
+            assert_restore_rejects_wrong_backend_type,
+        )
+        assert_backend_snapshot_round_trip(backend, _RAM_BASE)
+        assert_restore_rejects_wrong_backend_type(backend)
+
     def test_set_remove_breakpoint_does_not_crash(self, backend):
         # cont/step on a vectorless raw-bin Cortex-M3 is unreliable
         # under avatar-qemu's `configurable` machine. Limit the live

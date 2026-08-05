@@ -36,6 +36,10 @@ class Avatar2Backend(HalBackend):
         """
         self.target = target
         self.config = config
+        # Mirror every added region here too, so the generic snapshot path
+        # (HalBackend.save_state) has the writable-region list it needs.
+        # Without this, save_state raised "no writable regions" on avatar2.
+        self._regions: List[MemoryRegion] = []
 
     def attach(self, target: Any) -> None:
         """Attach this backend to an existing avatar2 QemuTarget."""
@@ -113,6 +117,7 @@ class Avatar2Backend(HalBackend):
             qemu_name=region.qemu_name,
             qemu_properties=region.qemu_properties,
         )
+        self._regions.append(region)
 
     # ------------------------------------------------------------------
     # Optional: inject IRQ via avatar2 QMP monitor

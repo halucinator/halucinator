@@ -82,18 +82,28 @@ class IOServer(Thread):
             if self.rx_socket in socks and socks[self.rx_socket] == zmq.POLLIN:
                 msg = self.rx_socket.recv_string()
                 log.debug("Received: %s", str(msg))
-                topic, data = decode_zmq_msg(msg)
-                if self.packet_log:
-                    self.packet_log.write(
-                        "Sent, %i, %s, %s\n" % (
-                            time.time(),
-                            topic,
-                            binascii.hexlify(data["frame"]),
+                # One malformed message or a raising handler must NOT kill the
+                # rx thread — that would silently take the whole device
+                # offline for every topic. Log and keep serving.
+                try:
+                    topic, data = decode_zmq_msg(msg)
+                    if self.packet_log:
+                        self.packet_log.write(
+                            "Sent, %i, %s, %s\n" % (
+                                time.time(),
+                                topic,
+                                binascii.hexlify(data["frame"]),
+                            )
                         )
-                    )
-                    self.packet_log.flush()
-                method = self.handlers[topic]
-                method(self, data)
+                        self.packet_log.flush()
+                    method = self.handlers.get(topic)
+                    if method is None:
+                        log.warning("IOServer: no handler for topic %s", topic)
+                        continue
+                    method(self, data)
+                except Exception:  # noqa: BLE001
+                    log.exception("IOServer: handler for a message raised; "
+                                  "dropping it and continuing")
         log.debug("IO Server Stopped")
 
     def shutdown(self) -> None:
