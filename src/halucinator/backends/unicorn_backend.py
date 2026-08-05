@@ -712,12 +712,21 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._pc_hist = _c.Counter()
             self._pc_n = 0
             _every = int(_os.environ.get("HAL_PC_SAMPLE_EVERY", "3000000"))
+            _reset = _os.environ.get("HAL_PC_SAMPLE_RESET") == "1"
 
             def _pc_sample(uc, addr, size, ud):
                 self._pc_hist[addr & ~1] += 1
                 self._pc_n += 1
                 if _every and self._pc_n % _every == 0:
                     self.dump_pc_sample()
+                    # HAL_PC_SAMPLE_RESET=1 makes each dump a WINDOW rather
+                    # than a running total. A cumulative histogram cannot show
+                    # where the firmware is *now*: an early hot loop keeps the
+                    # top-10 forever, so a later hang is invisible until it
+                    # out-counts it. Off by default -- the running total is
+                    # what you want for "what dominates the whole run".
+                    if _reset:
+                        self._pc_hist.clear()
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _pc_sample)
 
         # HAL_DET_TICK deterministic system-clock tick is parsed in
@@ -2610,7 +2619,6 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
         in_thread = ipsr == 0
         use_psp = in_thread and bool(control & 2)          # SPSEL
-        active = _A.UC_ARM_REG_PSP if use_psp else _A.UC_ARM_REG_MSP
         xpsr = self._uc.reg_read(_A.UC_ARM_REG_XPSR)
         frame = struct.pack("<8I",
                             self.read_register("r0"), self.read_register("r1"),
@@ -2634,14 +2642,33 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         for i in range(16)]
             fpscr = self._uc.reg_read(_A.UC_ARM_REG_FPSCR)
             frame = frame + struct.pack("<18I", *fp_words, fpscr, 0)
-        sp = self._uc.reg_read(active) - len(frame)   # stacks are 8-aligned
+        # Stack the frame on r13, NOT on the MSP/PSP alias `use_psp` selects.
+        # Exception entry always pushes to whichever stack is currently
+        # active, and that is r13 by definition — so this is exact, not an
+        # approximation.
+        #
+        # It is also the only read that WORKS. MSP and PSP are reached through
+        # QEMU's MRS/MSR special-register helpers, which return 0 (and discard
+        # writes) when the core is UNPRIVILEGED — the architectural behaviour
+        # of `MRS Rn, MSP` from an unprivileged thread. Firmware that drops
+        # privilege (`msr control, #3`, as every MPU-hardened image does) made
+        # every delivery read the active stack as 0, compute sp = -32, fail
+        # the mem_write and silently drop the exception. Nothing faults: the
+        # firmware simply never takes an interrupt again. KeepKey routes all
+        # flash writes through `svc`, so the visible symptom was a wallet that
+        # ran perfectly and could not persist a single byte.
+        #
+        # `use_psp` still selects the EXC_RETURN value below, which is what
+        # tells the firmware's handler (and _maybe_handle_exc_return) which
+        # bank the frame is on.
+        sp = self._uc.reg_read(_A.UC_ARM_REG_SP) - len(frame)  # 8-aligned
         try:
             self._uc.mem_write(sp, frame)
         except Exception:  # noqa: BLE001 — unmapped/invalid SP: skip this tick
             log.debug("inject_irq(%d): SP 0x%x not writable, dropping delivery",
                       irq_num, sp)
             return
-        self._uc.reg_write(active, sp)
+        self._uc.reg_write(_A.UC_ARM_REG_SP, sp)
         exc_ret = (0xFFFFFFF1 if not in_thread
                    else 0xFFFFFFFD if use_psp else 0xFFFFFFF9)
         if len(frame) > 32:
