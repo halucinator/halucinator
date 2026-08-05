@@ -353,6 +353,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # tolerate fuzz-harness hypercalls baked into instrumented binaries
         # (e.g. P2IM's aflCall `svc #0x3f`).
         self.skip_svc: bool = False
+        # M-profile SP banking done by hand, for firmware that has dropped
+        # privilege. See _apply_cortex_m_fallback / _maybe_handle_exc_return.
+        self._m_manual_bank: bool = False
+        self._m_spsel: bool = False
+        self._m_saved_msp = None
 
         # Generic non-MMIO loop breaker (see _code_hook). Opt-in.
         self.auto_recover_loops: bool = False
@@ -2618,7 +2623,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         ipsr = self._uc.reg_read(_A.UC_ARM_REG_IPSR) & 0x1FF
         control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
         in_thread = ipsr == 0
-        use_psp = in_thread and bool(control & 2)          # SPSEL
+        # Which stack is the interrupted thread on? Normally CONTROL.SPSEL
+        # says. Once we are banking by hand (below) CONTROL is frozen and
+        # lying, so the shadow is the only truthful answer.
+        if self._m_manual_bank:
+            use_psp = in_thread and self._m_spsel
+        else:
+            use_psp = in_thread and bool(control & 2)      # SPSEL
         xpsr = self._uc.reg_read(_A.UC_ARM_REG_XPSR)
         frame = struct.pack("<8I",
                             self.read_register("r0"), self.read_register("r1"),
@@ -2680,6 +2691,21 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 pass
         self.write_register("lr", exc_ret)
         self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
+        if self._m_manual_bank and in_thread:
+            # SPSEL is frozen, so the IPSR write above did not necessarily move
+            # the banks the way hardware would. We are in handler mode now,
+            # which is the ONLY state where MSP/PSP are writable, so put them
+            # where the firmware's own handler will look:
+            #   - the frame on the stack EXC_RETURN advertises, because
+            #     handlers read it back with `MRS Rn, PSP` / `MRS Rn, MSP`;
+            #   - the handler itself on the main stack.
+            if use_psp:
+                self._uc.reg_write(_A.UC_ARM_REG_PSP, sp)
+                if self._m_saved_msp is not None:
+                    self._uc.reg_write(_A.UC_ARM_REG_MSP, self._m_saved_msp)
+            else:
+                self._uc.reg_write(_A.UC_ARM_REG_MSP, sp)
+                self._m_saved_msp = sp
         self._icsr_enter(exc_num, nested=not in_thread)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
         log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
@@ -2975,13 +3001,59 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control | 4)  # FPCA
             except Exception:  # noqa: BLE001
                 pass
-        self._uc.reg_write(active, sp + (104 if extended else 32))
+        thread_sp = sp + (104 if extended else 32)
+        # WHY THIS IS NOT JUST `reg_write(active, thread_sp)`.
+        #
+        # An exception return has to put CONTROL.SPSEL back to the stack the
+        # EXC_RETURN selects. But QEMU implements the architectural rule that
+        # `MSR CONTROL` is IGNORED while CONTROL.nPRIV is set -- and unicorn's
+        # register API goes through the same helper. So the moment firmware
+        # drops privilege, the backend can NEVER correct SPSEL again: the write
+        # below succeeds silently and changes nothing, and every later exception
+        # entry then reads SPSEL=0, advertises EXC_RETURN as "main stack", and
+        # hands the firmware's handler a frame pointer into the wrong stack.
+        #
+        # That is not a hypothetical. On device-trezor-modelt (a privileged
+        # kernel plus an unprivileged applet, switched by PendSV) the applet
+        # returned via EXC_RETURN 0xFFFFFFED (thread, PSP) and CONTROL stayed
+        # 0x5 -- SPSEL clear. The next `svc` was advertised as 0xFFFFFFE9, so
+        # SVC_Handler's `TST LR,#4 / MRSEQ R0,MSP` read the frame off the
+        # KERNEL stack, decoded a garbage syscall number, and wrote its result
+        # back over the kernel's frames. Nothing faulted for another two
+        # exceptions.
+        #
+        # MSP and PSP are writable only in HANDLER mode (thread+unprivileged
+        # reads them as 0 and drops writes), so all of this has to happen here,
+        # before the IPSR write below returns us to thread mode.
+        control_now = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        if (return_thread and (control_now & 1)
+                and bool(control_now & 2) != return_psp):
+            self._m_manual_bank = True
+        if self._m_manual_bank and return_thread:
+            self._m_spsel = return_psp
+            # The handler's own stack, saved before we overwrite it, so the
+            # next entry from a PSP thread can hand it back.
+            self._m_saved_msp = self._uc.reg_read(_A.UC_ARM_REG_MSP)
+            # SPSEL is frozen, so we cannot predict which bank the IPSR write
+            # leaves active -- write the thread's stack into both.
+            self._uc.reg_write(_A.UC_ARM_REG_MSP, thread_sp)
+            self._uc.reg_write(_A.UC_ARM_REG_PSP, thread_sp)
+        else:
+            # Returning to HANDLER mode (a nested exception unwinding to the
+            # handler it pre-empted) must NOT touch the banks: the outer
+            # handler keeps its own MSP, and the PSP still belongs to the
+            # interrupted thread. Writing both here destroys the thread's
+            # stack pointer, and the damage only surfaces at the NEXT return
+            # to thread mode -- as a garbage EXC_RETURN out of the firmware's
+            # own SVC handler.
+            self._uc.reg_write(active, thread_sp)
         self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
         if return_thread:
             self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
-            control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
-            control = (control | 2) if return_psp else (control & ~2)
-            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+            if not self._m_manual_bank:
+                control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+                control = (control | 2) if return_psp else (control & ~2)
+                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
         # ICSR follows the mode change: VECTACTIVE is the exception we are
         # returning TO (0 in thread mode).
         self._icsr_exit(0 if return_thread else (frame[7] & 0x1FF))
