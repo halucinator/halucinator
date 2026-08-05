@@ -16,9 +16,15 @@ import logging
 import struct
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from halucinator import hal_log
 from .hal_backend import ABI_MIXINS, ARM32HalMixin, ARMHalMixin, HalBackend, MemoryRegion
 
 log = logging.getLogger(__name__)
+# Operator-facing messages (knob accepted / ignored) go here: the shipped
+# logging.cfg leaves this module's logger inheriting root=ERROR, so log.info /
+# log.warning are discarded by default -- a knob silently doing nothing is
+# exactly what the user needs told. Same split the irq/ modules use.
+hlog = hal_log.getHalLogger()
 
 try:
     import unicorn
@@ -270,12 +276,29 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         # an observe-only (non-intercept) bp_handler so the real function runs.
         self._skip_bp_once: Optional[int] = None
         self._breakpoints: Dict[int, int] = {}   # addr → bp_id
+        # Fast-breakpoint mode (opt-in HAL_FAST_BP=1): instead of ONE global
+        # per-instruction UC_HOOK_CODE that checks every PC against the
+        # breakpoint set (a Python callback on every instruction, which
+        # dominates runtime for compute-heavy firmware), install one
+        # RANGE-BOUNDED UC_HOOK_CODE per breakpoint address. Unicorn filters the
+        # hook range in C at translate time, so basic blocks containing no
+        # breakpoint run at full JIT speed and never enter Python. Arch-agnostic
+        # and off by default -- eligibility is finalised in init() (it is only
+        # safe when no per-instruction feature LIVES INSIDE _code_hook, i.e. the
+        # RAM-spin breaker and the non-MMIO loop-recover are both off).
+        # Single `import os as _os` for the whole __init__ env-knob block: the
+        # later re-imports in this method are harmless, but Python's local-
+        # binding rule needs `_os` bound before its first use here.
+        import os as _os
+        self._fast_bp: bool = _os.environ.get("HAL_FAST_BP") == "1"
+        self._fast_bp_active: bool = False
+        self._fast_bp_warned: bool = False
+        self._per_bp_hooks: Dict[int, Any] = {}   # addr → unicorn hook handle
         # RAM-flag spin breaker (opt-in, see _code_hook / _break_ram_spin).
         # Detect a spin by DISTINCT-PC count over a window: a tight loop (even
         # one spanning a function call) touches few distinct PCs, while real
         # progress touches many. Catches call-based `while(check())` spins the
         # old contiguous-window detector missed.
-        import os as _os
         self._break_ram_spins = _os.environ.get("HAL_BREAK_RAM_SPINS") == "1"
         self._spin_limit = int(_os.environ.get("HAL_RAM_SPIN_LIMIT", "200000"))
         self._spin_distinct_max = int(
@@ -408,12 +431,32 @@ class UnicornBackend(ARMHalMixin, HalBackend):
         # initialisation. Pin the CPU model to Cortex-M3 so unicorn uses
         # the M-profile decoder.
         if self.arch_name == "cortex-m3":
+            # Default Cortex-M3, but allow pinning a richer M-profile core via
+            # HAL_CORTEXM_CPU_MODEL=UC_CPU_ARM_CORTEX_M4 (adds the DSP extension
+            # — e.g. smulbb — that M4 firmware like the STM32WB uses) or _M7/_M33.
+            import os as _os
+            _m_name = _os.environ.get("HAL_CORTEXM_CPU_MODEL",
+                                      "UC_CPU_ARM_CORTEX_M3")
+            # Resolve by name like the A-profile HAL_ARM_CPU_MODEL lever, and
+            # warn instead of silently falling back: a typo'd or non-CPU-model
+            # constant would otherwise leave the user wondering why their M4
+            # DSP instruction is still undefined. Only UC_CPU_ARM_* names are
+            # accepted so an unrelated constant can't reach ctl_set_cpu_model.
+            _m_model = (getattr(arm_const, _m_name, None)
+                        if _m_name.startswith("UC_CPU_ARM_") else None)
+            if _m_model is None:
+                hlog.warning("UnicornBackend: unknown HAL_CORTEXM_CPU_MODEL=%r;"
+                             " using UC_CPU_ARM_CORTEX_M3", _m_name)
+                _m_model = arm_const.UC_CPU_ARM_CORTEX_M3
             try:
-                self._uc.ctl_set_cpu_model(arm_const.UC_CPU_ARM_CORTEX_M3)
+                self._uc.ctl_set_cpu_model(_m_model)
+                if _m_name != "UC_CPU_ARM_CORTEX_M3":
+                    hlog.info("UnicornBackend: Cortex-M CPU model = %s",
+                              _m_name)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
-                    "UnicornBackend: ctl_set_cpu_model(CORTEX_M3) failed (%s)"
-                    " — kernel boot may UC_ERR_INSN_INVALID", exc,
+                    "UnicornBackend: ctl_set_cpu_model(%s) failed (%s)"
+                    " — kernel boot may UC_ERR_INSN_INVALID", _m_name, exc,
                 )
 
         # Plain 32-bit A-profile ARM ("arm"): the generic default core does
@@ -466,11 +509,30 @@ class UnicornBackend(ARMHalMixin, HalBackend):
                     "UnicornBackend: PPB auto-map skipped (%s)", exc,
                 )
 
-        # Global hook to detect breakpoint hits and stop execution
-        self._uc.hook_add(
-            unicorn.UC_HOOK_CODE,
-            self._code_hook,
-        )
+        # Breakpoint detection. Default: ONE global per-instruction UC_HOOK_CODE
+        # checks every PC against the breakpoint set. With HAL_FAST_BP=1 and no
+        # per-instruction feature living inside _code_hook (the RAM-spin breaker
+        # and the non-MMIO loop-recover, both opt-in and off by default), install
+        # one range-bounded hook per breakpoint instead -- blocks with no
+        # breakpoint then run at full JIT speed (see set_breakpoint / __init__).
+        self._fast_bp_active = (
+            self._fast_bp
+            and not self._break_ram_spins
+            and not getattr(self, "auto_recover_loops", False))
+        if self._fast_bp_active:
+            for _bp_addr in list(self._breakpoints):
+                self._install_bp_hook(_bp_addr)
+            hlog.info("UnicornBackend: HAL_FAST_BP -- per-address breakpoint "
+                      "hooks (no global per-instruction code hook)")
+        else:
+            if self._fast_bp:
+                hlog.warning("UnicornBackend: HAL_FAST_BP ignored -- a per-"
+                             "instruction _code_hook feature is active "
+                             "(HAL_BREAK_RAM_SPINS/auto_recover_loops)")
+            self._uc.hook_add(
+                unicorn.UC_HOOK_CODE,
+                self._code_hook,
+            )
         # Log unmapped / invalid memory accesses so test firmware crashes
         # produce useful diagnostics instead of opaque UC_ERR_* strings.
         self._uc.hook_add(
@@ -1493,18 +1555,36 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     # Execution control
     # ------------------------------------------------------------------
 
+    def _install_bp_hook(self, addr: int) -> None:
+        """Fast-bp mode: install a range-bounded UC_HOOK_CODE for one breakpoint
+        address so Unicorn only enters _code_hook at that PC (blocks elsewhere
+        run at full JIT speed). No-op unless the engine is up."""
+        a = addr & 0xFFFFFFFE
+        if self._uc is None or a in self._per_bp_hooks:
+            return
+        self._per_bp_hooks[a] = self._uc.hook_add(
+            unicorn.UC_HOOK_CODE, self._code_hook, begin=a, end=a)
+
     def set_breakpoint(self, addr: int, hardware: bool = False,
                        temporary: bool = False) -> int:
         bp_id = self._next_bp_id
         self._next_bp_id += 1
         # Store with Thumb bit cleared for comparison in _code_hook
         self._breakpoints[addr & 0xFFFFFFFE] = bp_id
+        if self._fast_bp_active:
+            self._install_bp_hook(addr)
         return bp_id
 
     def remove_breakpoint(self, bp_id: int) -> None:
         to_remove = [a for a, bid in self._breakpoints.items() if bid == bp_id]
         for addr in to_remove:
             del self._breakpoints[addr]
+            h = self._per_bp_hooks.pop(addr, None)
+            if h is not None:
+                try:
+                    self._uc.hook_del(h)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def set_watchpoint(self, addr: int, write: bool = True,
                        read: bool = False, size: int = 4) -> int:
@@ -1553,6 +1633,16 @@ class UnicornBackend(ARMHalMixin, HalBackend):
     def cont(self, blocking: bool = True) -> None:
         if self._uc is None:
             raise RuntimeError("Call UnicornBackend.init() first")
+        # Fast-BP eligibility is decided in init(); auto_recover_loops is a
+        # public attribute a caller could flip afterwards, which would leave
+        # the loop breaker silently dead (there is no global code hook to run
+        # it in). Say so once rather than fail quietly.
+        if (self._fast_bp_active and getattr(self, "auto_recover_loops", False)
+                and not self._fast_bp_warned):
+            self._fast_bp_warned = True
+            hlog.warning("UnicornBackend: auto_recover_loops was enabled after "
+                         "init() while HAL_FAST_BP is active -- the loop "
+                         "breaker will NOT run. Unset HAL_FAST_BP to use it.")
         self._stopped = False
         self._bp_hit_addr = None
         until = (1 << (self._word_size * 8)) - 1

@@ -31,6 +31,8 @@ a lot via env-vars — prefer these when they fit:
 | `HAL_MAP_UNMAPPED=1` | lazily zero-map stray ld/st gaps |
 | `HAL_AUTO_COUNTER_ADDRS='0xA,..'` (+`_STEP`) | make a free-running-counter MMIO reg monotonic |
 | `HAL_MMU_FLAT_FALLBACK=1`, `HAL_IRQ_CHUNK=N`, `HAL_BREAK_RAM_SPINS=1`, `HAL_RECOVER_BAD_CALLS=1`, `HAL_ARM_CPU_MODEL=` | operational knobs |
+| `HAL_CORTEXM_CPU_MODEL=UC_CPU_ARM_CORTEX_M4` | pin a richer M-profile core than the Cortex-M3 default (M4/M7/M33 add the DSP extension, e.g. `smulbb`). Unknown or non-`UC_CPU_ARM_*` values warn and fall back to M3 |
+| `HAL_FAST_BP=1` | install one range-bounded hook per breakpoint instead of the global per-instruction code hook, so blocks without a breakpoint run at full JIT speed. Declined (with a warning) when a per-instruction feature that lives inside that hook is active — `HAL_BREAK_RAM_SPINS` or `auto_recover_loops` |
 
 These harnesses cover what those env-vars **don't**.
 
