@@ -1092,10 +1092,10 @@ def _in_process_dispatch_loop(backend: "HalBackend") -> None:
             # NOT "ran off the rails", it is normal interrupt-driven
             # execution. Re-enter cont() so the ISR (and the periodic
             # control loop it drives) keeps running, instead of exiting.
-            # We only do this when an IRQ controller is configured and the
-            # PC lands in mapped code; a genuine runaway (unmapped fetch)
-            # still surfaces as a UcError from cont().
-            if getattr(backend, "_irq_controller", None) is not None:
+            # We only do this when the backend reports an in-process IRQ is
+            # active (an IRQ controller is configured); a genuine runaway
+            # (unmapped fetch) still surfaces as a UcError from cont().
+            if getattr(backend, "in_process_irq_active", lambda: False)():
                 try:
                     backend.cont()
                     continue

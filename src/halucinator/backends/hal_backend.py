@@ -53,6 +53,26 @@ class HalBackend(ABC):
     Concrete implementations: Avatar2Backend, QEMUBackend, UnicornBackend.
     """
 
+    def _bind_abi(self, arch: str) -> None:
+        """Bind the arch-specific ABI mixin's helpers onto this instance.
+
+        ARM32 stays the default via class inheritance, so the backend is
+        usable without __init__ (e.g. in unit tests); any other arch has its
+        ``get_arg``/``set_args``/``get_ret_addr``/``set_ret_addr``/
+        ``execute_return``/``read_string`` overridden by the mixin's bound
+        methods. Shared by every backend that selects an ABI at init time.
+        """
+        abi_cls = ABI_MIXINS.get(arch, ARM32HalMixin)
+        self._abi = abi_cls
+        if abi_cls is not ARM32HalMixin:
+            for method_name in ("get_arg", "set_args", "get_ret_addr",
+                                "set_ret_addr", "execute_return",
+                                "read_string"):
+                method = getattr(abi_cls, method_name, None)
+                if method is not None:
+                    setattr(self, method_name,
+                            method.__get__(self, type(self)))
+
     # ------------------------------------------------------------------
     # Memory operations  (must implement)
     # ------------------------------------------------------------------
