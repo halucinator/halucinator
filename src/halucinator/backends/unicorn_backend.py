@@ -331,6 +331,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._pc_write_emulated = 0
         # Cortex-M `wfe` executed as a no-op (see _insn_invalid_hook).
         self._wfe_skipped = 0
+        # Supervisor-call diagnostics (see _maybe_handle_cortexm_svc).
+        self._svc_count = 0
+        self._svc_trace_n = int(_os.environ.get("HAL_SVC_TRACE", "0"), 0)
+        _probe = _os.environ.get("HAL_SVC_TRACE_PROBE")
+        self._svc_trace_probe = int(_probe, 0) if _probe else None
         # MMU flat-fallback (opt-in HAL_MMU_FLAT_FALLBACK=1): on an ARM data/
         # prefetch abort whose faulting address IS backed in physical memory
         # (uc.mem_read succeeds — i.e. the MMU translation failed but the page
@@ -2602,9 +2607,25 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if self._uc is None:
             return
 
-        # Vector table offset: caller plumbs it in via set_vtor(); fall
-        # back to 0 for backward compatibility.
-        vtor = getattr(self, "_vtor", 0)
+        # Vector table offset. `set_vtor()` plumbs in the *configured* base,
+        # which is where the table is at reset -- but firmware relocates it.
+        # A bootloader hands off to an application with its own table, an RTOS
+        # copies the table to RAM to patch it, and a Nordic SoftDevice inserts
+        # itself between the two: MBR at 0x0, SoftDevice at 0x1000,
+        # application at 0x1c000, with SCB->VTOR moved at each handoff.
+        #
+        # Delivering to the reset-time table in that situation is not a
+        # near-miss, it is a jump into an unrelated binary's handler. On the
+        # nRF52832 BLE device it sent the application's SWI0 (app_timer) into
+        # the MBR's slot 20 -- 0x00000687 instead of 0x0001c819 -- and the
+        # machine wedged with no fault, no console output, and almost no
+        # instructions retired.
+        #
+        # So prefer what the firmware has actually programmed, when it can be
+        # read back. A *modelled* PPB intercepts the write and never puts it in
+        # memory, which is why models are expected to call set_vtor() (see
+        # _vtor_from_guest for the ordering between the two).
+        vtor = self._effective_vtor()
         isr_slot = vtor + (16 + irq_num) * 4
         isr_addr = 0
         try:
@@ -2792,9 +2813,51 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._fp_regs_ok = ok
         return ok
 
+    # SCB->VTOR on ARMv7-M. The table must be aligned to at least 128 bytes
+    # (and to a power of two >= 4 * the number of exceptions), so a value that
+    # is not is not a vector table and must not be believed.
+    _VTOR_ADDR = 0xE000ED08
+    _VTOR_ALIGN = 0x80
+
     def set_vtor(self, vtor: int) -> None:
-        """Remember the vector-table base so inject_irq can find ISRs."""
+        """Set the vector-table base so inject_irq can find ISRs.
+
+        Called by main.py with the configured reset-time base, and *also*
+        intended to be called by a peripheral model that owns the PPB when it
+        sees the firmware write SCB->VTOR: a modelled region intercepts the
+        write, so the value never reaches guest memory for
+        :meth:`_effective_vtor` to find.
+        """
+        if vtor != getattr(self, "_vtor", None):
+            log.info("cortex-m: vector table base -> 0x%08x", vtor)
         self._vtor = vtor
+
+    def _effective_vtor(self) -> int:
+        """The vector base the firmware is actually using, if discoverable.
+
+        Reads SCB->VTOR out of guest memory, which works whenever the PPB is
+        plain backend-mapped memory (the default when no model claims it). If
+        the read fails, returns zero, or is not a legally aligned table base,
+        fall back to whatever ``set_vtor`` was last given -- which is the
+        configured base, or the value a PPB model plumbed in.
+        """
+        configured = getattr(self, "_vtor", 0)
+        if self._uc is None:
+            return configured
+        try:
+            live = int.from_bytes(
+                self._uc.mem_read(self._VTOR_ADDR, 4), "little")
+        except Exception:  # noqa: BLE001 — unicorn raises if unmapped
+            return configured
+        if not live or live % self._VTOR_ALIGN:
+            return configured
+        if live != getattr(self, "_vtor_seen", None):
+            self._vtor_seen = live
+            if live != configured:
+                log.info("cortex-m: firmware relocated the vector table to "
+                         "0x%08x (configured base was 0x%08x); interrupts will "
+                         "be delivered through the new table", live, configured)
+        return live
 
     # ARMv7-A CPSR mode bits.
     _ARM_MODE_USER = 0x10
@@ -2962,6 +3025,29 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             return False
         if len(op) != 2 or op[1] != 0xDF:
             return False
+        # Diagnostic: which supervisor call, and how often. An RTOS or a vendor
+        # stack issues a handful of distinct SVC numbers; a firmware stuck in a
+        # supervisor-call storm issues ONE, millions of times, and that number
+        # names the API it is stuck in. HAL_SVC_TRACE=<n> reports the first n
+        # and then every millionth.
+        self._svc_count = getattr(self, "_svc_count", 0) + 1
+        if self._svc_trace_n and (self._svc_count <= self._svc_trace_n
+                                  or self._svc_count % 1000000 == 0):
+            extra = ""
+            if self._svc_trace_probe is not None:
+                # A vendor stack dispatches supervisor calls through pointers it
+                # keeps in RAM (a Nordic SoftDevice uses two: the active vector
+                # table and the application's). When SVC dispatch misbehaves,
+                # the question is always "what did it read", so allow one word
+                # to be dumped alongside each call.
+                try:
+                    word = int.from_bytes(
+                        uc.mem_read(self._svc_trace_probe, 4), "little")
+                    extra = " [0x%08x]=0x%08x" % (self._svc_trace_probe, word)
+                except Exception:  # noqa: BLE001 — unmapped probe address
+                    extra = " [0x%08x]=<unmapped>" % self._svc_trace_probe
+            log.info("cortex-m: svc #0x%02x from 0x%08x (call %d)%s",
+                     op[0], pc - 2, self._svc_count, extra)
         # Queue SVCall (exc 11) via the shared mixin delivery path and break out
         # of emu_start; cont() applies it (pushes the frame, vectors to slot 11)
         # before re-entering at the handler. Same mechanism inject_irq/PendSV use.
@@ -3016,6 +3102,18 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             log.info("cortex-m: `wfe` at 0x%08x executed as a no-op (unicorn's "
                      "M-profile decoder rejects 0xBF20; the architecture "
                      "permits WFE to complete immediately)", pc - 2)
+        # A firmware that idles on WFE reaches this a handful of times per
+        # main-loop pass. One that reaches it MILLIONS of times is not idling,
+        # it is waiting for an event that this rehost is never going to deliver
+        # -- and because skipping WFE is silent and correct, that failure has no
+        # other symptom: no fault, no console output, and a guest that appears
+        # to be running normally while executing almost nothing. Say so.
+        elif self._wfe_skipped % 1000000 == 0:
+            log.warning("cortex-m: `wfe` skipped %d times (currently at "
+                        "0x%08x). This firmware is spinning on an event that "
+                        "is not arriving -- check that the interrupt it is "
+                        "waiting for is actually being delivered.",
+                        self._wfe_skipped, pc - 2)
         # PC has already advanced past the wfe; keep the Thumb bit.
         uc.reg_write(_A.UC_ARM_REG_PC, pc | 1)
         return True

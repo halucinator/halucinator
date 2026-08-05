@@ -1132,6 +1132,27 @@ def _emulate_with_unicorn_backend(
                 region.write_hook = (
                     lambda off, sz, val, _p=periph, _b=backend: _p.hw_write(
                         off, sz, val, pc=_b.regs.pc))
+                # Hand the peripheral the backend, if it wants one. A model
+                # that has to reach guest memory (EasyDMA, a DMA descriptor, a
+                # ring buffer) or ask the emulator to take an interrupt needs a
+                # backend handle, and until now the only way to get one was to
+                # register a breakpoint whose handler passed it along. That is a
+                # breakpoint existing purely to smuggle a reference, and it is
+                # impossible on a stripped image with no symbols to hang one
+                # off -- which is exactly when register-level modelling (the
+                # seam the playbook prefers) is the only option available.
+                #
+                # Optional and duck-typed: a model that does not define
+                # set_backend is unaffected, and one that already gets the
+                # handle from a breakpoint just receives it earlier.
+                setter = getattr(periph, "set_backend", None)
+                if callable(setter):
+                    try:
+                        setter(backend)
+                    except Exception:  # noqa: BLE001 - a model must not
+                        # be able to abort the run from its own wiring.
+                        log.exception("peripheral %s: set_backend failed",
+                                      emulate_name)
                 auto_peripherals.append(periph)
                 if periph.__class__.__name__ == "AutoPeripheral":
                     backend.skip_svc = True
