@@ -73,7 +73,7 @@ checkpoints, wrong for per-input restores.
 | Unicorn | native + portable | full (CPU incl. banked/CP15/VFP + RAM) | ✅ | unit + e2e (local) |
 | Ghidra | generic reg+RAM | CPU regs + RAM | — | live round-trip (Docker) |
 | QEMU | generic reg+RAM | CPU regs + RAM (guest); QEMU-internal core devices not captured | — | live round-trip (Docker) |
-| LibAFL-QEMU | generic reg+RAM (via QEMUBackend) | same as QEMU | — | live round-trip (Docker) |
+| LibAFL-QEMU | **native syx-snapshot** (in-QEMU RAM+device); generic reg+RAM for `portable=True` | full machine, in-process | ✅ | live round-trip (Docker) |
 | Renode | generic reg+RAM | CPU regs + RAM (register writes need `start`) | — | live round-trip, memory (Docker) |
 | Avatar2 | generic reg+RAM | CPU regs + RAM (guest) | — | live round-trip (Docker) |
 
@@ -87,6 +87,21 @@ peripheral state lives in Layer 2 (Python models). Emulator-*internal* core
 devices that aren't forwarded to Python (e.g. an in-QEMU interrupt controller)
 are not captured by the generic path — a native `savevm`/`Save` override is a
 possible future enhancement (see roadmap).
+
+### LibAFL-QEMU: native syx-snapshot (fast in-QEMU checkpoint)
+
+`LibAflQemuBackend` overrides `save_state`/`restore_state` (default,
+non-portable form) to drive libafl-qemu's `syx-snapshot` — a whole-machine
+RAM + device checkpoint kept **inside** QEMU — via two custom QMP commands
+(`libafl-syx-snapshot` / `libafl-syx-restore`, added in the libafl-qemu-bridge
+fork's `hw/avatar/hal_irq.c`). Save/restore happen in-process in QEMU rather
+than reading all of guest RAM back over the GDB stub, which is the fast path
+an iterative loop needs (`snapshot_is_fast() == True`). QEMU keeps exactly one
+syx snapshot, so a `Snapshot` handle carries a generation and restore refuses
+a superseded one. Restore reloads the **full** RAM baseline (not the dirty
+list, which under-approximates outside the LibAFL Rust harness), so it cannot
+under-restore between restores. `save_state(portable=True)` still returns a
+disk-able generic reg+RAM snapshot.
 
 ### Layer 2 — peripheral registry
 

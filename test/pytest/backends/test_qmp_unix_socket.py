@@ -3,6 +3,7 @@ round-trips than loopback TCP) and the buffered line reader.
 """
 from __future__ import annotations
 
+import json
 import socket
 from unittest import mock
 
@@ -42,6 +43,38 @@ class TestQMPClientTransport:
         c._sock.connect.assert_called_once_with(("localhost", 4444))
         c._sock.setsockopt.assert_any_call(
             socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    def test_execute_skips_async_events_and_matches_id(self):
+        """QMP interleaves asynchronous events with command replies. A RESUME
+        event emitted by cont() must not be mistaken for the reply — that made
+        libafl-cov-result look like it returned no edge counts (halucinator#50).
+        """
+        c = _QMPClient(unix_path="/x")
+        c._sock = mock.MagicMock()
+        c._sock.recv.side_effect = [
+            b'{"timestamp":{"seconds":1},"event":"RESUME"}\n',
+            b'{"timestamp":{"seconds":2},"event":"STOP"}\n',
+            b'{"return":{"new-edges":7,"total-edges":9},"id":1}\n',
+        ]
+        resp = c.execute("libafl-cov-result")
+        assert resp["return"] == {"new-edges": 7, "total-edges": 9}
+
+        # The request carried an id so the reply could be matched to it.
+        sent = json.loads(c._sock.sendall.call_args[0][0].decode())
+        assert sent["execute"] == "libafl-cov-result"
+        assert sent["id"] == 1
+
+    def test_execute_skips_a_stale_reply_for_an_earlier_request(self):
+        """A late reply to a previous command must not be returned as this
+        command's answer."""
+        c = _QMPClient(unix_path="/x")
+        c._sock = mock.MagicMock()
+        c._id = 4                      # next request will be id 5
+        c._sock.recv.side_effect = [
+            b'{"return":{"stale":true},"id":4}\n',
+            b'{"return":{"fresh":true},"id":5}\n',
+        ]
+        assert c.execute("query-status")["return"] == {"fresh": True}
 
     def test_recv_line_buffers_chunks_and_splits(self):
         c = _QMPClient(unix_path="/x")

@@ -765,6 +765,8 @@ class _QMPClient:
         self._sock: Optional[socket.socket] = None
         self._buf: bytes = b""
         self._lock = threading.Lock()
+        # Monotonic request id so a reply can be matched to its command.
+        self._id: int = 0
 
     def connect(self) -> None:
         if self.unix_path:
@@ -812,11 +814,30 @@ class _QMPClient:
         return json.loads(line) if line else {}
 
     def execute(self, command: str, arguments: Optional[Dict] = None) -> Dict:
-        msg: Dict = {"execute": command}
+        # QMP interleaves ASYNCHRONOUS EVENTS with command replies on the same
+        # socket, so the next line after a request is not necessarily its
+        # answer: resuming the guest emits RESUME, stopping emits STOP, and so
+        # on. Returning that event as the reply silently yields a response with
+        # no "return" member -- e.g. libafl-cov-result appearing to report no
+        # edge counts when it was never actually read. Tag every request with
+        # an id and read until the reply carrying it arrives, discarding events
+        # (which never carry an id).
+        self._id += 1
+        req_id = self._id
+        msg: Dict = {"execute": command, "id": req_id}
         if arguments:
             msg["arguments"] = arguments
         self._send(msg)
-        return self._recv_line()
+        while True:
+            resp = self._recv_line()
+            if not isinstance(resp, dict) or not resp:
+                return resp
+            if "event" in resp:
+                continue          # asynchronous event, not our reply
+            if resp.get("id") == req_id:
+                return resp
+            # A reply for an earlier request (or an id-less message): skip it
+            # rather than mistake it for this command's answer.
 
 
 # ---------------------------------------------------------------------------
