@@ -568,6 +568,59 @@ class MIPSHalMixin(_ABIBase):
         self.cont()
 
 
+class TriCoreHalMixin(_ABIBase):
+    """
+    Infineon TriCore EABI: data args in d4-d7 (address args in a4-a7), then the
+    stack; return address in a11 (RA); return value in d2.
+
+    TriCore splits its register file in two: 16 *data* registers (d0-d15) and 16
+    *address* registers (a0-a15). The ABI assigns them separately -- an integer
+    argument goes in d4..d7 while a pointer goes in a4..a7 -- so ``get_arg``
+    cannot be a single index into one bank. We return the DATA register, which
+    is what an intercept reading a scalar argument wants; a handler needing the
+    pointer argument reads ``a4``..``a7`` directly via ``read_register``.
+
+    Two more TriCore-specific facts matter to callers:
+      * ``a10`` is the stack pointer (SP) and ``a11`` is the return address
+        (RA), written by ``call``; there is no separate ``lr``.
+      * ``a0``/``a1``/``a8``/``a9`` are *system-global* registers, preserved
+        across calls and normally set up once at boot -- do not clobber them.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (tuple(f"d{i}" for i in range(16))
+                 + tuple(f"a{i}" for i in range(16))
+                 + ("pc", "psw", "pcxi", "fcx", "lcx", "sp", "ra"))
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 4:
+            return self.read_register(f"d{4 + idx}")
+        sp = self.read_register("a10")
+        return self.read_memory(sp + (idx - 4) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:4]):
+            self.write_register(f"d{4 + i}", v)
+        if len(args) > 4:
+            sp = self.read_register("a10")
+            for i, v in enumerate(args[4:]):
+                self.write_memory(sp + (4 + i) * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_register("a11")
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("a11", ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("a11")}
+        if ret_value is not None:
+            regs["d2"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
 class PowerPCHalMixin(_ABIBase):
     """
     PowerPC ABI: args in r3–r10 then stack, return addr in lr,
@@ -681,4 +734,5 @@ ABI_MIXINS: Dict[str, type] = {
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
     "x86":       X86HalMixin,
+    "tricore":   TriCoreHalMixin,
 }

@@ -104,6 +104,17 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
                 _QEMU_DEFAULT_LOC, "i386-softmmu/qemu-system-i386"
             ),
         },
+        # Infineon TriCore (AURIX TC2xx/TC3xx). In-process (unicorn) only:
+        # avatar2 has no TriCore arch, and there is no tricore-softmmu QEMU in
+        # the deps build, so `avatar_arch`/`qemu_target` stay None. The entry
+        # exists so hal_config accepts `arch: tricore` and the unicorn backend
+        # can resolve it.
+        "tricore": {
+            "avatar_arch": None,
+            "qemu_target": None,
+            "qemu_env_var": "HALUCINATOR_QEMU_TRICORE",
+            "qemu_default_path": None,
+        },
     }
 
 
