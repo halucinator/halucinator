@@ -3244,10 +3244,34 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 for i in range(16):
                     self._uc.reg_write(getattr(_A, "UC_ARM_REG_S%d" % i), fp[i])
                 self._uc.reg_write(_A.UC_ARM_REG_FPSCR, fp[16])
-                control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
-                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control | 4)  # FPCA
             except Exception:  # noqa: BLE001
                 pass
+        # ARMv7-M B1.5.8 (ExceptionReturn): the exception return SETS
+        # CONTROL.FPCA from the frame type it just unwound —
+        # `CONTROL.FPCA = NOT EXC_RETURN[4]` — in BOTH directions. Only the
+        # "set on an extended return" half used to be implemented, and the
+        # missing half is a silent, compounding bug on any M4F/M7 RTOS:
+        #
+        #   * FPCA is set by executing ANY FP instruction, including inside a
+        #     handler. FreeRTOS's ARM_CM4F PendSV runs `vstmdb`/`vldmia` on
+        #     s16-s31, so FPCA is set every context switch.
+        #   * With no clear-on-basic-return, FPCA then stays set in a thread
+        #     that owns no FP state at all, and the NEXT exception entry stacks
+        #     the 104-byte EXTENDED frame instead of the 32-byte basic one.
+        #   * A small stack cannot absorb that. Measured on
+        #     device-duet2-wifi-eth (RepRapFirmware 3.6.3, SAM4E8E): FreeRTOS's
+        #     IDLE task has a 200-byte stack; 104 (hardware frame) + 100
+        #     (PendSV's r4-r11/lr + s16-s31) = 204, so the RTOS's own overflow
+        #     check fired and the firmware reset itself —
+        #     "SoftwareReset reason=0x0100 (StackOverflow) task='IDLE'".
+        #     Nothing faults in the emulator; the firmware simply panics, and
+        #     the cause is 100+ exceptions upstream of the symptom.
+        control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        control = (control | 4) if extended else (control & ~4)
+        try:
+            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+        except Exception:  # noqa: BLE001
+            pass
         thread_sp = sp + (104 if extended else 32)
         # WHY THIS IS NOT JUST `reg_write(active, thread_sp)`.
         #
