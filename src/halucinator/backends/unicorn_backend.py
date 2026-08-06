@@ -3318,13 +3318,38 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # to thread mode -- as a garbage EXC_RETURN out of the firmware's
             # own SVC handler.
             self._uc.reg_write(active, thread_sp)
-        self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
+        self.write_register("cpsr", frame[7])  # restores the APSR flags
+        # ...but NOT the exception number. Unicorn's CPSR write does not touch
+        # `env->v7m.exception` on an M-profile core, so IPSR has to be written
+        # explicitly -- for BOTH kinds of return, not just the thread one.
+        #
+        # Getting only the thread case right is a silent, long-lived error. A
+        # nested exception unwinding into the handler it preempted
+        # (EXC_RETURN 0xFFFFFFF1/0xFFFFFFE1) left IPSR reading the INNER
+        # exception for the whole remaining life of the OUTER handler. Firmware
+        # that asks the core "which exception am I in?" -- rusEFI/FOME's
+        # assertInterruptPriority() does exactly this, then indexes
+        # NVIC->IP[n] -- reads a priority byte nobody ever wrote and latches a
+        # firmware error. And any rehost whose pump refuses to inject while
+        # IPSR != 0 (the architecturally correct rule) goes permanently deaf
+        # after the first nested return: the guest really is back in the outer
+        # handler, but the pump can never tell that it left the inner one.
+        #
+        # Hardware restores the whole xPSR from the stacked frame, exception
+        # number included.
         if return_thread:
             self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
             if not self._m_manual_bank:
                 control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
                 control = (control | 2) if return_psp else (control & ~2)
                 self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+        elif frame[7] & 0x1FF:
+            # Returning to handler mode: put the preempted exception number
+            # back. Guarded on the stacked value being non-zero, because RTOS
+            # ports synthesise exception frames (ChibiOS' _port_irq_epilogue
+            # builds one carrying only the T bit) and writing 0 there would
+            # drop a running handler into thread mode -- the opposite mistake.
+            self._uc.reg_write(_A.UC_ARM_REG_IPSR, frame[7] & 0x1FF)
         # ICSR follows the mode change: VECTACTIVE is the exception we are
         # returning TO (0 in thread mode).
         self._icsr_exit(0 if return_thread else (frame[7] & 0x1FF))
