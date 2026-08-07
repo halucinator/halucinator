@@ -427,18 +427,33 @@ class X86ExceptionDeliverer(ExceptionDeliverer):
     kernel stub fields in ``extra`` (``int_ent``/``int_exit``/``stub_addr``/
     ``isr_arg``). The assembled-stub cache lives on the backend
     (``_x86_stub_*``), not the deliverer, so a single deliverer instance is
-    stateless across backends. ``num`` is unused (a single clock tick)."""
+    stateless across backends.
+
+    ``num`` selects the entry point when the plan carries a per-IRQ vector
+    map in ``extra["vectors"]`` (``{irq_num: entry_addr}``) — a PC has 16
+    IRQ lines and an OS that installs one IDT stub per line (NuttX's
+    ``vector_irqN``), so a device that needs both the 8254 tick and, say, a
+    16550 receive interrupt cannot be served by a single ``isr_addr``. An
+    unmapped ``num`` falls back to ``isr_addr``, which is what a
+    single-clock target (the VxWorks RTU) configures."""
 
     arch = "x86"
 
     def deliver(self, backend: "HalBackend", num: int,
                 plan: DeliveryPlan) -> bool:
         setattr(backend, "_last_delivered_irq", int(num))
+        vectors = plan.extra.get("vectors") or {}
         isr_addr = plan.isr_addr
+        if vectors:
+            # YAML mapping keys may arrive as str ("4:") or int (4:).
+            for key, addr in vectors.items():
+                if int(str(key), 0) == int(num):
+                    isr_addr = int(addr)
+                    break
         if isr_addr is None:
-            log.warning("x86_pic: tick fired but no clock ISR known yet "
-                        "(sysClkConnect not seen, no isr_addr configured) "
-                        "— dropping")
+            log.warning("x86_pic: IRQ %s fired but no ISR known yet "
+                        "(sysClkConnect not seen, no isr_addr/vectors "
+                        "configured) — dropping", num)
             return False
         eflags = backend.read_register("eflags")
         if not (eflags & _EFLAGS_IF):
@@ -452,7 +467,12 @@ class X86ExceptionDeliverer(ExceptionDeliverer):
         cs = backend.read_register("cs")
         esp = backend.read_register("esp")
 
-        target = self._ensure_stub(backend, plan)
+        # The int_ent/int_exit stub wraps the plan's single `isr_addr`; a
+        # per-IRQ vector from the map is an IDT stub in its own right and is
+        # entered directly.
+        target = None
+        if isr_addr == plan.isr_addr:
+            target = self._ensure_stub(backend, plan)
         if target is None:
             target = isr_addr
 
