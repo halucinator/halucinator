@@ -71,6 +71,9 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "arm":            ("arm",    "arm",   False, False, 4),
     "arm64":          ("arm64",  "arm",   False, False, 8),
     "mips":           ("mips",   "mips32_be", False, True, 4),
+    # Little-endian MIPS32 ("mipsel"): the endianness used by Microchip PIC32
+    # (M4K / microAptiv) and most embedded MIPS SoCs that are not routers.
+    "mipsel":         ("mips",   "mips32_le", False, False, 4),
     "powerpc":        ("ppc",    "ppc32_be", False, True, 4),
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
@@ -396,8 +399,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             uc_mode = unicorn.UC_MODE_ARM
         elif arch_str == "mips":
             uc_arch = unicorn.UC_ARCH_MIPS
-            # MIPS32 big-endian is the default halucinator test firmware mode.
-            uc_mode = unicorn.UC_MODE_MIPS32 | unicorn.UC_MODE_BIG_ENDIAN
+            # MIPS32 big-endian is the default halucinator test firmware mode;
+            # "mipsel" selects little-endian (PIC32 and similar embedded MIPS).
+            uc_mode = unicorn.UC_MODE_MIPS32
+            if not mode_str.endswith("_le"):
+                uc_mode |= unicorn.UC_MODE_BIG_ENDIAN
         elif arch_str == "ppc":
             uc_arch = unicorn.UC_ARCH_PPC
             if mode_str.startswith("ppc64"):
