@@ -200,6 +200,42 @@ class TestUnicornNative:
         assert after_mem == before_mem, "RAM/flash not byte-identical after restore"
         assert after_regs == before_regs, "registers not identical after restore"
 
+    def test_portable_snapshot_preserves_banked_sp_when_unprivileged(self):
+        """Regression (KNOWN-ISSUE-cortexm-portable-snapshot-msp): an
+        MPU-hardened Cortex-M runs its tasks unprivileged (CONTROL.nPRIV=1),
+        where MRS of the banked MSP/PSP reads back 0. A portable snapshot must
+        capture — and restore — the TRUE stack pointers, or the guest faults at
+        its next exception, pushing a frame at address 0 hundreds of ms from the
+        cause."""
+        from unicorn import arm_const as A
+        b = _make_unicorn()
+        msp, psp = RAM_BASE + 0x3000, RAM_BASE + 0x2000
+        b._uc.reg_write(A.UC_ARM_REG_MSP, msp)
+        b._uc.reg_write(A.UC_ARM_REG_PSP, psp)
+        b._uc.reg_write(A.UC_ARM_REG_CONTROL, 0x3)   # unprivileged, PSP-selected
+
+        # Capture must record the true SPs, not the unprivileged-read zeros.
+        captured = b._capture_portable_regs()["m_sysregs"]
+        assert captured["msp"] == msp, "portable capture zeroed MSP (unprivileged)"
+        assert captured["psp"] == psp, "portable capture zeroed PSP (unprivileged)"
+
+        # A full portable round-trip restores them after they are clobbered.
+        snap = b.save_state(portable=True)
+
+        def _priv(fn):
+            b._uc.reg_write(A.UC_ARM_REG_IPSR, 2)   # handler mode => privileged
+            try:
+                return fn()
+            finally:
+                b._uc.reg_write(A.UC_ARM_REG_IPSR, 0)
+
+        _priv(lambda: (b._uc.reg_write(A.UC_ARM_REG_MSP, 0),
+                       b._uc.reg_write(A.UC_ARM_REG_PSP, 0)))
+        assert b.restore_state(snap) is True
+        got = _priv(lambda: (b._uc.reg_read(A.UC_ARM_REG_MSP),
+                             b._uc.reg_read(A.UC_ARM_REG_PSP)))
+        assert got == (msp, psp), "restore did not rewrite the banked SPs"
+
     def test_deterministic_resume_executes_identically(self):
         """Snapshot at a PC, run a fixed Thumb sequence, capture state; restore
         and run the SAME sequence again — the resulting machine image must be

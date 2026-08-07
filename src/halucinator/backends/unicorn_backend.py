@@ -1698,6 +1698,33 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _with_m_profile_privilege(self, fn):
+        """Run ``fn()`` with the M-profile core temporarily in handler mode.
+
+        unicorn/QEMU return **0** for the banked MSP/PSP (and silently ignore
+        writes to them) whenever the core is *unprivileged* — which is exactly
+        how every MPU-hardened RTOS runs its tasks (``CONTROL.nPRIV=1``; the
+        FreeRTOS ``ARM_CM4_MPU`` port sets ``CONTROL=3`` in
+        ``prvRestoreContextOfFirstTask``). Handler mode (``IPSR != 0``) is
+        privileged, so entering it lets the true banked stack pointers be read
+        and written; ``IPSR`` is then restored exactly and nothing else in
+        xPSR is touched. No-op if already in handler mode, or if this unicorn
+        build has no ``IPSR`` constant. Mirrors the exception-entry path, which
+        uses the same trick to reach the banked SPs."""
+        ipsr_rid = getattr(arm_const, "UC_ARM_REG_IPSR", None)
+        if ipsr_rid is None:
+            return fn()
+        saved = self._uc.reg_read(ipsr_rid)
+        entered = saved == 0
+        if entered:
+            # Any non-zero exception number selects handler mode (privileged).
+            self._uc.reg_write(ipsr_rid, 2)
+        try:
+            return fn()
+        finally:
+            if entered:
+                self._uc.reg_write(ipsr_rid, saved)
+
     def _capture_portable_regs(self) -> Dict[str, Any]:
         """Architectural state as plain python values — safe to pickle and
         restore in a different process (unlike a raw uc context blob)."""
@@ -1720,6 +1747,24 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     sysregs[suffix.lower()] = uc.reg_read(rid)
                 except Exception:  # noqa: BLE001
                     continue
+
+            # MSP/PSP just read back as 0 if the guest is unprivileged (an MPU
+            # RTOS task, CONTROL.nPRIV=1) — MRS of the banked SPs needs
+            # privilege. Re-read them under handler-mode privilege so the TRUE
+            # stack pointers are captured; otherwise the restore writes
+            # MSP=PSP=0 and the machine faults at the next exception, pushing
+            # its frame at address 0 hundreds of ms from the cause.
+            def _reread_banked_sps():
+                for s in ("MSP", "PSP"):
+                    rid = getattr(arm_const, f"UC_ARM_REG_{s}", None)
+                    if rid is None:
+                        continue
+                    try:
+                        sysregs[s.lower()] = uc.reg_read(rid)
+                    except Exception:  # noqa: BLE001
+                        continue
+            self._with_m_profile_privilege(_reread_banked_sps)
+
             state["m_sysregs"] = sysregs
             state["vfp"] = self._capture_vfp()  # FPU-equipped M-profile
         else:
@@ -1749,15 +1794,25 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._restore_vfp(state["vfp"])
         if "banked" in state:
             self._restore_banked_regs(state["banked"])
-        for suffix_l, value in state.get("m_sysregs", {}).items():
-            rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
-            if rid is None:
-                continue
-            try:
-                uc.reg_write(rid, value)
-            except Exception:  # noqa: BLE001
-                log.warning("restore_state: m-profile %s not writable; "
-                            "skipped", suffix_l)
+        # Write the M-profile system registers under handler-mode privilege:
+        # an MSR to the banked MSP/PSP is IGNORED while the core is
+        # unprivileged, so a snapshot restored after CONTROL.nPRIV is set back
+        # would drop the stack pointers on the floor (the capture-side twin of
+        # the zeroing bug). Handler mode makes the writes stick regardless of
+        # the CONTROL value being restored; IPSR is restored afterward, and the
+        # final cpsr write below sets the architectural mode.
+        def _write_m_sysregs():
+            for suffix_l, value in state.get("m_sysregs", {}).items():
+                rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
+                if rid is None:
+                    continue
+                try:
+                    uc.reg_write(rid, value)
+                except Exception:  # noqa: BLE001
+                    log.warning("restore_state: m-profile %s not writable; "
+                                "skipped", suffix_l)
+        if state.get("m_sysregs"):
+            self._with_m_profile_privilege(_write_m_sysregs)
         ordered = sorted(regs,
                          key=lambda n: (0 if n == "cpsr" else
                                         2 if n == "pc" else 1))
