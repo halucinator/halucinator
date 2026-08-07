@@ -669,6 +669,49 @@ class X86HalMixin(_ABIBase):
         self.cont()
 
 
+class RISCVHalMixin(_ABIBase):
+    """
+    RV32 ILP32 ABI: args in a0–a7 (x10–x17) then stack, return addr in ra
+    (x1), return value in a0 (x10). x0 is the hardwired-zero register.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+        "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+        "t3", "t4", "t5", "t6", "pc",
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 8:
+            return self.read_register(f"a{idx}")
+        sp = self.read_register("sp")
+        return self.read_memory(sp + (idx - 8) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:8]):
+            self.write_register(f"a{i}", v)
+        if len(args) > 8:
+            sp = self.read_register("sp")
+            for i, v in enumerate(args[8:]):
+                self.write_memory(sp + i * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_register("ra")
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("ra", ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("ra")}
+        if ret_value is not None:
+            regs["a0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
@@ -681,4 +724,5 @@ ABI_MIXINS: Dict[str, type] = {
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
     "x86":       X86HalMixin,
+    "riscv32":   RISCVHalMixin,
 }
