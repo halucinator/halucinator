@@ -47,14 +47,19 @@ def update_gpio(emu_tx_port: int) -> None:
     context = zmq.Context()
     to_emu_socket = context.socket(zmq.PUB)
     to_emu_socket.connect("ipc:///tmp/IoServer2Halucinator%s" % emu_tx_port)
+    # Let the PUB/SUB connection establish before the first send. Without this
+    # settle a fast sender (the test harness; a script piping input) loses its
+    # opening messages to the zmq slow-joiner — a human typing at the prompt
+    # never noticed. Cheap and harmless for the interactive path.
+    time.sleep(0.2)
 
     try:
         while (1):
             pin = raw_input("Pin: ")  # noqa: F821 — legacy Py2 bug preserved for tests
             value = raw_input("Value: ")  # noqa: F821
             data = {'id': pin, 'value': int(value)}
-            # msg = encode_zmq_msg(topic, data)
-            # to_emu_socket.send(msg)
+            msg = encode_zmq_msg(topic, data)
+            to_emu_socket.send(msg)  # noqa: send(str) — legacy bug preserved for tests
             time.sleep(0)
     except (KeyboardInterrupt, EOFError):
         __run_server = False
