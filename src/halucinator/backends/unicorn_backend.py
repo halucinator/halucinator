@@ -2311,13 +2311,6 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             else:
                 while self._pending_irqs:
                     self._apply_pending_irq(self._pending_irqs.pop(0))
-            # m68k: interrupts that were masked when we tried to deliver them
-            # stay ASSERTED, like a real controller. Move them back now that
-            # the drain loop has finished (re-queuing inside it would spin).
-            _masked = getattr(self, "_m68k_masked_pending", None)
-            if _masked:
-                self._pending_irqs.extend(_masked)
-                _masked.clear()
             # m68k: apply a deferred condition-code transplant left by an
             # `rte` (see _m68k_handle_rte). Must happen HERE -- outside
             # emu_start -- or unicorn discards it on unwind.
