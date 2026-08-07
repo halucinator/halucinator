@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from ctypes import c_char_p
 from io import StringIO
 from multiprocessing import Manager, Process
-from time import sleep
+from time import monotonic, sleep
 from unittest import mock
 
 import pytest
@@ -120,78 +120,121 @@ def test_update_gpio(mock_update_gpio):
     expected_bug_msg = mock_update_gpio(stringio)
     if mock_update_gpio == mock_update_gpio_fixed:
         assert expected_bug_msg is None
-        assert GPIO.gpio_state == gpio_vals
+        # update_gpio PUBs to the peripheral server, which dispatches to
+        # GPIO.ext_pin_change on its own thread — wait for that async hop.
+        for _ in range(40):
+            if dict(GPIO.gpio_state) == gpio_vals:
+                break
+            sleep(0.05)
+        assert dict(GPIO.gpio_state) == gpio_vals
     else:
         # Xfail the test until it's fixed in the tested code.
         assert expected_bug_msg is not None
         pytest.xfail(expected_bug_msg)
 
 
-class MockRxFromEmulatorBugTypeError:
+# The rx workers below run in a SUBPROCESS (gpio.rx_from_emulator blocks on
+# zmq.recv_string, so a thread cannot be cleanly terminated). They must be
+# module-level so they pickle under the "spawn" start method that macOS and
+# Windows use, and they receive their shared Manager proxy as an ARGUMENT. A
+# Manager object created at import time (or as a class attribute) would be
+# re-created inside the spawned child and never seen by the parent — and
+# creating a Manager at import re-spawns recursively. Passing the proxy as a
+# Process arg keeps the harness correct under both "fork" and "spawn".
+def rx_worker_bug_typeerror(expected_bug_msg):
     """
-    Expose the expected TypeError bug in gpio.rx_from_emulator
+    Capture the (now-fixed) setsockopt TypeError bug in gpio.rx_from_emulator,
+    should it ever recur.
     """
-
-    expected_bug_msg = Manager().Value(c_char_p, "")
-
-    @classmethod
-    def mock(cls):
-        try:
-            gpio.rx_from_emulator(PS_TX_PORT)
-        # The type error is expected bug. The fix is mocked in
-        # mock_rx_from_emulator_fixed().
-        except TypeError as ex:
-            if str(ex) == "unicode not allowed, use setsockopt_string":
-                cls.expected_bug_msg.value = (
-                    "TypeError: unicode not allowed, use setsockopt_string"
-                )
-            else:
-                raise
+    try:
+        gpio.rx_from_emulator(PS_TX_PORT)
+    except TypeError as ex:
+        if str(ex) == "unicode not allowed, use setsockopt_string":
+            expected_bug_msg.value = (
+                "TypeError: unicode not allowed, use setsockopt_string"
+            )
+        else:
+            raise
 
 
-class MockRxFromEmulatorFixed:
-    """
-    Mock for testing gpio.rx_from_emulator (setsockopt_string bug is fixed in source)
-    """
-
-    printed_lines = Manager().list()
-
-    @classmethod
-    def print(cls, *args, **kwargs):
+def _capture_print(printed_lines):
+    def _print(*args, **kwargs):
         assert not kwargs
-        cls.printed_lines.append(args)
+        printed_lines.append(args)
 
-    @classmethod
-    def mock(cls):
-        with mock.patch("builtins.print", cls.print):
-            gpio.rx_from_emulator(PS_TX_PORT)
+    return _print
 
 
-def rx_from_emulator_test_harness(mock_rx_from_emulator, send_data):
+def rx_worker_fixed(printed_lines):
+    with mock.patch("builtins.print", _capture_print(printed_lines)):
+        gpio.rx_from_emulator(PS_TX_PORT)
+
+
+def run_rx_worker(worker, send_data, shared, connected=None, ready=None):
     """
-    rx_from_emulator test harness
+    Start ``worker(shared)`` in a spawn-safe subprocess, send data, tear down.
+    ``shared`` is a Manager proxy (list or Value) passed as a Process arg so it
+    is shared with the child under both the "fork" and "spawn" start methods.
+
+    Timing is driven by the captured output, not fixed sleeps, because both the
+    subprocess start (spawn re-imports the module) and zmq delivery latency are
+    unbounded under full-suite scheduler load:
+
+    * ``connected() -> bool`` is polled BEFORE publishing, so we wait until the
+      child's SUB is actually subscribed (it printed its setup line) — otherwise
+      the opening messages are lost to the zmq slow joiner. None → fixed sleep
+      (used by the worker that does not capture prints).
+    * ``ready() -> bool`` is polled AFTER publishing, for the expected output.
+      None → fixed settle.
     """
-    # Can't run mock_rx_from_emulator in a thread because gpio.rx_from_emulator
-    # has a blocking zmq.recv_string call in its loop, which makes it impossible
-    # to terminate the thread without modifying gpio.rx_from_emulator. So run
-    # mock_rx_from_emulator in a subprocess, which can be terminated.
-    rx_from_emulator_proc = Process(target=mock_rx_from_emulator)
-    rx_from_emulator_proc.start()
-    # delay to initialize the receiving socket
-    sleep(0.1)
+    proc = Process(target=worker, args=(shared,))
+    proc.start()
+    deadline = monotonic() + 15
+    if connected is not None:
+        while monotonic() < deadline and not connected():
+            sleep(0.05)
+        sleep(0.3)  # let the SUB subscription propagate to the publisher
+    else:
+        sleep(1)
     send_data()
-    # delay to complete the rx_from_emulator loop
-    sleep(0.1)
-    # Terminate rx_from_emulator_proc directly, as setting
-    # gpio.__run_server=False won't break the gpio.rx_from_emulator loop.
-    rx_from_emulator_proc.terminate()
-    join_timeout(rx_from_emulator_proc)
+    while ready is not None and monotonic() < deadline:
+        if ready():
+            break
+        sleep(0.1)
+    # brief grace for stragglers (and the whole wait when there is no predicate)
+    sleep(0.3 if ready is not None else 2)
+    # Terminate directly: gpio.__run_server=False won't break the recv loop.
+    proc.terminate()
+    join_timeout(proc)
+
+
+def capture_rx(worker, send_data, expected_len, attempts=3):
+    """Run ``worker`` in a subprocess and return the captured lines, using a
+    fresh Manager per attempt and retrying on transient message loss.
+
+    Even with the connect settle, subprocess/zmq delivery can drop a message
+    under cumulative full-suite load, and these tests assert an EXACT transcript
+    — so a lost line must be retried rather than flake the run. A fresh proxy
+    per attempt keeps the transcript from accumulating across retries."""
+    captured = []
+    for _ in range(attempts):
+        with Manager() as manager:
+            printed_lines = manager.list()
+            run_rx_worker(
+                worker, send_data, printed_lines,
+                connected=lambda: len(printed_lines) >= 1,
+                ready=lambda: len(printed_lines) >= expected_len,
+            )
+            captured = list(printed_lines)
+        if len(captured) >= expected_len:
+            break
+    return captured
 
 
 def send_test_data_from_emulator():
     """
-   Send test data from GPIO
-   """
+    Send test data from GPIO
+    """
     GPIO.write_pin("pin_id_0", 0)
     GPIO.toggle_pin("pin_id_0")
 
@@ -201,44 +244,44 @@ def test_rx_from_emulator_bug_TypeError():
     Test that the setsockopt TypeError bug is fixed (was: setsockopt with str
     instead of bytes). The bug was fixed by using setsockopt_string in gpio.py.
     """
-
-    assert MockRxFromEmulatorBugTypeError.expected_bug_msg.value == ""
-    rx_from_emulator_test_harness(
-        MockRxFromEmulatorBugTypeError.mock, send_test_data_from_emulator
-    )
-    try:
-        # Bug is fixed — setsockopt_string is now used in the source,
-        # so no TypeError should occur.
-        assert MockRxFromEmulatorBugTypeError.expected_bug_msg.value == ""
-    finally:
-        MockRxFromEmulatorBugTypeError.expected_bug_msg.value = ""
+    with Manager() as manager:
+        expected_bug_msg = manager.Value(c_char_p, "")
+        run_rx_worker(
+            rx_worker_bug_typeerror,
+            send_test_data_from_emulator,
+            expected_bug_msg,
+        )
+        # Bug is fixed — setsockopt_string is now used in the source, so no
+        # TypeError should occur.
+        assert expected_bug_msg.value == ""
 
 
 def test_rx_from_emulator_bug_fixed():
     """
     Test gpio.rx_from_emulator bug fix.
-    """
 
-    assert list(MockRxFromEmulatorFixed.printed_lines) == []
-    rx_from_emulator_test_harness(
-        MockRxFromEmulatorFixed.mock, send_test_data_from_emulator
-    )
-    try:
-        assert list(MockRxFromEmulatorFixed.printed_lines) == [
-            ("Setup GPIO Listener",),
-            (
-                "Got from emulator:",
-                "Peripheral.GPIO.write_pin id: pin_id_0\nvalue: 0\n",
-            ),
-            ("Pin: ", "pin_id_0", "Value", 0),
-            (
-                "Got from emulator:",
-                "Peripheral.GPIO.toggle_pin id: pin_id_0\nvalue: 1\n",
-            ),
-            ("Pin: ", "pin_id_0", "Value", 1),
-        ]
-    finally:
-        MockRxFromEmulatorFixed.printed_lines = []
+    KNOWN residual flake (macOS only): this passes in isolation, in every
+    directory subset, and on Linux/fork CI, but can intermittently capture only
+    the setup line under a *full* ``test/pytest`` run — a cumulative
+    peripheral_server/zmq lifecycle issue that survives the fresh-Manager retry
+    (so the publish side, not the subprocess, is the culprit). Left as a
+    follow-up: the peripheral_server singleton is not fully reset across the
+    many module setup/teardown cycles a full run performs.
+    """
+    captured = capture_rx(rx_worker_fixed, send_test_data_from_emulator, 5)
+    assert captured == [
+        ("Setup GPIO Listener",),
+        (
+            "Got from emulator:",
+            "Peripheral.GPIO.write_pin id: pin_id_0\nvalue: 0\n",
+        ),
+        ("Pin: ", "pin_id_0", "Value", 0),
+        (
+            "Got from emulator:",
+            "Peripheral.GPIO.toggle_pin id: pin_id_0\nvalue: 1\n",
+        ),
+        ("Pin: ", "pin_id_0", "Value", 1),
+    ]
 
 
 def test_rx_from_emulator_subscriptions():
@@ -251,13 +294,9 @@ def test_rx_from_emulator_subscriptions():
         data = {"id": "pin_id_0", "value": 1}
         PS.__tx_socket__.send_string(PS.encode_zmq_msg(topic, data))
 
-    assert list(MockRxFromEmulatorFixed.printed_lines) == []
-    rx_from_emulator_test_harness(MockRxFromEmulatorFixed.mock, send_data)
-    try:
-        # Xfail the test until it's fixed in the tested code.
-        assert list(MockRxFromEmulatorFixed.printed_lines) != [
-            ("Setup GPIO Listener",),
-        ]
-        pytest.xfail("rx_from_emulator does not filter subscription topics")
-    finally:
-        MockRxFromEmulatorFixed.printed_lines = []
+    captured = capture_rx(rx_worker_fixed, send_data, 2)
+    # rx_from_emulator subscribes to '' (ALL topics), so the unrelated message
+    # IS received — the missing topic filtering it should have. Xfail the test
+    # until rx_from_emulator filters subscription topics.
+    assert captured != [("Setup GPIO Listener",)]
+    pytest.xfail("rx_from_emulator does not filter subscription topics")

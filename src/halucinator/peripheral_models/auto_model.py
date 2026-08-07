@@ -65,7 +65,11 @@ COUNTER64_ADDRS_ENV = "HAL_AUTO_COUNTER64_ADDRS"
 COUNTER_STEP_ENV = "HAL_AUTO_COUNTER_STEP"
 MMIO_LOG_ENV = "HAL_MMIO_LOG"
 NO_MMIO_TRACE_ENV = "HAL_NO_MMIO_TRACE"
+STALL_WINDOW_ENV = "HAL_AUTO_STALL_WINDOW"
+STALL_DIV_ENV = "HAL_AUTO_STALL_DIV"
 DEFAULT_COUNTER_STEP = 0x1000
+DEFAULT_STALL_WINDOW = 8192
+DEFAULT_STALL_DIV = 4
 
 
 def _tokens(raw: str) -> Iterable[str]:
@@ -116,6 +120,16 @@ def parse_counter_step(raw: Optional[str]) -> int:
         return int(raw, 0)
     except ValueError:
         return DEFAULT_COUNTER_STEP
+
+
+def parse_int(raw: Optional[str], default: int) -> int:
+    """``int(raw, 0)`` with a fallback for missing/garbage input."""
+    if not raw:
+        return default
+    try:
+        return int(raw, 0)
+    except ValueError:
+        return default
 
 
 def mmio_log_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -225,6 +239,8 @@ class AutoPeripheral(RecordingPeripheral):
     def __init__(self, name: str, address: int, size: int,
                  db_path: Optional[str] = None,
                  stall_threshold: int = 16,
+                 stall_window: Optional[int] = None,
+                 stall_win_div: Optional[int] = None,
                  counter_addrs: Optional[Iterable[int]] = None,
                  counter64_addrs: Optional[Dict[int, int]] = None,
                  counter_step: Optional[int] = None,
@@ -235,6 +251,29 @@ class AutoPeripheral(RecordingPeripheral):
         # (pc, addr) -> consecutive repeat count
         self._repeat: Dict[Tuple[int, int], int] = {}
         self._last_key: Optional[Tuple[int, int]] = None
+        # WINDOWED spin detection (interleaved-poll robust). The consecutive
+        # counter above resets whenever a DIFFERENT (pc, addr) is read, so a
+        # register polled in a loop that ALSO touches another register each
+        # iteration (status + timeout counter), or that is read from two PCs,
+        # never reaches ``stall_threshold`` even though it is a genuine
+        # never-exiting busy-wait. Track per-(pc,addr) read counts over a
+        # tumbling window of the last ``_stall_window`` reads; a key that
+        # DOMINATES the window (>= ``_stall_win_trigger`` of them) is a spin
+        # regardless of interleaving, and escalates through the same value
+        # tiers as the consecutive path via a persistent per-key level. The
+        # dominance bar (default 1/4 of an 8192-read window) is high enough
+        # that a register merely read often -- not spun on -- never trips it,
+        # preserving the conservative behaviour of the consecutive detector.
+        self._stall_window = (stall_window if stall_window is not None
+                              else parse_int(os.environ.get(STALL_WINDOW_ENV),
+                                             DEFAULT_STALL_WINDOW))
+        _div = (stall_win_div if stall_win_div is not None
+                else parse_int(os.environ.get(STALL_DIV_ENV), DEFAULT_STALL_DIV))
+        self._stall_win_trigger = max(self.stall_threshold,
+                                      self._stall_window // max(1, _div))
+        self._win: Dict[Tuple[int, int], int] = {}
+        self._win_total = 0
+        self._win_escal: Dict[Tuple[int, int], int] = {}
         # (pc, addr) -> cached value that broke the stall
         self._cached: Dict[Tuple[int, int], int] = {}
         # (pc, addr) -> running value for free-running-counter registers
@@ -333,6 +372,33 @@ class AutoPeripheral(RecordingPeripheral):
         else:
             self._repeat[key] = 0
             self._last_key = key
+
+        # Windowed spin detection (interleaved-poll robust, see __init__): a
+        # key that dominates the recent read window is a busy-wait even when
+        # interleaved with other reads, so the strict-consecutive run never
+        # reaches the threshold. Escalate through the same all-ones -> zero ->
+        # counter tiers, one step per read once dominance is reached, via a
+        # persistent per-key level.
+        self._win_total += 1
+        self._win[key] = self._win.get(key, 0) + 1
+        if self._win_total >= self._stall_window:
+            self._win = {}
+            self._win_total = 0
+        if self._win.get(key, 0) >= self._stall_win_trigger:
+            lvl = self._win_escal.get(key, 0)
+            self._win_escal[key] = lvl + 1
+            if lvl == 0:
+                wval = self._mask(size)
+            elif lvl == 1:
+                wval = 0
+            else:
+                cur = self._counter.get(key, 0) + (lvl - 1) * 0x10000
+                self._counter[key] = cur
+                wval = cur & self._mask(size)
+            hlog.info(
+                "AutoPeripheral: WINDOWED busy-wait at pc=0x%08x addr=0x%08x "
+                "-> 0x%x (tier %d, interleaved poll)", pc, addr, wval, lvl)
+            return wval
 
         n = self._repeat[key]
         if n >= self.stall_threshold:

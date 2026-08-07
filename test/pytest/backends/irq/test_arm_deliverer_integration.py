@@ -150,3 +150,108 @@ class TestUnicornArmDispatch:
         b._apply_pending_irq(3)
         assert b.read_register("pc") == 0x4000    # jumped to trampoline
         assert b.read_register("lr") == 0x2004
+
+
+# ---------------------------------------------------------------------------
+# Modelled GICv2 CPU interface (GICC_IAR / GICC_EOIR)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAVE_UNICORN, reason="unicorn-engine not installed")
+class TestUnicornGicIarModel:
+    """Regression for the modelled GICv2 CPU interface.
+
+    An A-profile firmware's low-level IRQ handler reads GICC_IAR to learn which
+    interrupt just fired. The in-process backend has no real GIC, and that
+    address is typically shadowed by an AutoPeripheral catch-all whose read
+    default is NOT the acknowledged IRQ id — so without a model the handler
+    only ever sees the GICv2 spurious id 0x3FF and never dispatches the
+    delivered ISR. This is exactly what wedged the ION7400 (VxWorks/Cortex-A9)
+    boot: its GIC drain loop polling GICC_IAR (0xec80010c) always read 0x3FF,
+    so the delivered system tick (IRQ 27) never entered the scheduler.
+
+    set_delivery_plan models GICC_IAR (acked id once, then 0x3FF) and GICC_EOIR
+    only when the plan carries a gicc_base — i.e. only for GICv2 configs, never
+    for cortex-m / x86 / arm_vic ARM configs (no gicc_base).
+    """
+
+    GICC = 0x8000
+    IAR = GICC + 0x0C
+    EOIR = GICC + 0x10
+    SPURIOUS = 0x3FF
+
+    def _arm_backend(self):
+        from halucinator.backends.unicorn_backend import UnicornBackend
+        from halucinator.backends.hal_backend import MemoryRegion
+        b = UnicornBackend(arch="arm")
+        b.add_memory_region(MemoryRegion("ram", 0x0, 0x10000, "rwx"))
+        b.init()
+        return b
+
+    def _gic_plan(self):
+        return DeliveryPlan(model=DeliveryModel.FRAME, vector_base=0x0,
+                            gicc_base=self.GICC)
+
+    def test_gicc_plan_installs_model(self):
+        b = self._arm_backend()
+        b.set_exception_deliverer(ArmExceptionDeliverer())
+        b.set_delivery_plan(self._gic_plan())
+        assert b._gicc_iface_base == self.GICC
+
+    def test_vic_plan_leaves_model_uninstalled(self):
+        # arm_vic ARM configs (m340, bmxnoe) carry no gicc_base: the model must
+        # stay off so their IRQ path is byte-for-byte unchanged.
+        b = self._arm_backend()
+        b.set_exception_deliverer(ArmExceptionDeliverer())
+        b.set_delivery_plan(DeliveryPlan(model=DeliveryModel.FRAME,
+                                         vector_base=0x0, gicc_base=None))
+        assert b._gicc_iface_base is None
+
+    def test_deliverer_stashes_acked_irq(self):
+        b = self._arm_backend()
+        b.write_memory(0x18, 4, 0xEA000000)      # vectors installed
+        b.write_register("cpsr", 0x60000013)     # SVC, IRQs enabled
+        b.write_register("pc", 0x00001000)
+        b.set_exception_deliverer(ArmExceptionDeliverer())
+        b.set_delivery_plan(self._gic_plan())
+        b._apply_pending_irq(27)
+        # The deliverer stashed the acked id for the modelled IAR read.
+        assert b._gicc_iar_pending == 27
+
+    def _read_iar_via_guest(self, b):
+        """Execute one `ldr r0,[r1]` (r1=IAR) so the modelled MEM_READ hook
+        fires (a host-side uc.mem_read would bypass it), and return r0."""
+        import unicorn
+        uc = b._uc
+        b.write_memory(0x1000, 4, 0xE5910000)    # ldr r0, [r1]
+        uc.reg_write(unicorn.arm_const.UC_ARM_REG_R1, self.IAR)
+        uc.emu_start(0x1000, 0x1004, count=1)
+        return uc.reg_read(unicorn.arm_const.UC_ARM_REG_R0)
+
+    def test_iar_read_returns_acked_id_once_then_spurious(self):
+        b = self._arm_backend()
+        b.set_exception_deliverer(ArmExceptionDeliverer())
+        b.set_delivery_plan(self._gic_plan())
+        # Nothing pending yet -> the drain loop must see spurious, not a phantom.
+        assert self._read_iar_via_guest(b) == self.SPURIOUS
+        # After an acknowledge, the ISR reads the real id exactly once...
+        b._gicc_iar_pending = 27
+        assert self._read_iar_via_guest(b) == 27
+        # ...and every subsequent read is spurious again.
+        assert self._read_iar_via_guest(b) == self.SPURIOUS
+
+    def test_eoir_write_clears_active_irq(self):
+        import unicorn
+        b = self._arm_backend()
+        b.set_exception_deliverer(ArmExceptionDeliverer())
+        b.set_delivery_plan(self._gic_plan())
+        b._gicc_iar_pending = 27
+        assert self._read_iar_via_guest(b) == 27     # -> _gicc_active_irq = 27
+        assert b._gicc_active_irq == 27
+        # `str r0,[r1]` (r1=EOIR) writes end-of-interrupt -> active id cleared.
+        uc = b._uc
+        b.write_memory(0x1000, 4, 0xE5810000)        # str r0, [r1]
+        uc.reg_write(unicorn.arm_const.UC_ARM_REG_R0, 27)
+        uc.reg_write(unicorn.arm_const.UC_ARM_REG_R1, self.EOIR)
+        uc.emu_start(0x1000, 0x1004, count=1)
+        assert b._gicc_active_irq is None
