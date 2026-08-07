@@ -1132,6 +1132,14 @@ def _emulate_with_unicorn_backend(
                 region.write_hook = (
                     lambda off, sz, val, _p=periph, _b=backend: _p.hw_write(
                         off, sz, val, pc=_b.regs.pc))
+                # Hand the peripheral a handle on the backend so a modelled
+                # register can REQUEST an interrupt (a ColdFire INTC's
+                # force-interrupt register, an RTOS doorbell, ...). Without
+                # this a model can only observe, never assert a line.
+                try:
+                    periph.hal_backend = backend
+                except Exception:  # noqa: BLE001
+                    pass
                 auto_peripherals.append(periph)
                 if periph.__class__.__name__ == "AutoPeripheral":
                     backend.skip_svc = True
