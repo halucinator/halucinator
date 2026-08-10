@@ -596,6 +596,11 @@ class TriCoreHalMixin(_ABIBase):
             raise ValueError(f"Argument index must be non-negative, got {idx}")
         if idx < 4:
             return self.read_register(f"d{4 + idx}")
+        # Overflow arguments start AT the stack pointer. TriCore's EABI has no
+        # O32-style home space: the caller does not reserve slots for the
+        # register-passed arguments, so the fifth argument is the first word of
+        # the outgoing area. (This is where a mixin copied from MIPSHalMixin
+        # goes wrong -- MIPS reserves 16 bytes for a0-a3 and TriCore does not.)
         sp = self.read_register("a10")
         return self.read_memory(sp + (idx - 4) * 4, 4, 1)
 
@@ -605,7 +610,11 @@ class TriCoreHalMixin(_ABIBase):
         if len(args) > 4:
             sp = self.read_register("a10")
             for i, v in enumerate(args[4:]):
-                self.write_memory(sp + (4 + i) * 4, 4, v)
+                # Same address get_arg reads back. This previously wrote at
+                # sp+16.. -- the MIPS O32 home-space offset, inherited by
+                # copy -- so a set/get round-trip disagreed by 16 bytes and an
+                # intercept reading argument 5 got an unrelated word.
+                self.write_memory(sp + i * 4, 4, v)
 
     def get_ret_addr(self) -> int:
         return self.read_register("a11")

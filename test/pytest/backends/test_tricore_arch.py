@@ -130,6 +130,48 @@ class TestTriCoreABI:
         assert f.written["d2"] == 0x1234         # result in d2
         assert f.continued
 
+    def test_stack_args_are_written_where_they_are_read(self):
+        """Arguments past the fourth go on the stack, and set_args must put
+        them where get_arg looks.
+
+        TriCore's EABI has NO O32-style home space -- the caller reserves no
+        slots for the register-passed arguments -- so the fifth argument is the
+        first word at a10. set_args used to write at a10+16, the MIPS offset,
+        inherited by copying MIPSHalMixin: a round-trip then disagreed by 16
+        bytes and an intercept reading argument 5 silently got an unrelated
+        word."""
+        from halucinator.backends.hal_backend import TriCoreHalMixin
+
+        SP = 0x70003F00
+
+        class Fake(TriCoreHalMixin):
+            def __init__(self):
+                self.regs = {f"d{i}": 0 for i in range(16)}
+                self.regs["a10"] = SP
+                self.mem = {}
+
+            def read_register(self, r):
+                return self.regs[r]
+
+            def write_register(self, r, v):
+                self.regs[r] = v
+
+            def read_memory(self, addr, size, num):
+                return self.mem.get(addr, 0)
+
+            def write_memory(self, addr, size, value, num=1, raw=False):
+                self.mem[addr] = value
+
+        f = Fake()
+        args = [0xA0 + i for i in range(7)]
+        f.set_args(args)
+        assert [f.get_arg(i) for i in range(7)] == args
+        # Absolute placement: a reader and writer that are both wrong in the
+        # same direction would still agree with each other.
+        assert f.mem[SP] == args[4]
+        assert f.mem[SP + 4] == args[5]
+        assert SP + 16 not in f.mem, "wrote at the MIPS O32 home-space offset"
+
 
 # ---------------------------------------------------------------------------
 # Real execution
