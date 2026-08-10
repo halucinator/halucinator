@@ -414,6 +414,33 @@ class ShadowExceptionDeliverer(ExceptionDeliverer):
 _EFLAGS_IF = 1 << 9   # interrupt-enable flag
 
 
+def _parse_vector_key(key) -> Optional[int]:
+    """An IRQ number from a ``vectors:`` mapping key, or None if unusable.
+
+    The keys come from user YAML, so they arrive as ints (``4:``) or as any
+    string a human might type (``"4"``, ``"0x4"``, ``" 4 "``, ``"04"``).
+    ``int(s, 0)`` alone is not enough: base 0 applies Python's *literal* rules
+    and REJECTS a leading zero, so a perfectly reasonable ``"04":`` raised
+    ValueError out of the middle of interrupt delivery and took the run down.
+    Fall back to base 10 for that case, and skip a key that is not a number at
+    all with a warning rather than letting it propagate -- one typo in a config
+    should not kill the emulation.
+    """
+    if isinstance(key, bool):          # bool is an int subclass; not a vector
+        return None
+    if isinstance(key, int):
+        return key
+    text = str(key).strip()
+    for base in (0, 10):
+        try:
+            return int(text, base)
+        except ValueError:
+            continue
+    log.warning("x86_pic: vectors: key %r is not an IRQ number — ignoring",
+                key)
+    return None
+
+
 class X86ExceptionDeliverer(ExceptionDeliverer):
     """Synthesised x86/i386 PC interrupt entry for in-process unicorn
     (replaces ``X86PicController.deliver``). Unicorn's x86 model does not
@@ -447,7 +474,10 @@ class X86ExceptionDeliverer(ExceptionDeliverer):
         if vectors:
             # YAML mapping keys may arrive as str ("4:") or int (4:).
             for key, addr in vectors.items():
-                if int(str(key), 0) == int(num):
+                parsed = _parse_vector_key(key)
+                if parsed is None:
+                    continue
+                if parsed == int(num):
                     isr_addr = int(addr)
                     break
         if isr_addr is None:
