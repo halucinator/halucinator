@@ -102,9 +102,27 @@ def test_it_block_mmio_read_does_not_skip_following_instructions():
     assert _run(with_repair=True) == _SP0 + 16
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason="negative control: asserts a THIRD-PARTY bug is still present, so "
+           "its outcome is a property of the unicorn build and the run, not "
+           "of this repository. Observed BOTH WAYS on the SAME unicorn wheel "
+           "(2.0.1.post1) on the SAME image -- ubuntu-22.04/py3.10 reproduced "
+           "the leak on one CI run and not on a later one -- so it is not a "
+           "stable per-platform property and cannot be pinned by skipping a "
+           "particular OS. Non-strict so it reports either way without gating "
+           "CI; an XPASS is the signal that _repair_itstate MAY be removable, "
+           "not proof that it is.")
 def test_unrepaired_hook_reproduces_the_skip():
     """Documents the unicorn behaviour being worked around: the same program,
-    same hook, no repair -- the `add sp, #16` is silently skipped."""
+    same hook, no repair -- the `add sp, #16` is silently skipped.
+
+    This is a canary, not a test of our code: the repair itself is covered by
+    ``test_it_block_mmio_read_does_not_skip_following_instructions`` above,
+    which is a hard assertion and must never be relaxed. If this one XPASSes,
+    re-verify against the ArduPilot device before dropping ``_repair_itstate``
+    -- a host where the leak happens not to reproduce does not mean the
+    workaround is dead everywhere."""
     assert _run(with_repair=False) == _SP0, (
         "unicorn no longer leaks ITSTATE across an MMIO hook; "
         "_repair_itstate may be removable -- re-verify against the ArduPilot "
