@@ -55,11 +55,18 @@ def update_gpio(emu_tx_port: int) -> None:
 
     try:
         while (1):
-            pin = raw_input("Pin: ")  # noqa: F821 — legacy Py2 bug preserved for tests
-            value = raw_input("Value: ")  # noqa: F821
+            # `input`, not Python 2's `raw_input` — the latter is not a builtin
+            # on any interpreter this package supports, so the loop raised
+            # NameError on its first iteration and update_gpio could never
+            # actually send a pin change.
+            pin = input("Pin: ")
+            value = input("Value: ")
             data = {'id': pin, 'value': int(value)}
             msg = encode_zmq_msg(topic, data)
-            to_emu_socket.send(msg)  # noqa: send(str) — legacy bug preserved for tests
+            # `send_string`, not `send` — encode_zmq_msg returns str and pyzmq
+            # refuses str on the bytes-oriented send() with
+            # "TypeError: unicode not allowed, use send_string".
+            to_emu_socket.send_string(msg)
             time.sleep(0)
     except (KeyboardInterrupt, EOFError):
         __run_server = False

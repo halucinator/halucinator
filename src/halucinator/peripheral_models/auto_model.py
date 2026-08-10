@@ -336,9 +336,36 @@ class AutoPeripheral(RecordingPeripheral):
         self._mmio_log = (mmio_log_enabled() if mmio_log is None
                           else bool(mmio_log))
         self._logged_reads: set = set()
+        # (key, tier) pairs already announced — see _log_stall_tier.
+        self._logged_stall_tiers: set = set()
 
     def _mask(self, size: int) -> int:
         return (1 << (8 * size)) - 1
+
+    def _log_stall_tier(self, key: Tuple[int, int], what: str, pc: int,
+                        addr: int, val: int, tier: int, suffix: str) -> None:
+        """Announce a busy-wait tier ONCE per (pc, addr, tier).
+
+        These lines are emitted from inside the MMIO read hook, on the hot
+        path. Logging every read meant a spin that runs for millions of reads
+        -- which is the whole point of the escalation, and routine on a
+        calibrated-delay loop -- wrote millions of identical lines, drowning
+        the surrounding trace and slowing the run down enough to distort the
+        timing the firmware is measuring.
+
+        Once per tier is the actionable signal: the tier is what changed, and
+        it is what tells you which kind of wait was detected. In the counter
+        tier the returned value keeps advancing after this line -- that is by
+        design (the step grows so any finite threshold is crossed), and the
+        MMIO trace still carries every individual read if you need them.
+        """
+        tier_key = (key, tier)
+        if tier_key in self._logged_stall_tiers:
+            return
+        self._logged_stall_tiers.add(tier_key)
+        hlog.info(
+            "AutoPeripheral: %s at pc=0x%08x addr=0x%08x -> 0x%x (tier %d)%s",
+            what, pc, addr, val, tier, suffix)
 
     def hw_read(self, offset: int, size: int, pc: int = 0xBAADBAAD, **kwargs: Any) -> int:
         addr = self.address + offset
@@ -381,10 +408,16 @@ class AutoPeripheral(RecordingPeripheral):
         # persistent per-key level.
         self._win_total += 1
         self._win[key] = self._win.get(key, 0) + 1
+        # Decide dominance BEFORE the window can roll over. Testing after the
+        # reset throws away the very read that reached the trigger: on the
+        # rollover read `self._win` is empty, so a key that had just qualified
+        # scores 0 and falls back to the strict-consecutive path for a whole
+        # further window.
+        dominant = self._win[key] >= self._stall_win_trigger
         if self._win_total >= self._stall_window:
             self._win = {}
             self._win_total = 0
-        if self._win.get(key, 0) >= self._stall_win_trigger:
+        if dominant:
             lvl = self._win_escal.get(key, 0)
             self._win_escal[key] = lvl + 1
             if lvl == 0:
@@ -395,9 +428,14 @@ class AutoPeripheral(RecordingPeripheral):
                 cur = self._counter.get(key, 0) + (lvl - 1) * 0x10000
                 self._counter[key] = cur
                 wval = cur & self._mask(size)
-            hlog.info(
-                "AutoPeripheral: WINDOWED busy-wait at pc=0x%08x addr=0x%08x "
-                "-> 0x%x (tier %d, interleaved poll)", pc, addr, wval, lvl)
+            # `lvl` is a per-read escalation counter, not a tier: it keeps
+            # climbing for as long as the spin lasts (that is what makes the
+            # counter step grow). Tiers 0 and 1 are the all-ones and zero
+            # constants; everything from 2 up IS the counter tier, so clamp
+            # before logging or the (key, tier) throttle key would be unique
+            # on every single read and throttle nothing.
+            self._log_stall_tier(key, "WINDOWED busy-wait", pc, addr, wval,
+                                 min(lvl, 2), " (interleaved poll)")
             return wval
 
         n = self._repeat[key]
@@ -415,15 +453,16 @@ class AutoPeripheral(RecordingPeripheral):
             #      with the spin so any finite threshold is crossed quickly.
             if n < t * 2:
                 val = self._mask(size)
+                tier = 0
             elif n < t * 3:
                 val = 0
+                tier = 1
             else:
                 cur = self._counter.get(key, 0) + (n - t * 3 + 1) * 0x10000
                 self._counter[key] = cur
                 val = cur & self._mask(size)
-            hlog.info(
-                "AutoPeripheral: busy-wait at pc=0x%08x addr=0x%08x -> 0x%x",
-                pc, addr, val)
+                tier = 2
+            self._log_stall_tier(key, "busy-wait", pc, addr, val, tier, "")
             return val
         if self._mmio_log and key not in self._logged_reads:
             self._logged_reads.add(key)
