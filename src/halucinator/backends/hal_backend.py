@@ -529,6 +529,14 @@ class MIPSHalMixin(_ABIBase):
     """
     MIPS32 O32 ABI: args in a0–a3 then stack, return addr in ra,
     return value in v0.
+
+    O32 reserves a 16-byte "argument slot" area at the TOP of the caller's
+    frame -- $sp+0 through $sp+12 -- as home space for a0-a3, even though
+    those four are passed in registers and the callee usually never spills
+    them. The fifth argument is therefore at $sp+16, not at $sp+0. Both
+    ``get_arg`` and ``set_args`` below index from that base; an intercept
+    reading at $sp would get the a0 home slot (typically stale or zero)
+    instead of the argument it asked for.
     """
     WORD_SIZE = 4
     REGISTERS = (
@@ -543,8 +551,11 @@ class MIPSHalMixin(_ABIBase):
             raise ValueError(f"Argument index must be non-negative, got {idx}")
         if idx < 4:
             return self.read_register(f"a{idx}")
+        # $sp + idx*4, NOT $sp + (idx-4)*4: argument 5 (idx 4) sits above the
+        # 16-byte a0-a3 home space, at $sp+16. This is the same address
+        # set_args writes, so a set/get round-trip agrees.
         sp = self.read_register("sp")
-        return self.read_memory(sp + (idx - 4) * 4, 4, 1)
+        return self.read_memory(sp + idx * 4, 4, 1)
 
     def set_args(self, args: List[int]) -> None:
         for i, v in enumerate(args[:4]):
