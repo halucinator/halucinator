@@ -677,6 +677,13 @@ ABI_MIXINS: Dict[str, type] = {
     "arm":       ARM32HalMixin,
     "arm64":     ARM64HalMixin,
     "mips":      MIPSHalMixin,
+    # Little-endian MIPS32 shares the o32 calling convention with big-endian
+    # MIPS -- endianness is a data-layout property, not an ABI one -- so the
+    # same mixin serves both. Without an entry here _bind_abi falls back to
+    # ARM32HalMixin *silently* (the fallback IS the default, so the rebinding
+    # branch is skipped), and the first intercept to read an argument dies with
+    # "Unknown register: 'r0'" because r0 is not in the MIPS register map.
+    "mipsel":    MIPSHalMixin,
     "powerpc":   PowerPCHalMixin,
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
