@@ -669,6 +669,83 @@ class X86HalMixin(_ABIBase):
         self.cont()
 
 
+class SPARCHalMixin(_ABIBase):
+    """
+    SPARC V8 (Gaisler LEON) ABI: the first six arguments arrive in %o0-%o5,
+    further arguments on the stack, the return value goes back in %o0, and the
+    return address derives from %o7.
+
+    Two SPARC-specific facts drive every method here:
+
+      * **%o7 is not a return address, it is the address of the `call`.**
+        SPARC's `call` stores its own PC in %o7 and the callee returns with
+        `jmpl %o7+8` (`retl`, leaf) or `jmpl %i7+8` (`ret`, after a `save`) --
+        the +8 steps over the call AND its delay slot. Treating %o7 as the
+        resume address sends control back to the call instruction, which
+        re-invokes the interposed function forever. So get/set_ret_addr and
+        execute_return all carry the +8/-8 bias.
+
+      * **Stack arguments start at %sp+92, not %sp.** A SPARC frame reserves
+        64 bytes for the register-window spill area, 4 for the aggregate-return
+        pointer and 24 of home space for %o0-%o5 before the seventh argument
+        appears. Reading at %sp would return the callee's saved window.
+
+    Intercepts fire at the callee's first instruction, i.e. BEFORE its `save`,
+    so the caller's window is still current and %o0-%o5/%o7 are the registers
+    to read. After a `save` the same values are addressed as %i0-%i5/%i7.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        tuple(f"g{i}" for i in range(8))
+        + tuple(f"o{i}" for i in range(8))
+        + tuple(f"l{i}" for i in range(8))
+        + tuple(f"i{i}" for i in range(8))
+        + ("pc", "sp", "fp", "y")
+    )
+
+    # NOTE: the 92-byte stack-argument bias below is written as a literal in
+    # both methods rather than a class constant. ``_bind_abi`` copies only the
+    # six ABI *methods* onto the backend instance -- class attributes of the
+    # mixin never come with them -- so ``self.<constant>`` would raise
+    # AttributeError on the backend at the first call. Every mixin in this file
+    # inlines its constants for the same reason.
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 6:
+            return self.read_register(f"o{idx}")
+        # 64-byte window save area + 4-byte aggregate return slot + 24 bytes
+        # of home space for %o0-%o5, then the seventh argument.
+        sp = self.read_register("sp")
+        return self.read_memory(sp + 92 + (idx - 6) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:6]):
+            self.write_register(f"o{i}", v)
+        if len(args) > 6:
+            sp = self.read_register("sp")
+            for i, v in enumerate(args[6:]):
+                # Same expression get_arg reads back, so a set/get round-trip
+                # agrees -- unlike the mips/tricore mixins, whose writer and
+                # reader disagree by one home-space block.
+                self.write_memory(sp + 92 + i * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return (self.read_register("o7") + 8) & 0xFFFFFFFF
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("o7", (ret_addr - 8) & 0xFFFFFFFF)
+
+    def execute_return(self, ret_value: int) -> None:
+        # Emulate `retl`: resume at %o7+8, past the call and its delay slot.
+        regs = {"pc": (self.read_register("o7") + 8) & 0xFFFFFFFF}
+        if ret_value is not None:
+            regs["o0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
@@ -681,4 +758,9 @@ ABI_MIXINS: Dict[str, type] = {
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
     "x86":       X86HalMixin,
+    # Without this entry _bind_abi falls back to ARM32HalMixin *silently* --
+    # the fallback IS the default, so the rebinding branch never runs -- and
+    # the first intercept to read an argument dies with "Unknown register:
+    # 'r0'", because r0 is not in the SPARC register map.
+    "sparc":     SPARCHalMixin,
 }
