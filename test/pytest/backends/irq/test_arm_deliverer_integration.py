@@ -166,9 +166,9 @@ class TestUnicornGicIarModel:
     address is typically shadowed by an AutoPeripheral catch-all whose read
     default is NOT the acknowledged IRQ id — so without a model the handler
     only ever sees the GICv2 spurious id 0x3FF and never dispatches the
-    delivered ISR. This is exactly what wedged the ION7400 (VxWorks/Cortex-A9)
-    boot: its GIC drain loop polling GICC_IAR (0xec80010c) always read 0x3FF,
-    so the delivered system tick (IRQ 27) never entered the scheduler.
+    delivered ISR — a handler whose drain loop polls GICC_IAR then reads the
+    spurious id forever, so a delivered system tick never reaches the guest's
+    scheduler and the boot goes idle.
 
     set_delivery_plan models GICC_IAR (acked id once, then 0x3FF) and GICC_EOIR
     only when the plan carries a gicc_base — i.e. only for GICv2 configs, never

@@ -361,16 +361,16 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._gic_dist_base: Optional[int] = None
         # Wall-clock BACKSTOP for the instruction-count tick pacer (A-profile /
         # GIC only). The pacer only advances on an emu chunk that completes
-        # WITHOUT a breakpoint; a device whose models intercept on nearly every
-        # kernel-object op (VxWorks semTake / objVerify) or busy-polls a network
-        # daemon truncates almost every chunk, so the pacer stalls and the RTOS
-        # system tick STOPS -- taskDelay()/tick-driven waits hang forever though
-        # the CPU still executes. A real timer fires regardless, so when the
-        # pacer is active and its IRQ is GIC-enabled we ALSO queue the tick after
-        # HAL_DET_TICK_WALL_MS of wall time. Backstop only: the chunk-completion
-        # path fires first on a clean run and refreshes the timestamp, keeping
-        # the common case instruction-deterministic. Gated on _gic_dist_base, so
-        # cortex-m / x86 / arm_vic configs are unaffected.
+        # WITHOUT a breakpoint, so a config with densely hit breakpoints (a
+        # handler on a frequently called function, or a tight polling loop) can
+        # truncate nearly every chunk: the pacer stops advancing and the timer
+        # tick is never queued, even though the CPU keeps executing. Real timer
+        # hardware fires regardless, so when the pacer is active and its IRQ is
+        # GIC-enabled we ALSO queue the tick after HAL_DET_TICK_WALL_MS of wall
+        # time. Backstop only: the chunk-completion path fires first on a clean
+        # run and refreshes the timestamp, keeping the common case
+        # instruction-deterministic. Gated on _gic_dist_base, so cortex-m / x86
+        # / arm_vic configs are unaffected.
         self._det_last_wall: Optional[float] = None
         try:
             self._det_wall_s = max(0.0, float(
@@ -2064,7 +2064,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             irq_chunk = 0
         while True:
             # Wall-clock backstop for the deterministic tick pacer: keep the
-            # RTOS system tick alive even when dense breakpoints truncate every
+            # guest system tick alive even when dense breakpoints truncate every
             # instruction chunk (see __init__). Runs at the top of the loop — a
             # clean instruction boundary (fresh entry, or a re-entry right after
             # a bp) — so queuing the tick here is as safe as the chunk-completion
