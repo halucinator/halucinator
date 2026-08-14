@@ -50,6 +50,10 @@ try:
         import unicorn.riscv_const as riscv_const
     except ImportError:
         riscv_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.sparc_const as sparc_const
+    except ImportError:
+        sparc_const = None  # type: ignore[assignment]
     _HAVE_UNICORN = True
 except ImportError:
     _HAVE_UNICORN = False
@@ -60,6 +64,7 @@ except ImportError:
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
     riscv_const = None  # type: ignore[assignment]
+    sparc_const = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +89,13 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     # I/M/A/C extensions + Zicsr with no CPU-model pin; bare-metal images link
     # at DRAM base 0x8000_0000. No thumb, little-endian, 4-byte words.
     "riscv32":        ("riscv",  "riscv32_le", False, False, 4),
+    # SPARC V8, 32-bit, big-endian -- the ISA of the Gaisler LEON2/3/4/5 SoCs
+    # used across ESA/NASA spaceflight avionics. LEON is V8, NOT V9: SPARC64/V9
+    # is the unsupported one in unicorn. Note UC_MODE_SPARC32 must be OR'd with
+    # UC_MODE_BIG_ENDIAN -- unicorn rejects SPARC32 on its own with
+    # UC_ERR_MODE (there is no little-endian SPARC32 CPU in its QEMU core), so
+    # the endianness flag is not optional here the way it is for MIPS.
+    "sparc":          ("sparc",  "sparc32_be", False, True, 4),
 }
 
 _PERM_MAP = {
@@ -127,12 +139,38 @@ def _get_arm64_reg_map() -> Dict[str, int]:
         "sp": arm64_const.UC_ARM64_REG_SP,
         "pc": arm64_const.UC_ARM64_REG_PC,
     }
-    # x29 = fp, x30 = lr on AArch64
+    # x29 = fp, x30 = lr on AArch64. The EL1 exception registers below are what
+    # Arm64ExceptionDeliverer's FRAME path already reads/writes by name
+    # (`vbar_el1` to find the vector table, `elr_el1` to set the return address
+    # the handler's terminating `eret` consumes). Without them both lookups
+    # raised ValueError, which the deliverer catches and swallows -- so the
+    # FRAME path silently fell back to the configured vector_base and NEVER set
+    # ELR_EL1, and the ISR's `eret` returned to a stale address. Every name is
+    # added defensively (getattr) so an older Unicorn without a given constant
+    # degrades to "absent" rather than breaking import.
     for name, reg in (
         ("x29", "UC_ARM64_REG_X29"),
         ("x30", "UC_ARM64_REG_X30"),
         ("fp",  "UC_ARM64_REG_FP"),
         ("lr",  "UC_ARM64_REG_LR"),
+        # EL1 exception state (vector base, exception link, syndrome).
+        ("vbar_el1", "UC_ARM64_REG_VBAR_EL1"),
+        ("elr_el1",  "UC_ARM64_REG_ELR_EL1"),
+        ("esr_el1",  "UC_ARM64_REG_ESR_EL1"),
+        # Processor state (PSTATE carries DAIF/nRW; SPSR_EL1 has no dedicated
+        # Unicorn id, so callers that need it use the CP_REG path).
+        ("pstate", "UC_ARM64_REG_PSTATE"),
+        ("nzcv",   "UC_ARM64_REG_NZCV"),
+        # Other ELs, for images that boot through EL2/EL3 before dropping.
+        ("vbar_el2", "UC_ARM64_REG_VBAR_EL2"),
+        ("elr_el2",  "UC_ARM64_REG_ELR_EL2"),
+        ("vbar_el3", "UC_ARM64_REG_VBAR_EL3"),
+        ("elr_el3",  "UC_ARM64_REG_ELR_EL3"),
+        # MMU/control, useful to peripheral models and diagnostics.
+        ("sctlr_el1", "UC_ARM64_REG_SCTLR_EL1"),
+        ("ttbr0_el1", "UC_ARM64_REG_TTBR0_EL1"),
+        ("ttbr1_el1", "UC_ARM64_REG_TTBR1_EL1"),
+        ("cpacr_el1", "UC_ARM64_REG_CPACR_EL1"),
     ):
         v = getattr(arm64_const, reg, None)
         if v is not None:
@@ -195,6 +233,46 @@ def _get_ppc_reg_map(word: int = 4) -> Dict[str, int]:
     if "r1" in m:
         m["sp"] = m["r1"]
     _REG_MAPS_CACHE[cache_key] = m
+    return m
+
+
+def _get_sparc_reg_map() -> Dict[str, int]:
+    """SPARC V8 register map (LEON2/3/4/5).
+
+    SPARC names its integer registers by *window role* rather than by number:
+    %g0-%g7 are the globals (shared by every window), while %o/%l/%i are the
+    out/local/in registers of the CURRENT window -- a `save` rotates the window
+    so the caller's %o becomes the callee's %i. unicorn exposes the current
+    window's view, which is what a breakpoint handler wants.
+
+    The ABI aliases matter: %sp IS %o6 and %fp IS %i6 (verified against
+    unicorn's own constants, which give both names the same id), and the return
+    address of a `call` lands in %o7, not in a dedicated link register.
+    """
+    if "sparc" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["sparc"]
+    if sparc_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for prefix in ("g", "o", "l", "i"):
+        for idx in range(8):
+            const = getattr(sparc_const,
+                            f"UC_SPARC_REG_{prefix.upper()}{idx}", None)
+            if const is not None:
+                m[f"{prefix}{idx}"] = const
+    # ABI aliases. %sp/%fp are genuinely the same registers as %o6/%i6, so
+    # these are aliases rather than copies.
+    if "o6" in m:
+        m["sp"] = m["o6"]
+    if "i6" in m:
+        m["fp"] = m["i6"]
+    if "o7" in m:
+        m["ra"] = m["o7"]        # `call` writes its return address here
+    for name in ("pc", "y"):
+        const = getattr(sparc_const, f"UC_SPARC_REG_{name.upper()}", None)
+        if const is not None:
+            m[name] = const
+    _REG_MAPS_CACHE["sparc"] = m
     return m
 
 
@@ -268,6 +346,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_x86_reg_map()
     if uc_arch == "riscv":
         return _get_riscv_reg_map()
+    if uc_arch == "sparc":
+        return _get_sparc_reg_map()
     return {}
 
 
@@ -457,6 +537,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if mode_str.startswith("riscv64")
                 else unicorn.UC_MODE_RISCV32
             )
+        elif arch_str == "sparc":
+            uc_arch = unicorn.UC_ARCH_SPARC
+            # BIG_ENDIAN is REQUIRED, not a refinement: unicorn 2.1.4 rejects a
+            # bare UC_MODE_SPARC32 with UC_ERR_MODE (it has no little-endian
+            # SPARC32 CPU), so unlike MIPS this flag cannot be conditional on
+            # the mode string.
+            uc_mode = unicorn.UC_MODE_SPARC32 | unicorn.UC_MODE_BIG_ENDIAN
         else:
             raise ValueError(f"Unsupported arch for UnicornBackend: {arch_str!r}")
 
@@ -1417,12 +1504,22 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         base, size, region.name, exc)
 
     def _make_mmio_hook(self, region: MemoryRegion) -> Callable:
+        # A modelled read is served by writing the value into the mapped page
+        # and letting the guest load complete, so the bytes must be laid out in
+        # the GUEST's byte order. Hardcoding "little" byte-swaps every read
+        # wider than one byte on a big-endian target: a peripheral model
+        # returning 0xFFFFF3F8 was read by big-endian SPARC firmware as
+        # 0xF8F3FFFF. Byte-sized reads are unaffected, which is why this
+        # survived so long -- a driver that polls a status register one byte at
+        # a time never produces a multi-byte modelled read.
+        order = "big" if self._is_be else "little"
+
         def _hook(uc, access, addr, size, value, user_data):
             offset = addr - region.base_addr
             if access == unicorn.UC_MEM_READ and region.read_hook:
                 result = region.read_hook(offset, size)
                 if result is not None:
-                    data = result.to_bytes(size, "little")
+                    data = result.to_bytes(size, order)
                     uc.mem_write(addr, data)
             elif access == unicorn.UC_MEM_WRITE and region.write_hook:
                 region.write_hook(offset, size, value)
