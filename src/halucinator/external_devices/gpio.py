@@ -47,25 +47,20 @@ def update_gpio(emu_tx_port: int) -> None:
     context = zmq.Context()
     to_emu_socket = context.socket(zmq.PUB)
     to_emu_socket.connect("ipc:///tmp/IoServer2Halucinator%s" % emu_tx_port)
-    # Let the PUB/SUB connection establish before the first send. Without this
-    # settle a fast sender (the test harness; a script piping input) loses its
-    # opening messages to the zmq slow-joiner — a human typing at the prompt
-    # never noticed. Cheap and harmless for the interactive path.
+    # Let the PUB/SUB connection settle, or a fast sender (a test, a script
+    # piping input) loses its first messages to the zmq slow-joiner. Someone
+    # typing at the prompt never hit this.
     time.sleep(0.2)
 
     try:
         while (1):
-            # `input`, not Python 2's `raw_input` — the latter is not a builtin
-            # on any interpreter this package supports, so the loop raised
-            # NameError on its first iteration and update_gpio could never
-            # actually send a pin change.
+            # `input`, not Python 2's `raw_input` — this loop used to raise
+            # NameError on its first iteration and never sent anything.
             pin = input("Pin: ")
             value = input("Value: ")
             data = {'id': pin, 'value': int(value)}
             msg = encode_zmq_msg(topic, data)
-            # `send_string`, not `send` — encode_zmq_msg returns str and pyzmq
-            # refuses str on the bytes-oriented send() with
-            # "TypeError: unicode not allowed, use send_string".
+            # send_string: encode_zmq_msg returns str, which send() rejects.
             to_emu_socket.send_string(msg)
             time.sleep(0)
     except (KeyboardInterrupt, EOFError):

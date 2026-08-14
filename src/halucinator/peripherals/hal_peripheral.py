@@ -22,13 +22,11 @@ except ImportError:
     class _HandlerMap:
         """Stand-in for avatar2's interval-tree handler maps.
 
-        Peripheral models register accessors by slice assignment
-        (``self.read_handler[0:size] = self.hw_read``) and read them back by
-        slice for logging. avatar2 backs that with an IntervalTree. The
-        in-process backends never consult it -- main.py binds
-        ``region.read_hook``/``write_hook`` straight to ``hw_read``/``hw_write``
-        -- so an accept-and-remember container is enough to let
-        GenericPeripheral subclasses construct without avatar2 installed."""
+        Models register accessors by slice assignment
+        (``self.read_handler[0:size] = self.hw_read``). The in-process
+        backends never read them back — main.py binds the hooks straight to
+        hw_read/hw_write — so this just has to accept and remember them.
+        """
 
         def __init__(self) -> None:
             self._spans: list = []

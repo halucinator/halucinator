@@ -161,18 +161,12 @@ class TestUnicornArmDispatch:
 class TestUnicornGicIarModel:
     """Regression for the modelled GICv2 CPU interface.
 
-    An A-profile firmware's low-level IRQ handler reads GICC_IAR to learn which
-    interrupt just fired. The in-process backend has no real GIC, and that
-    address is typically shadowed by an AutoPeripheral catch-all whose read
-    default is NOT the acknowledged IRQ id — so without a model the handler
-    only ever sees the GICv2 spurious id 0x3FF and never dispatches the
-    delivered ISR — a handler whose drain loop polls GICC_IAR then reads the
-    spurious id forever, so a delivered system tick never reaches the guest's
-    scheduler and the boot goes idle.
-
-    set_delivery_plan models GICC_IAR (acked id once, then 0x3FF) and GICC_EOIR
-    only when the plan carries a gicc_base — i.e. only for GICv2 configs, never
-    for cortex-m / x86 / arm_vic ARM configs (no gicc_base).
+    An IRQ handler reads GICC_IAR to learn which interrupt fired. With no
+    model, an AutoPeripheral catch-all over that address answers instead, the
+    handler only ever sees the spurious id 0x3FF, and the delivered tick never
+    reaches the scheduler. set_delivery_plan models IAR (acked id once, then
+    0x3FF) and EOIR, but only when the plan carries a gicc_base — so cortex-m
+    / x86 / arm_vic are untouched.
     """
 
     GICC = 0x8000

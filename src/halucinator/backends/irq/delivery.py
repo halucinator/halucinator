@@ -284,18 +284,11 @@ class ArmExceptionDeliverer(ExceptionDeliverer):
         # (plan.gicc_base is None) — exactly matching old
         # ArmVicController.deliver, which never touched GICC_IAR.
         #
-        # Two mechanisms, because backends differ:
-        #   * `_gicc_iar_pending` — consumed by the in-process backend's
-        #     modelled GICC_IAR read (UnicornBackend.set_delivery_plan). This
-        #     is authoritative: it survives an AutoPeripheral catch-all mapped
-        #     over the CPU-interface page, which a plain memory write does not
-        #     (the catch-all's read hook would overwrite it with its default,
-        #     so the firmware would read the GICv2 spurious id 0x3FF forever
-        #     and never dispatch the delivered ISR).
-        #   * a raw GICC_IAR memory write — the legacy shadow, kept for
-        #     backends without the modelled interface (they read IAR straight
-        #     from memory). Harmless where the model is present (the model
-        #     wins on read).
+        # Both mechanisms, since backends differ: `_gicc_iar_pending` for the
+        # in-process modelled IAR (a plain memory write there would be
+        # overwritten by an AutoPeripheral catch-all over the same page), and
+        # the raw write for backends that read IAR straight from memory. The
+        # model wins on read, so setting both is harmless.
         if plan.gicc_base is not None:
             setattr(backend, "_gicc_iar_pending", int(num) & 0xFFFFFFFF)
             backend.write_memory(plan.gicc_base + _GICC_IAR_OFFSET, 4,

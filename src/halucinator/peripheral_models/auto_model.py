@@ -251,19 +251,14 @@ class AutoPeripheral(RecordingPeripheral):
         # (pc, addr) -> consecutive repeat count
         self._repeat: Dict[Tuple[int, int], int] = {}
         self._last_key: Optional[Tuple[int, int]] = None
-        # WINDOWED spin detection (interleaved-poll robust). The consecutive
-        # counter above resets whenever a DIFFERENT (pc, addr) is read, so a
-        # register polled in a loop that ALSO touches another register each
-        # iteration (status + timeout counter), or that is read from two PCs,
-        # never reaches ``stall_threshold`` even though it is a genuine
-        # never-exiting busy-wait. Track per-(pc,addr) read counts over a
-        # tumbling window of the last ``_stall_window`` reads; a key that
-        # DOMINATES the window (>= ``_stall_win_trigger`` of them) is a spin
-        # regardless of interleaving, and escalates through the same value
-        # tiers as the consecutive path via a persistent per-key level. The
-        # dominance bar (default 1/4 of an 8192-read window) is high enough
-        # that a register merely read often -- not spun on -- never trips it,
-        # preserving the conservative behaviour of the consecutive detector.
+        # Windowed spin detection. The consecutive counter above resets on any
+        # different (pc, addr), so a loop that polls a status register AND a
+        # timeout counter each iteration never reaches stall_threshold even
+        # though it never exits. Count reads per key over a tumbling window
+        # instead: a key taking >= _stall_win_trigger of the last
+        # _stall_window reads is spinning, interleaved or not. The default bar
+        # (a quarter of 8192 reads) is high enough that a merely busy register
+        # doesn't trip it.
         self._stall_window = (stall_window if stall_window is not None
                               else parse_int(os.environ.get(STALL_WINDOW_ENV),
                                              DEFAULT_STALL_WINDOW))
@@ -344,20 +339,12 @@ class AutoPeripheral(RecordingPeripheral):
 
     def _log_stall_tier(self, key: Tuple[int, int], what: str, pc: int,
                         addr: int, val: int, tier: int, suffix: str) -> None:
-        """Announce a busy-wait tier ONCE per (pc, addr, tier).
+        """Announce a busy-wait tier once per (pc, addr, tier).
 
-        These lines are emitted from inside the MMIO read hook, on the hot
-        path. Logging every read meant a spin that runs for millions of reads
-        -- which is the whole point of the escalation, and routine on a
-        calibrated-delay loop -- wrote millions of identical lines, drowning
-        the surrounding trace and slowing the run down enough to distort the
-        timing the firmware is measuring.
-
-        Once per tier is the actionable signal: the tier is what changed, and
-        it is what tells you which kind of wait was detected. In the counter
-        tier the returned value keeps advancing after this line -- that is by
-        design (the step grows so any finite threshold is crossed), and the
-        MMIO trace still carries every individual read if you need them.
+        This runs in the MMIO read hook. Logging every read buried the trace
+        under millions of identical lines on a long spin, and slowed the run
+        enough to skew the delay the firmware was timing. The tier change is
+        the part worth seeing; the MMIO trace still has every read.
         """
         tier_key = (key, tier)
         if tier_key in self._logged_stall_tiers:
@@ -400,19 +387,15 @@ class AutoPeripheral(RecordingPeripheral):
             self._repeat[key] = 0
             self._last_key = key
 
-        # Windowed spin detection (interleaved-poll robust, see __init__): a
-        # key that dominates the recent read window is a busy-wait even when
-        # interleaved with other reads, so the strict-consecutive run never
-        # reaches the threshold. Escalate through the same all-ones -> zero ->
-        # counter tiers, one step per read once dominance is reached, via a
-        # persistent per-key level.
+        # Windowed spin detection (see __init__): a key that dominates the
+        # recent window is a busy-wait even when interleaved with other reads.
+        # Escalates through the same all-ones -> zero -> counter tiers, one
+        # step per read.
         self._win_total += 1
         self._win[key] = self._win.get(key, 0) + 1
-        # Decide dominance BEFORE the window can roll over. Testing after the
-        # reset throws away the very read that reached the trigger: on the
-        # rollover read `self._win` is empty, so a key that had just qualified
-        # scores 0 and falls back to the strict-consecutive path for a whole
-        # further window.
+        # Check dominance before the window rolls over — testing after the
+        # reset drops the read that reached the trigger, and the key falls
+        # back to the consecutive path for another whole window.
         dominant = self._win[key] >= self._stall_win_trigger
         if self._win_total >= self._stall_window:
             self._win = {}
@@ -428,12 +411,9 @@ class AutoPeripheral(RecordingPeripheral):
                 cur = self._counter.get(key, 0) + (lvl - 1) * 0x10000
                 self._counter[key] = cur
                 wval = cur & self._mask(size)
-            # `lvl` is a per-read escalation counter, not a tier: it keeps
-            # climbing for as long as the spin lasts (that is what makes the
-            # counter step grow). Tiers 0 and 1 are the all-ones and zero
-            # constants; everything from 2 up IS the counter tier, so clamp
-            # before logging or the (key, tier) throttle key would be unique
-            # on every single read and throttle nothing.
+            # `lvl` climbs every read (that's what grows the counter step), so
+            # clamp it to a tier before logging — otherwise the throttle key
+            # is unique per read and throttles nothing.
             self._log_stall_tier(key, "WINDOWED busy-wait", pc, addr, wval,
                                  min(lvl, 2), " (interleaved poll)")
             return wval

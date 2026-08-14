@@ -337,40 +337,22 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # In-process IRQ state: the cross-thread pending-IRQ queue and the
         # HAL_DET_TICK deterministic-tick config (see InProcessIrqMixin).
         self._init_in_process_irq()
-        # ARM (A-profile) GICv2 CPU-interface model state. Populated only when
-        # a DeliveryPlan carrying a gicc_base is attached (see
-        # set_delivery_plan). `_gicc_iar_pending` holds the IRQ id an
-        # ArmExceptionDeliverer just acknowledged; the modelled GICC_IAR read
-        # returns it exactly once (then the GICv2 spurious id 0x3FF), so the
-        # firmware's GIC ISR reads the right interrupt number instead of the
-        # AutoPeripheral catch-all's default. Untouched on cortex-m / x86 and
-        # on arm_vic ARM configs (no gicc_base) — see the gate in
-        # set_delivery_plan.
+        # Modelled GICv2 CPU interface. _gicc_iar_pending holds the id the
+        # deliverer just acked; a GICC_IAR read returns it once, then the
+        # spurious id 0x3FF. Only set up when the plan carries a gicc_base.
         self._gicc_iar_pending: Optional[int] = None
         self._gicc_active_irq: Optional[int] = None
         self._gicc_iface_base: Optional[int] = None
-        # IRQ ids the firmware has enabled in the GIC distributor
-        # (GICD_ISENABLER writes) plus the distributor base. Used to gate the
-        # deterministic system-tick and its wall-clock backstop (below): a real
-        # GIC never delivers a line the firmware has not enabled, and gating on
-        # it also stops a premature tick firing during GIC/exception bring-up.
-        # Populated only when the GIC distributor base is known
-        # (set_delivery_plan); _gic_dist_base None => gating disabled
-        # (back-compat: arm_vic / cortex-m / x86 are unaffected).
+        # IRQs the firmware enabled via GICD_ISENABLER. Gates the tick, since
+        # a real GIC won't deliver a line that isn't enabled yet. No dist base
+        # (arm_vic / cortex-m / x86) means no gating.
         self._gic_enabled_irqs: set = set()
         self._gic_dist_base: Optional[int] = None
-        # Wall-clock BACKSTOP for the instruction-count tick pacer (A-profile /
-        # GIC only). The pacer only advances on an emu chunk that completes
-        # WITHOUT a breakpoint, so a config with densely hit breakpoints (a
-        # handler on a frequently called function, or a tight polling loop) can
-        # truncate nearly every chunk: the pacer stops advancing and the timer
-        # tick is never queued, even though the CPU keeps executing. Real timer
-        # hardware fires regardless, so when the pacer is active and its IRQ is
-        # GIC-enabled we ALSO queue the tick after HAL_DET_TICK_WALL_MS of wall
-        # time. Backstop only: the chunk-completion path fires first on a clean
-        # run and refreshes the timestamp, keeping the common case
-        # instruction-deterministic. Gated on _gic_dist_base, so cortex-m / x86
-        # / arm_vic configs are unaffected.
+        # Wall-clock backstop for the tick pacer. The pacer only advances on a
+        # chunk that finishes without hitting a breakpoint, so a config with
+        # busy breakpoints can starve it and the tick never fires. Real timers
+        # don't care what the CPU is doing, so also queue after
+        # HAL_DET_TICK_WALL_MS. The chunk path still wins on a clean run.
         self._det_last_wall: Optional[float] = None
         try:
             self._det_wall_s = max(0.0, float(
@@ -2063,13 +2045,10 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         else:
             irq_chunk = 0
         while True:
-            # Wall-clock backstop for the deterministic tick pacer: keep the
-            # guest system tick alive even when dense breakpoints truncate every
-            # instruction chunk (see __init__). Runs at the top of the loop — a
-            # clean instruction boundary (fresh entry, or a re-entry right after
-            # a bp) — so queuing the tick here is as safe as the chunk-completion
-            # path. A-profile / GIC only, and only once the firmware has enabled
-            # the tick IRQ line; non-GIC configs short-circuit on _gic_dist_base.
+            # Wall-clock backstop for the tick pacer (see __init__). Top of the
+            # loop is a clean instruction boundary, so queuing here is as safe
+            # as the chunk-completion path. GIC configs only, and only once the
+            # firmware has enabled the tick line.
             if (self._det_irq is not None and self._gic_dist_base is not None
                     and self._det_wall_s > 0.0
                     and self._det_irq in self._gic_enabled_irqs):
@@ -2296,20 +2275,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if self._det_irq is not None:
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
-                        # A clean chunk completed and is about to fire the tick:
-                        # refresh the wall-clock backstop so it stays quiet while
-                        # chunks keep completing (the deterministic path wins).
+                        # Chunks are completing, so keep the wall-clock
+                        # backstop quiet.
                         if self._gic_dist_base is not None:
                             import time as _dt_time2
                             self._det_last_wall = _dt_time2.monotonic()
-                        # Gate on GIC enable state when modelling the distributor:
-                        # a real GIC won't deliver a line the firmware hasn't
-                        # enabled, and injecting the tick during GIC/exception
-                        # bring-up (before GICD_ISENABLER) fires the ISR before
-                        # the timer + scheduler exist and derails the boot. When
-                        # the distributor base is unknown (_gic_dist_base is None)
-                        # we don't gate, so non-GIC / legacy configs are
-                        # unaffected.
+                        # A real GIC won't deliver a line the firmware hasn't
+                        # enabled yet, and a tick during exception bring-up
+                        # runs the ISR before the scheduler exists.
                         if (self._gic_dist_base is None
                                 or self._det_irq in self._gic_enabled_irqs):
                             self._pending_irqs.append(self._det_irq)
@@ -2529,34 +2502,20 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._vtor = vtor
 
     def set_delivery_plan(self, plan: Any) -> None:
-        """Attach the DeliveryPlan and, on A-profile ARM with a GICv2
-        CPU-interface base, install the modelled GICC_IAR / GICC_EOIR
-        registers.
+        """Attach the DeliveryPlan and, when it carries a GICv2 CPU-interface
+        base, model the two registers the ack/EOI handshake needs:
 
-        The in-process backend has no real GIC CPU interface: the firmware's
-        IRQ handler reads GICC_IAR to learn which interrupt just fired, but an
-        AutoPeripheral catch-all mapped over that address returns its default
-        (a spin-breaker value / 0), so the handler dispatches the wrong (or
-        no) ISR and never runs the delivered timer tick — the scheduler is
-        never entered and the boot wedges. Here we model just the two
-        CPU-interface registers the acknowledge/EOI handshake needs:
+          * GICC_IAR  (base+0x0C) read  -> the id the deliverer just acked,
+            once, then the spurious id 0x3FF.
+          * GICC_EOIR (base+0x10) write -> clears the active id.
 
-          * GICC_IAR  (base+0x0C) read  -> the IRQ id the ArmExceptionDeliverer
-            just acknowledged (``_gicc_iar_pending``), returned exactly once,
-            then the GICv2 spurious id 1023 (0x3FF). Reads with nothing pending
-            (e.g. the firmware's GIC drain loop) therefore correctly see 0x3FF,
-            never a phantom interrupt.
-          * GICC_EOIR (base+0x10) write -> end-of-interrupt: clears the active
-            id.
+        Without this the handler reads whatever the AutoPeripheral catch-all
+        over that address returns, dispatches the wrong ISR (or none) and the
+        tick never reaches the scheduler. These hooks register after the
+        per-region MMIO hooks, so they win on read.
 
-        These hooks register AFTER the per-region MMIO hooks (init() maps the
-        regions first; _wire_irq calls this later), so on an overlapping
-        AutoPeripheral range this hook fires last and its value wins on read.
-
-        Gated to A-profile ARM with a gicc_base: cortex-m (NVIC) and x86 (PIC)
-        never carry a gicc_base, and neither do arm_vic ARM configs (m340,
-        bmxnoe), so this is a no-op for the rest of the fleet. arm64 is
-        included for symmetry (same GICv2 CPU interface).
+        Only configs with a gicc_base get here — cortex-m, x86 and arm_vic
+        never carry one. arm64 is included, same CPU interface.
         """
         super().set_delivery_plan(plan)
         gicc_base = getattr(plan, "gicc_base", None) if plan is not None else None
@@ -2593,13 +2552,10 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         log.info("UnicornBackend: modelled GICv2 CPU interface at 0x%08x "
                  "(IAR=0x%08x, EOIR=0x%08x)", gicc_base, _IAR, _EOIR)
 
-        # Track GICD_ISENABLER / ICENABLER writes so the deterministic tick (and
-        # its wall-clock backstop) only fires once the firmware has enabled that
-        # IRQ line (see _gic_enabled_irqs / the tick gate in cont()). The
-        # distributor base comes from the configured GicController.
-        # GICD_ISENABLER<n> is at gicd_base+0x100+n*4 (32 IRQs per word);
-        # ICENABLER<n> at +0x180+n*4. No-op when the controller carries no
-        # gicd_base (arm_vic), so _gic_dist_base stays None and gating is off.
+        # Track GICD_ISENABLER / ICENABLER writes so the tick only fires once
+        # the firmware has enabled that line (see the gate in cont()).
+        # ISENABLER<n> is at gicd_base+0x100+n*4, ICENABLER<n> at +0x180+n*4,
+        # 32 IRQs per word. No gicd_base (arm_vic) means no gating.
         ctrl = getattr(self, "_irq_controller", None)
         gicd_base = getattr(ctrl, "gicd_base", None) if ctrl is not None else None
         if gicd_base is not None:

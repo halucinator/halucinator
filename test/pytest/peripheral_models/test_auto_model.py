@@ -237,9 +237,8 @@ class _Recorder:
 
 
 class TestStallLogging:
-    """The stall lines are emitted from inside the MMIO read hook. Logging one
-    per read turned a multi-million-read calibrated-delay spin into millions of
-    identical lines."""
+    """Stall lines come out of the MMIO read hook, so one per read turned a
+    long spin into millions of identical lines."""
 
     def test_consecutive_spin_logs_once_per_tier_not_per_read(self, hal_records):
         p = AutoPeripheral("mmio", 0x40000000, 0x100, stall_threshold=4)
@@ -262,21 +261,14 @@ class TestStallLogging:
             f"{len(hal_records.records)} log lines for two spinning registers")
 
     def test_the_read_that_reaches_the_trigger_is_not_discarded(self):
-        """The tumbling window was cleared BEFORE the dominance test, so on the
-        read where ``_win_total`` reached ``stall_window`` the key's count was
-        already wiped to 0 and that read was denied the escalation it had just
-        earned.
+        """The window used to be cleared before the dominance test, so the read
+        that rolled it over lost the escalation it had just earned — one read
+        per window. (Counts restarting after a rollover is the tumbling window
+        working as intended, and is not what this checks.)
 
-        The cost is exactly one read per window -- small, but it is the read at
-        the boundary, and the fix is free. Note what this does NOT claim: after
-        a rollover the counts genuinely restart, so a key must re-accumulate
-        ``trigger`` reads before dominating again. That gap is the tumbling
-        window working as designed, not a bug.
-
-        Sized so the arithmetic is checkable by hand: trigger =
-        max(stall_threshold=4, stall_window=8 // div=4 -> 2) = 4, one key, so
-        reads 4..8 of each 8-read window dominate -- five of them, and the
-        fifth is the rollover read.
+        Sized for hand-checking: trigger = max(4, 8 // 4) = 4, one key, so
+        reads 4..8 of each 8-read window dominate and the fifth is the
+        rollover read.
         """
         p = AutoPeripheral("mmio", 0x40000000, 0x100, stall_threshold=4,
                            stall_window=8, stall_win_div=4)
