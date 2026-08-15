@@ -7,6 +7,7 @@ This is the halucinator entry point
 from __future__ import annotations
 
 from argparse import ArgumentParser
+import inspect
 import logging
 from multiprocessing import Lock
 import threading
@@ -1045,8 +1046,22 @@ def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
                     name, memory.name)
         return None
     kwargs: Dict[str, Any] = {}
+    # Forward the run's MMIO-trace path to any peripheral that accepts one.
+    # This argument was accepted here but never passed on, so the recording
+    # peripherals were always built with their default db_path=None and no
+    # trace was ever persisted. Gated on the signature: most peripherals take
+    # no db_path and would raise TypeError.
+    try:
+        params = inspect.signature(cls).parameters
+        takes_db = "db_path" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):  # pragma: no cover
+        takes_db = False
+    if takes_db and db_path is not None:
+        kwargs["db_path"] = db_path
     # Pull peripheral-specific kwargs from the YAML `properties` block
     # (HalMemConfig.properties is the generic per-peripheral dict slot).
+    # Applied last so a device can override the default path.
     extra = getattr(memory, "properties", None)
     if isinstance(extra, dict):
         kwargs.update(extra)
@@ -1177,6 +1192,21 @@ def _emulate_with_unicorn_backend(
     periph_thread.start()
 
     def _shutdown() -> None:
+        # Persist any buffered MMIO trace BEFORE tearing the backend down.
+        # The recording peripherals only evaluate their flush condition inside
+        # an access, so a run that issues fewer than FLUSH_EVERY accesses --
+        # or that simply stops touching MMIO after early boot -- never writes
+        # its tail, and killing the process loses the trace entirely. That is
+        # most of a short bring-up run, which is exactly when the trace is
+        # wanted.
+        for _p in auto_peripherals:
+            _flush = getattr(_p, "flush", None)
+            if callable(_flush):
+                try:
+                    _flush()
+                except Exception:  # noqa: BLE001 - never block shutdown
+                    log.exception("peripheral %s: trace flush failed",
+                                  getattr(_p, "name", _p))
         try:
             backend.shutdown()
         except Exception:  # noqa: BLE001
