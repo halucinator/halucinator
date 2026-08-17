@@ -345,6 +345,20 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             )
         self.config = config
         self.arch_name = arch
+        # Breakpoint keys drop bit 0 because on 32-bit ARM that bit is the
+        # Thumb interworking flag, not part of the address -- a bp requested at
+        # `func|1` and a PC of `func` must be the same key.
+        #
+        # That is only sound where instructions are at least 2-byte aligned,
+        # which holds for every architecture here EXCEPT x86, whose
+        # instructions are byte-aligned and genuinely do live at odd
+        # addresses. Masking there was wrong twice over: a breakpoint on an odd
+        # address was installed on its even neighbour (so it never fired where
+        # asked, and did fire on an unrelated instruction), and the two
+        # instructions at `a` and `a|1` collapsed onto one key, firing the same
+        # handler on both. In HAL_FAST_BP mode the range hook is bounded by the
+        # masked address as well, so the intended PC is never even hooked.
+        self._bp_addr_mask = 0xFFFFFFFF if arch == "x86" else 0xFFFFFFFE
         self._uc: Optional[Any] = None           # unicorn.Uc instance
         self._regions: List[MemoryRegion] = []
         self._bp_hooks: Dict[int, Tuple[int, Any]] = {}  # bp_id → (addr, hook_h)
@@ -1478,8 +1492,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
     def _code_hook(self, uc, addr: int, size: int, user_data: Any) -> None:
         """Called for every instruction; checks if addr is a breakpoint."""
         # Thumb bit lives in the low bit of PC on 32-bit ARM; for other archs
-        # instructions are at least 2-byte aligned so masking bit 0 is a no-op.
-        pc = addr & ~1
+        # instructions are at least 2-byte aligned so masking bit 0 is a no-op
+        # -- except on x86, where odd addresses are real. See _bp_addr_mask.
+        pc = addr & self._bp_addr_mask
         if pc in self._breakpoints:
             # One-shot skip: an observe-only handler just ran at this bp and
             # asked to resume the real function. Let this single instruction
@@ -1952,7 +1967,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # a nasty source of flaky, order-dependent execution.
         self._skip_bp_once = None
         try:
-            self._bp_hit_addr = self.read_register("pc") & 0xFFFFFFFE
+            # Same key space as _breakpoints / _skip_bp_once -- masking
+            # differently here would make the one-shot skip miss on x86.
+            self._bp_hit_addr = self.read_register("pc") & self._bp_addr_mask
         except Exception:  # noqa: BLE001
             self._bp_hit_addr = None
         return True
@@ -2006,7 +2023,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         """Fast-bp mode: install a range-bounded UC_HOOK_CODE for one breakpoint
         address so Unicorn only enters _code_hook at that PC (blocks elsewhere
         run at full JIT speed). No-op unless the engine is up."""
-        a = addr & 0xFFFFFFFE
+        a = addr & self._bp_addr_mask
         if self._uc is None or a in self._per_bp_hooks:
             return
         self._per_bp_hooks[a] = self._uc.hook_add(
@@ -2017,7 +2034,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         bp_id = self._next_bp_id
         self._next_bp_id += 1
         # Store with Thumb bit cleared for comparison in _code_hook
-        self._breakpoints[addr & 0xFFFFFFFE] = bp_id
+        self._breakpoints[addr & self._bp_addr_mask] = bp_id
         if self._fast_bp_active:
             self._install_bp_hook(addr)
         return bp_id
