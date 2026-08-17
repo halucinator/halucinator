@@ -37,30 +37,23 @@ class InProcessIrqMixin:
     _prefer_shadow_irq: bool = False
 
     # -- Cortex-M EXC_RETURN -----------------------------------------------
-    # A PC in the EXC_RETURN range is an ISR doing `bx lr`.
+    # -- Cortex-M EXC_RETURN -----------------------------------------------
+    # A PC in the EXC_RETURN range is an ISR doing `bx lr`. On a part with an
+    # FPU the value also carries bit 4 = "no floating-point context stacked",
+    # so an FP-context return is 0xFFFFFFE1/E9/ED.
     _EXC_RETURN_THREAD_MSP = 0xFFFFFFF9
-    # Match bits[31:7], which is the field the architecture actually defines.
-    # Matching the top nibble (0xFFFFFFF0) misses two whole classes of legal
-    # EXC_RETURN, and both failures are silent -- the value is not recognised as
-    # an exception return, so the ISR's `bx lr` is executed as an ordinary
-    # branch to an address near 0xFFFFFFFF and the core faults there forever,
-    # while the host-side seam keeps reporting a healthy run because it binds
-    # regardless of what the guest is doing:
+    # Bits[31:7], not bits[31:5]. ARMv8-M puts two more flags below the v7-M
+    # ones -- bit 6 = S (secure), bit 5 = DCRS -- so a plain non-secure thread
+    # return is 0xFFFFFFBC, which a 0xFFFFFFE0 window misses. Nothing complains
+    # when that happens: the value is not taken for an exception return, the
+    # ISR's `bx lr` branches to 0xFFFFFFBC as if it were an address, and the
+    # core faults there for the rest of the run while the host side carries on
+    # reporting a healthy boot. An nRF9160 rehost produced 1.8 GB of
+    # `CPU exception 3 at pc=0xffffffbc` in four minutes this way.
     #
-    #   * FP context. On a part with an FPU, bit 4 = "no floating-point context
-    #     stacked", so an FP-context return is 0xFFFFFFE1 / E9 / ED.
-    #   * ARMv8-M. Bit 6 = S (secure) and bit 5 = DCRS sit *below* the v7-M flag
-    #     bits, so a default non-secure thread return is 0xFFFFFFBC.
-    #
-    # Measured on an nRF9160 (Cortex-M33) rehost: 1.8 GB of
-    # `CPU exception 3 at pc=0xffffffbc` in four minutes, versus a clean run
-    # once the window is widened.
-    #
-    # 0xFFFFFF80 is a strict superset of the old window -- the new test sweeps
-    # every value the top-nibble mask matched and asserts it still matches -- so
-    # no currently-working v7-M target can be affected. The range
-    # 0xFFFFFF80..0xFFFFFFFF is architecturally reserved for exactly this
-    # purpose, so nothing else can legitimately land in it.
+    # Widening only ever adds values, and the test sweeps the old window to
+    # prove it. 0xFFFFFF80..0xFFFFFFFF is reserved for EXC_RETURN, so there is
+    # nothing else that could legitimately land in the range we gained.
     _EXC_RETURN_MASK = 0xFFFFFF80
     _EXC_RETURN_MAGIC = 0xFFFFFF80
 
@@ -159,19 +152,49 @@ class InProcessIrqMixin:
             self._apply_pending_irq_shadow(irq_num)
             return
         if arch == "x86":
-            # x86 delivery lives in X86ExceptionDeliverer; the configured
-            # X86PicController.deliver is a thin shim over it that carries the
-            # runtime-learned clock ISR. Runs on the dispatch thread here, so
-            # mutating EIP/ESP is safe.
-            ctrl = getattr(self, "_irq_controller", None)
-            if ctrl is not None and hasattr(ctrl, "deliver"):
-                ctrl.deliver(self)
-            else:
-                log.warning("inject_irq(%d): x86 has no X86PicController "
-                            "configured; tick dropped", irq_num)
+            self._apply_pending_irq_x86(irq_num)
             return
         # Cortex-M (and any un-migrated arch): backend-provided frame push.
         self._apply_cortex_m_fallback(irq_num)
+
+    # -- x86 FRAME delivery -----------------------------------------------
+    def _apply_pending_irq_x86(self, irq_num: int) -> None:
+        """Deliver an x86 IRQ by building the hardware interrupt frame and
+        vectoring at the firmware's IDT stub.
+
+        Resolves the DeliveryPlan the same way every other arch here does
+        (``machine.irq_delivery`` first, legacy ``interrupt_controller``
+        fields second), and passes ``irq_num`` through, so a plan carrying a
+        per-IRQ ``vectors`` map can land IRQ0 and IRQ4 on different stubs.
+        A clock ISR learned at run time (VxWorks ``sysClkConnect`` calls the
+        controller's ``register_clock_isr``) still wins when the plan has no
+        ``isr_addr`` of its own."""
+        from halucinator.backends.irq.delivery import (
+            DeliveryModel, DeliveryPlan, X86ExceptionDeliverer)
+
+        ctrl = getattr(self, "_irq_controller", None)
+
+        def _legacy(controller):
+            return DeliveryPlan(
+                model=DeliveryModel.FRAME,
+                isr_addr=getattr(controller, "isr_addr", None) if controller else None,
+                extra={
+                    "int_ent": getattr(controller, "int_ent", None) if controller else None,
+                    "int_exit": getattr(controller, "int_exit", None) if controller else None,
+                    "stub_addr": getattr(controller, "stub_addr", 0x7000) if controller else 0x7000,
+                    "isr_arg": getattr(controller, "isr_arg", 0) if controller else 0,
+                },
+            )
+
+        plan = self._resolve_delivery_plan(_legacy)
+        if plan is None:
+            log.warning("inject_irq(%d): x86 has no delivery plan or "
+                        "interrupt controller configured; IRQ dropped", irq_num)
+            return
+        if plan.isr_addr is None and ctrl is not None:
+            # Run-time-learned ISR (register_clock_isr).
+            plan.isr_addr = getattr(ctrl, "isr_addr", None)
+        X86ExceptionDeliverer().deliver(self, irq_num, plan)
 
     # -- shared SHADOW delivery -------------------------------------------
     def _apply_pending_irq_shadow(self, irq_num: int) -> None:

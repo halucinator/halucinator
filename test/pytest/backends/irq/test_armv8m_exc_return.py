@@ -1,21 +1,20 @@
 # Copyright 2026 Christopher Wright
-"""EXC_RETURN matching must cover FP-context and ARMv8-M values.
+"""ARMv8-M EXC_RETURN values have to be recognised too.
 
-``_decode_exc_return_frame`` matched the top nibble
-(``pc & 0xFFFFFFF0 == 0xFFFFFFF0``), which misses two whole classes of legal
-EXC_RETURN: FP-context returns (bit 4 clear -> 0xFFFFFFE1 / E9 / ED) and every
-ARMv8-M value, since bit 6 = S and bit 5 = DCRS sit below the v7-M flag bits
-(a default non-secure thread return is 0xFFFFFFBC).
+`_decode_exc_return_frame` matches `pc & MASK == MAGIC`. A 0xFFFFFFE0 window
+covers everything v7-M can produce, FP-context returns included. ARMv8-M adds
+two flags underneath those bits -- bit 6 = S (secure), bit 5 = DCRS -- so a
+plain non-secure thread return of 0xFFFFFFBC lands outside it.
 
-The consequence is silent. The value is not recognised as an exception return,
-so the ISR's ``bx lr`` executes as an ordinary branch to 0xFFFFFFBC and the
-core faults there forever -- while ``booted`` still reports true, because the
-host-side seam binds regardless of what the guest is doing. Measured on
-device-golioth-nrf9160 (nRF9160, Cortex-M33): 1.8 GB of
-``CPU exception 3 at pc=0xffffffbc`` in four minutes.
+Nothing complains when that happens. The value is not taken for an exception
+return, so the ISR's `bx lr` branches to 0xFFFFFFBC as if it were an address
+and the core faults there for the rest of the run, while the host side keeps
+reporting a healthy boot because it binds regardless of the guest. An nRF9160
+(Cortex-M33) rehost produced 1.8 GB of `CPU exception 3 at pc=0xffffffbc` in
+four minutes before this was found.
 
-Bits[31:7] is the architecturally defined field and is a strict superset of
-the v7-M window, so widening cannot affect a v7-M target.
+Bits[31:7] is the field the architecture defines. The v7-M cases below are kept
+as a guard: widening must not lose anything that already worked.
 """
 import pytest
 
@@ -75,8 +74,10 @@ def test_window_is_bits_31_to_7():
 
 
 def test_window_is_a_strict_superset_of_the_v7m_window():
-    """Widening must not have dropped anything the old window matched."""
-    old_mask = old_magic = 0xFFFFFFF0
+    """Sweep every value the previous 0xFFFFFFE0 window matched; all must still
+    match. This is the whole safety argument for widening, so it is checked
+    exhaustively rather than by sampling."""
+    old_mask = old_magic = 0xFFFFFFE0
     for pc in range(0xFFFFFF00, 0x100000000, 4):
         if (pc & old_mask) == old_magic:
             assert _matches(pc), "0x%08X matched before and does not now" % pc

@@ -16,9 +16,20 @@ try:
     from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
     from avatar2.archs.mips import MIPS_BE
     from avatar2.archs.x86 import X86
+    try:
+        # Little-endian MIPS32 (PIC32 and similar). Older avatar2 releases only
+        # ship MIPS_BE. Fall back to None rather than to MIPS_BE: aliasing them
+        # would hand a mipsel config a BIG-endian avatar arch and every
+        # multi-byte access would be byte-swapped with nothing to indicate it.
+        # None makes the avatar/qemu path fail loudly instead, and the
+        # in-process unicorn backend -- the only one that actually runs mipsel
+        # -- does not consult this field at all.
+        from avatar2.archs.mips import MIPS_LE
+    except ImportError:  # pragma: no cover
+        MIPS_LE = None
 except ImportError:  # pragma: no cover - exercised by avatar2-less installs
     ARM_CORTEX_M3 = ARM = ARM64 = PPC32 = PPC64 = PPC_MPC8544DS = None
-    MIPS_BE = X86 = None
+    MIPS_BE = MIPS_LE = X86 = None
 
 import halucinator
 
@@ -70,6 +81,25 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
                 _QEMU_DEFAULT_LOC, "mips-softmmu/qemu-system-mips"
             ),
         },
+        # Little-endian MIPS32 ("mipsel"): the endianness used by Microchip
+        # PIC32 and most embedded MIPS SoCs that are not routers. Runs on the
+        # in-process unicorn backend (which reads mode from its own arch table).
+        #
+        # NOTE the env var is HALUCINATOR_QEMU_MIPSEL, deliberately NOT the
+        # HALUCINATOR_QEMU_MIPS that big-endian mips uses. Sharing it would be
+        # actively dangerous: CI and the fleet already export
+        # HALUCINATOR_QEMU_MIPS pointing at qemu-system-mips, a BIG-endian
+        # emulator, so a mipsel config on the qemu path would silently boot the
+        # wrong endianness and look like a corrupt image rather than a
+        # misconfiguration.
+        "mipsel": {
+            "avatar_arch": MIPS_LE,
+            "qemu_target": lambda: _qemu_target("MIPSQemuTarget"),
+            "qemu_env_var": "HALUCINATOR_QEMU_MIPSEL",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "mipsel-softmmu/qemu-system-mipsel"
+            ),
+        },
         "powerpc": {
             "avatar_arch": PPC32,
             "qemu_target": lambda: _qemu_target("PowerPCQemuTarget"),
@@ -103,6 +133,35 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "i386-softmmu/qemu-system-i386"
             ),
+        },
+        # RV32 (RISC-V, 32-bit, little-endian). In-process unicorn backend only:
+        # avatar2 has no RISC-V arch and the fleet's qemu build ships no
+        # riscv-softmmu, so avatar_arch is None and the qemu_target lambda is a
+        # tripwire -- it is never invoked on the unicorn path (which reads the
+        # mode straight from unicorn_backend._ARCH_MAP). Registered here purely so
+        # HalConfig's `arch not in HALUCINATOR_TARGETS` validation accepts the
+        # config. Covers RV32IMAC bare-metal images (DRAM base 0x8000_0000).
+        "riscv32": {
+            "avatar_arch": None,
+            "qemu_target": lambda: (_ for _ in ()).throw(
+                NotImplementedError(
+                    "riscv32 runs on the in-process unicorn backend only "
+                    "(--emulator unicorn); no avatar2/qemu RISC-V target")),
+            "qemu_env_var": "HALUCINATOR_QEMU_RISCV32",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "riscv32-softmmu/qemu-system-riscv32"
+            ),
+        },
+        # Infineon TriCore (AURIX TC2xx/TC3xx). In-process (unicorn) only:
+        # avatar2 has no TriCore arch, and there is no tricore-softmmu QEMU in
+        # the deps build, so `avatar_arch`/`qemu_target` stay None. The entry
+        # exists so hal_config accepts `arch: tricore` and the unicorn backend
+        # can resolve it.
+        "tricore": {
+            "avatar_arch": None,
+            "qemu_target": None,
+            "qemu_env_var": "HALUCINATOR_QEMU_TRICORE",
+            "qemu_default_path": None,
         },
         # SPARC V8, 32-bit, big-endian -- the Gaisler LEON2/3/4/5 SoC family
         # (ESA/NASA spaceflight avionics). In-process unicorn backend only:

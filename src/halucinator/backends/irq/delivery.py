@@ -279,11 +279,18 @@ class ArmExceptionDeliverer(ExceptionDeliverer):
         backend.write_register("lr", (pc + 4) & 0xFFFFFFFF)
         backend.write_register("spsr", cpsr)
 
-        # GIC path only: stash the acknowledged id into the GICC_IAR shadow
-        # so the firmware ISR reads the right interrupt number. Absent on
-        # the VIC path (plan.gicc_base is None) — exactly matching old
+        # GIC path only: stash the acknowledged id so the firmware ISR reads
+        # the right interrupt number from GICC_IAR. Absent on the VIC path
+        # (plan.gicc_base is None) — exactly matching old
         # ArmVicController.deliver, which never touched GICC_IAR.
+        #
+        # Both mechanisms, since backends differ: `_gicc_iar_pending` for the
+        # in-process modelled IAR (a plain memory write there would be
+        # overwritten by an AutoPeripheral catch-all over the same page), and
+        # the raw write for backends that read IAR straight from memory. The
+        # model wins on read, so setting both is harmless.
         if plan.gicc_base is not None:
+            setattr(backend, "_gicc_iar_pending", int(num) & 0xFFFFFFFF)
             backend.write_memory(plan.gicc_base + _GICC_IAR_OFFSET, 4,
                                  int(num) & 0xFFFFFFFF)
 
@@ -414,6 +421,33 @@ class ShadowExceptionDeliverer(ExceptionDeliverer):
 _EFLAGS_IF = 1 << 9   # interrupt-enable flag
 
 
+def _parse_vector_key(key) -> Optional[int]:
+    """An IRQ number from a ``vectors:`` mapping key, or None if unusable.
+
+    The keys come from user YAML, so they arrive as ints (``4:``) or as any
+    string a human might type (``"4"``, ``"0x4"``, ``" 4 "``, ``"04"``).
+    ``int(s, 0)`` alone is not enough: base 0 applies Python's *literal* rules
+    and REJECTS a leading zero, so a perfectly reasonable ``"04":`` raised
+    ValueError out of the middle of interrupt delivery and took the run down.
+    Fall back to base 10 for that case, and skip a key that is not a number at
+    all with a warning rather than letting it propagate -- one typo in a config
+    should not kill the emulation.
+    """
+    if isinstance(key, bool):          # bool is an int subclass; not a vector
+        return None
+    if isinstance(key, int):
+        return key
+    text = str(key).strip()
+    for base in (0, 10):
+        try:
+            return int(text, base)
+        except ValueError:
+            continue
+    log.warning("x86_pic: vectors: key %r is not an IRQ number — ignoring",
+                key)
+    return None
+
+
 class X86ExceptionDeliverer(ExceptionDeliverer):
     """Synthesised x86/i386 PC interrupt entry for in-process unicorn
     (replaces ``X86PicController.deliver``). Unicorn's x86 model does not
@@ -427,18 +461,36 @@ class X86ExceptionDeliverer(ExceptionDeliverer):
     kernel stub fields in ``extra`` (``int_ent``/``int_exit``/``stub_addr``/
     ``isr_arg``). The assembled-stub cache lives on the backend
     (``_x86_stub_*``), not the deliverer, so a single deliverer instance is
-    stateless across backends. ``num`` is unused (a single clock tick)."""
+    stateless across backends.
+
+    ``num`` selects the entry point when the plan carries a per-IRQ vector
+    map in ``extra["vectors"]`` (``{irq_num: entry_addr}``) — a PC has 16
+    IRQ lines and an OS that installs one IDT stub per line (NuttX's
+    ``vector_irqN``), so a device that needs both the 8254 tick and, say, a
+    16550 receive interrupt cannot be served by a single ``isr_addr``. An
+    unmapped ``num`` falls back to ``isr_addr``, which is what a
+    single-clock target (the VxWorks RTU) configures."""
 
     arch = "x86"
 
     def deliver(self, backend: "HalBackend", num: int,
                 plan: DeliveryPlan) -> bool:
         setattr(backend, "_last_delivered_irq", int(num))
+        vectors = plan.extra.get("vectors") or {}
         isr_addr = plan.isr_addr
+        if vectors:
+            # YAML mapping keys may arrive as str ("4:") or int (4:).
+            for key, addr in vectors.items():
+                parsed = _parse_vector_key(key)
+                if parsed is None:
+                    continue
+                if parsed == int(num):
+                    isr_addr = int(addr)
+                    break
         if isr_addr is None:
-            log.warning("x86_pic: tick fired but no clock ISR known yet "
-                        "(sysClkConnect not seen, no isr_addr configured) "
-                        "— dropping")
+            log.warning("x86_pic: IRQ %s fired but no ISR known yet "
+                        "(sysClkConnect not seen, no isr_addr/vectors "
+                        "configured) — dropping", num)
             return False
         eflags = backend.read_register("eflags")
         if not (eflags & _EFLAGS_IF):
@@ -452,7 +504,12 @@ class X86ExceptionDeliverer(ExceptionDeliverer):
         cs = backend.read_register("cs")
         esp = backend.read_register("esp")
 
-        target = self._ensure_stub(backend, plan)
+        # The int_ent/int_exit stub wraps the plan's single `isr_addr`; a
+        # per-IRQ vector from the map is an IDT stub in its own right and is
+        # entered directly.
+        target = None
+        if isr_addr == plan.isr_addr:
+            target = self._ensure_stub(backend, plan)
         if target is None:
             target = isr_addr
 
