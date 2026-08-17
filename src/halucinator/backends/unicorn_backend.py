@@ -476,6 +476,28 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # In-process IRQ state: the cross-thread pending-IRQ queue and the
         # HAL_DET_TICK deterministic-tick config (see InProcessIrqMixin).
         self._init_in_process_irq()
+        # Modelled GICv2 CPU interface. _gicc_iar_pending holds the id the
+        # deliverer just acked; a GICC_IAR read returns it once, then the
+        # spurious id 0x3FF. Only set up when the plan carries a gicc_base.
+        self._gicc_iar_pending: Optional[int] = None
+        self._gicc_active_irq: Optional[int] = None
+        self._gicc_iface_base: Optional[int] = None
+        # IRQs the firmware enabled via GICD_ISENABLER. Gates the tick, since
+        # a real GIC won't deliver a line that isn't enabled yet. No dist base
+        # (arm_vic / cortex-m / x86) means no gating.
+        self._gic_enabled_irqs: set = set()
+        self._gic_dist_base: Optional[int] = None
+        # Wall-clock backstop for the tick pacer. The pacer only advances on a
+        # chunk that finishes without hitting a breakpoint, so a config with
+        # busy breakpoints can starve it and the tick never fires. Real timers
+        # don't care what the CPU is doing, so also queue after
+        # HAL_DET_TICK_WALL_MS. The chunk path still wins on a clean run.
+        self._det_last_wall: Optional[float] = None
+        try:
+            self._det_wall_s = max(0.0, float(
+                _os.environ.get("HAL_DET_TICK_WALL_MS", "10")) / 1000.0)
+        except Exception:  # noqa: BLE001
+            self._det_wall_s = 0.010
         # x86: when _intr_hook resolves a far control transfer (#GP from a
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
@@ -2184,6 +2206,21 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         else:
             irq_chunk = 0
         while True:
+            # Wall-clock backstop for the tick pacer (see __init__). Top of the
+            # loop is a clean instruction boundary, so queuing here is as safe
+            # as the chunk-completion path. GIC configs only, and only once the
+            # firmware has enabled the tick line.
+            if (self._det_irq is not None and self._gic_dist_base is not None
+                    and self._det_wall_s > 0.0
+                    and self._det_irq in self._gic_enabled_irqs):
+                import time as _dt_time
+                _now_wall = _dt_time.monotonic()
+                if self._det_last_wall is None:
+                    self._det_last_wall = _now_wall
+                elif (_now_wall - self._det_last_wall >= self._det_wall_s
+                        and self._det_irq not in self._pending_irqs):
+                    self._det_last_wall = _now_wall
+                    self._pending_irqs.append(self._det_irq)
             # Drain any IRQs queued from another thread before
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
@@ -2399,7 +2436,17 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if self._det_irq is not None:
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
-                        self._pending_irqs.append(self._det_irq)
+                        # Chunks are completing, so keep the wall-clock
+                        # backstop quiet.
+                        if self._gic_dist_base is not None:
+                            import time as _dt_time2
+                            self._det_last_wall = _dt_time2.monotonic()
+                        # A real GIC won't deliver a line the firmware hasn't
+                        # enabled yet, and a tick during exception bring-up
+                        # runs the ISR before the scheduler exists.
+                        if (self._gic_dist_base is None
+                                or self._det_irq in self._gic_enabled_irqs):
+                            self._pending_irqs.append(self._det_irq)
                 continue
             return
 
@@ -2614,6 +2661,91 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
     def set_vtor(self, vtor: int) -> None:
         """Remember the vector-table base so inject_irq can find ISRs."""
         self._vtor = vtor
+
+    def set_delivery_plan(self, plan: Any) -> None:
+        """Attach the DeliveryPlan and, when it carries a GICv2 CPU-interface
+        base, model the two registers the ack/EOI handshake needs:
+
+          * GICC_IAR  (base+0x0C) read  -> the id the deliverer just acked,
+            once, then the spurious id 0x3FF.
+          * GICC_EOIR (base+0x10) write -> clears the active id.
+
+        Without this the handler reads whatever the AutoPeripheral catch-all
+        over that address returns, dispatches the wrong ISR (or none) and the
+        tick never reaches the scheduler. These hooks register after the
+        per-region MMIO hooks, so they win on read.
+
+        Only configs with a gicc_base get here — cortex-m, x86 and arm_vic
+        never carry one. arm64 is included, same CPU interface.
+        """
+        super().set_delivery_plan(plan)
+        gicc_base = getattr(plan, "gicc_base", None) if plan is not None else None
+        if (gicc_base is None or self._uc is None
+                or self.arch_name not in ("arm", "arm64")):
+            return
+        if self._gicc_iface_base == gicc_base:
+            return  # already installed for this base
+        self._gicc_iface_base = gicc_base
+        _IAR = gicc_base + 0x0C
+        _EOIR = gicc_base + 0x10
+        _GICV2_SPURIOUS = 0x3FF
+
+        def _iar_read(uc, access, addr, size, value, user_data):
+            pend = self._gicc_iar_pending
+            if pend is not None:
+                self._gicc_iar_pending = None
+                self._gicc_active_irq = pend
+                val = pend & 0xFFFFFFFF
+            else:
+                val = _GICV2_SPURIOUS
+            try:
+                uc.mem_write(addr, val.to_bytes(size, "little"))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _eoir_write(uc, access, addr, size, value, user_data):
+            self._gicc_active_irq = None
+
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_READ, _iar_read,
+                          begin=_IAR, end=_IAR + 3)
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _eoir_write,
+                          begin=_EOIR, end=_EOIR + 3)
+        log.info("UnicornBackend: modelled GICv2 CPU interface at 0x%08x "
+                 "(IAR=0x%08x, EOIR=0x%08x)", gicc_base, _IAR, _EOIR)
+
+        # Track GICD_ISENABLER / ICENABLER writes so the tick only fires once
+        # the firmware has enabled that line (see the gate in cont()).
+        # ISENABLER<n> is at gicd_base+0x100+n*4, ICENABLER<n> at +0x180+n*4,
+        # 32 IRQs per word. No gicd_base (arm_vic) means no gating.
+        ctrl = getattr(self, "_irq_controller", None)
+        gicd_base = getattr(ctrl, "gicd_base", None) if ctrl is not None else None
+        if gicd_base is not None:
+            self._gic_dist_base = gicd_base
+            _ISEN0 = gicd_base + 0x100
+            _ICEN0 = gicd_base + 0x180
+
+            def _isenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ISEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.add(base + b)
+
+            def _icenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ICEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.discard(base + b)
+
+            # Cover ISENABLER0..3 / ICENABLER0..3 (IRQs 0..127 — SGIs, PPIs and
+            # the first SPIs, which is all a small SoC uses).
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _isenabler_write,
+                              begin=_ISEN0, end=_ISEN0 + 0x10 - 1)
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icenabler_write,
+                              begin=_ICEN0, end=_ICEN0 + 0x10 - 1)
 
     # ARMv7-A CPSR mode bits.
     _ARM_MODE_USER = 0x10
