@@ -16,9 +16,20 @@ try:
     from avatar2 import ARM_CORTEX_M3, ARM, ARM64, PPC32, PPC64, PPC_MPC8544DS
     from avatar2.archs.mips import MIPS_BE
     from avatar2.archs.x86 import X86
+    try:
+        # Little-endian MIPS32 (PIC32 and similar). Older avatar2 releases only
+        # ship MIPS_BE. Fall back to None rather than to MIPS_BE: aliasing them
+        # would hand a mipsel config a BIG-endian avatar arch and every
+        # multi-byte access would be byte-swapped with nothing to indicate it.
+        # None makes the avatar/qemu path fail loudly instead, and the
+        # in-process unicorn backend -- the only one that actually runs mipsel
+        # -- does not consult this field at all.
+        from avatar2.archs.mips import MIPS_LE
+    except ImportError:  # pragma: no cover
+        MIPS_LE = None
 except ImportError:  # pragma: no cover - exercised by avatar2-less installs
     ARM_CORTEX_M3 = ARM = ARM64 = PPC32 = PPC64 = PPC_MPC8544DS = None
-    MIPS_BE = X86 = None
+    MIPS_BE = MIPS_LE = X86 = None
 
 import halucinator
 
@@ -68,6 +79,25 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
             "qemu_env_var": "HALUCINATOR_QEMU_MIPS",
             "qemu_default_path": os.path.join(
                 _QEMU_DEFAULT_LOC, "mips-softmmu/qemu-system-mips"
+            ),
+        },
+        # Little-endian MIPS32 ("mipsel"): the endianness used by Microchip
+        # PIC32 and most embedded MIPS SoCs that are not routers. Runs on the
+        # in-process unicorn backend (which reads mode from its own arch table).
+        #
+        # NOTE the env var is HALUCINATOR_QEMU_MIPSEL, deliberately NOT the
+        # HALUCINATOR_QEMU_MIPS that big-endian mips uses. Sharing it would be
+        # actively dangerous: CI and the fleet already export
+        # HALUCINATOR_QEMU_MIPS pointing at qemu-system-mips, a BIG-endian
+        # emulator, so a mipsel config on the qemu path would silently boot the
+        # wrong endianness and look like a corrupt image rather than a
+        # misconfiguration.
+        "mipsel": {
+            "avatar_arch": MIPS_LE,
+            "qemu_target": lambda: _qemu_target("MIPSQemuTarget"),
+            "qemu_env_var": "HALUCINATOR_QEMU_MIPSEL",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "mipsel-softmmu/qemu-system-mipsel"
             ),
         },
         "powerpc": {
