@@ -47,6 +47,10 @@ try:
     except ImportError:
         x86_const = None  # type: ignore[assignment]
     try:
+        import unicorn.tricore_const as tricore_const
+    except ImportError:
+        tricore_const = None  # type: ignore[assignment]
+    try:
         import unicorn.sparc_const as sparc_const
     except ImportError:
         sparc_const = None  # type: ignore[assignment]
@@ -59,6 +63,7 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    tricore_const = None  # type: ignore[assignment]
     sparc_const = None  # type: ignore[assignment]
 
 
@@ -80,6 +85,14 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # Infineon TriCore (AURIX TC2xx/TC3xx). Little-endian, 32-bit.
+    #
+    # NOTE: Unicorn exposes NO `UC_MODE_TRICORE*` constant -- the only mode
+    # value `uc_open(UC_ARCH_TRICORE, ...)` accepts is 0
+    # (UC_MODE_LITTLE_ENDIAN); every other value fails UC_ERR_ARG. The CPU
+    # model is selected by `uc_ctl_set_cpu_model` (TC1796/TC1797/TC27X), not by
+    # the mode.
+    "tricore":        ("tricore", "tricore", False, False, 4),
     # SPARC V8, 32-bit, big-endian -- the ISA of the Gaisler LEON2/3/4/5 SoCs
     # used across ESA/NASA spaceflight avionics. LEON is V8, NOT V9: SPARC64/V9
     # is the unsupported one in unicorn. Note UC_MODE_SPARC32 must be OR'd with
@@ -117,6 +130,50 @@ def _get_arm_reg_map() -> Dict[str, int]:
         "spsr": arm_const.UC_ARM_REG_SPSR,
     }
     _REG_MAPS_CACHE["arm"] = m
+    return m
+
+
+def _get_tricore_reg_map() -> Dict[str, int]:
+    """Infineon TriCore: 16 data (d0-d15) + 16 address (a0-a15) registers.
+
+    ``a10`` is the stack pointer and ``a11`` the return address (written by
+    ``call``); TriCore has no separate ``lr``/``sp`` register, so ``sp``/``ra``
+    are exposed as aliases onto a10/a11 and ``lr`` onto a11 as well, so generic
+    core code that asks for ``sp``/``lr`` works unchanged.
+    """
+    if "tricore" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["tricore"]
+    if tricore_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for i in range(16):
+        for bank in ("d", "a"):
+            v = getattr(tricore_const, f"UC_TRICORE_REG_{bank.upper()}{i}", None)
+            if v is not None:
+                m[f"{bank}{i}"] = v
+    # PC + the context/state CSFRs an intercept or a trap model needs.
+    for name, reg in (
+        ("pc",   "UC_TRICORE_REG_PC"),
+        ("psw",  "UC_TRICORE_REG_PSW"),
+        ("pcxi", "UC_TRICORE_REG_PCXI"),
+        ("fcx",  "UC_TRICORE_REG_FCX"),
+        ("lcx",  "UC_TRICORE_REG_LCX"),
+        ("biv",  "UC_TRICORE_REG_BIV"),
+        ("btv",  "UC_TRICORE_REG_BTV"),
+        ("isp",  "UC_TRICORE_REG_ISP"),
+        ("icr",  "UC_TRICORE_REG_ICR"),
+        ("syscon", "UC_TRICORE_REG_SYSCON"),
+    ):
+        v = getattr(tricore_const, reg, None)
+        if v is not None:
+            m[name] = v
+    # Aliases so arch-generic core code (sp/lr lookups) resolves.
+    if "a10" in m:
+        m["sp"] = m["a10"]
+    if "a11" in m:
+        m["ra"] = m["a11"]
+        m["lr"] = m["a11"]
+    _REG_MAPS_CACHE["tricore"] = m
     return m
 
 
@@ -300,6 +357,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_arm64_reg_map()
     if uc_arch == "mips":
         return _get_mips_reg_map()
+    if uc_arch == "tricore":
+        return _get_tricore_reg_map()
     if uc_arch == "ppc":
         word = info[4]
         return _get_ppc_reg_map(word)
@@ -487,6 +546,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "tricore":
+            uc_arch = unicorn.UC_ARCH_TRICORE
+            # Unicorn accepts ONLY mode 0 for TriCore (see _ARCH_MAP note);
+            # UC_MODE_LITTLE_ENDIAN is 0 and states the intent.
+            uc_mode = unicorn.UC_MODE_LITTLE_ENDIAN
         elif arch_str == "sparc":
             uc_arch = unicorn.UC_ARCH_SPARC
             # BIG_ENDIAN is REQUIRED, not a refinement: unicorn 2.1.4 rejects a
