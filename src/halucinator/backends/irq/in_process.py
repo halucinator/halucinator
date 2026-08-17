@@ -142,19 +142,49 @@ class InProcessIrqMixin:
             self._apply_pending_irq_shadow(irq_num)
             return
         if arch == "x86":
-            # x86 delivery lives in X86ExceptionDeliverer; the configured
-            # X86PicController.deliver is a thin shim over it that carries the
-            # runtime-learned clock ISR. Runs on the dispatch thread here, so
-            # mutating EIP/ESP is safe.
-            ctrl = getattr(self, "_irq_controller", None)
-            if ctrl is not None and hasattr(ctrl, "deliver"):
-                ctrl.deliver(self)
-            else:
-                log.warning("inject_irq(%d): x86 has no X86PicController "
-                            "configured; tick dropped", irq_num)
+            self._apply_pending_irq_x86(irq_num)
             return
         # Cortex-M (and any un-migrated arch): backend-provided frame push.
         self._apply_cortex_m_fallback(irq_num)
+
+    # -- x86 FRAME delivery -----------------------------------------------
+    def _apply_pending_irq_x86(self, irq_num: int) -> None:
+        """Deliver an x86 IRQ by building the hardware interrupt frame and
+        vectoring at the firmware's IDT stub.
+
+        Resolves the DeliveryPlan the same way every other arch here does
+        (``machine.irq_delivery`` first, legacy ``interrupt_controller``
+        fields second), and passes ``irq_num`` through, so a plan carrying a
+        per-IRQ ``vectors`` map can land IRQ0 and IRQ4 on different stubs.
+        A clock ISR learned at run time (VxWorks ``sysClkConnect`` calls the
+        controller's ``register_clock_isr``) still wins when the plan has no
+        ``isr_addr`` of its own."""
+        from halucinator.backends.irq.delivery import (
+            DeliveryModel, DeliveryPlan, X86ExceptionDeliverer)
+
+        ctrl = getattr(self, "_irq_controller", None)
+
+        def _legacy(controller):
+            return DeliveryPlan(
+                model=DeliveryModel.FRAME,
+                isr_addr=getattr(controller, "isr_addr", None) if controller else None,
+                extra={
+                    "int_ent": getattr(controller, "int_ent", None) if controller else None,
+                    "int_exit": getattr(controller, "int_exit", None) if controller else None,
+                    "stub_addr": getattr(controller, "stub_addr", 0x7000) if controller else 0x7000,
+                    "isr_arg": getattr(controller, "isr_arg", 0) if controller else 0,
+                },
+            )
+
+        plan = self._resolve_delivery_plan(_legacy)
+        if plan is None:
+            log.warning("inject_irq(%d): x86 has no delivery plan or "
+                        "interrupt controller configured; IRQ dropped", irq_num)
+            return
+        if plan.isr_addr is None and ctrl is not None:
+            # Run-time-learned ISR (register_clock_isr).
+            plan.isr_addr = getattr(ctrl, "isr_addr", None)
+        X86ExceptionDeliverer().deliver(self, irq_num, plan)
 
     # -- shared SHADOW delivery -------------------------------------------
     def _apply_pending_irq_shadow(self, irq_num: int) -> None:
