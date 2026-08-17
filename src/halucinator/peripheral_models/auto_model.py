@@ -65,7 +65,11 @@ COUNTER64_ADDRS_ENV = "HAL_AUTO_COUNTER64_ADDRS"
 COUNTER_STEP_ENV = "HAL_AUTO_COUNTER_STEP"
 MMIO_LOG_ENV = "HAL_MMIO_LOG"
 NO_MMIO_TRACE_ENV = "HAL_NO_MMIO_TRACE"
+STALL_WINDOW_ENV = "HAL_AUTO_STALL_WINDOW"
+STALL_DIV_ENV = "HAL_AUTO_STALL_DIV"
 DEFAULT_COUNTER_STEP = 0x1000
+DEFAULT_STALL_WINDOW = 8192
+DEFAULT_STALL_DIV = 4
 
 
 def _tokens(raw: str) -> Iterable[str]:
@@ -116,6 +120,16 @@ def parse_counter_step(raw: Optional[str]) -> int:
         return int(raw, 0)
     except ValueError:
         return DEFAULT_COUNTER_STEP
+
+
+def parse_int(raw: Optional[str], default: int) -> int:
+    """``int(raw, 0)`` with a fallback for missing/garbage input."""
+    if not raw:
+        return default
+    try:
+        return int(raw, 0)
+    except ValueError:
+        return default
 
 
 def mmio_log_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -225,6 +239,8 @@ class AutoPeripheral(RecordingPeripheral):
     def __init__(self, name: str, address: int, size: int,
                  db_path: Optional[str] = None,
                  stall_threshold: int = 16,
+                 stall_window: Optional[int] = None,
+                 stall_win_div: Optional[int] = None,
                  counter_addrs: Optional[Iterable[int]] = None,
                  counter64_addrs: Optional[Dict[int, int]] = None,
                  counter_step: Optional[int] = None,
@@ -235,6 +251,24 @@ class AutoPeripheral(RecordingPeripheral):
         # (pc, addr) -> consecutive repeat count
         self._repeat: Dict[Tuple[int, int], int] = {}
         self._last_key: Optional[Tuple[int, int]] = None
+        # Windowed spin detection. The consecutive counter above resets on any
+        # different (pc, addr), so a loop that polls a status register AND a
+        # timeout counter each iteration never reaches stall_threshold even
+        # though it never exits. Count reads per key over a tumbling window
+        # instead: a key taking >= _stall_win_trigger of the last
+        # _stall_window reads is spinning, interleaved or not. The default bar
+        # (a quarter of 8192 reads) is high enough that a merely busy register
+        # doesn't trip it.
+        self._stall_window = (stall_window if stall_window is not None
+                              else parse_int(os.environ.get(STALL_WINDOW_ENV),
+                                             DEFAULT_STALL_WINDOW))
+        _div = (stall_win_div if stall_win_div is not None
+                else parse_int(os.environ.get(STALL_DIV_ENV), DEFAULT_STALL_DIV))
+        self._stall_win_trigger = max(self.stall_threshold,
+                                      self._stall_window // max(1, _div))
+        self._win: Dict[Tuple[int, int], int] = {}
+        self._win_total = 0
+        self._win_escal: Dict[Tuple[int, int], int] = {}
         # (pc, addr) -> cached value that broke the stall
         self._cached: Dict[Tuple[int, int], int] = {}
         # (pc, addr) -> running value for free-running-counter registers
@@ -297,9 +331,28 @@ class AutoPeripheral(RecordingPeripheral):
         self._mmio_log = (mmio_log_enabled() if mmio_log is None
                           else bool(mmio_log))
         self._logged_reads: set = set()
+        # (key, tier) pairs already announced — see _log_stall_tier.
+        self._logged_stall_tiers: set = set()
 
     def _mask(self, size: int) -> int:
         return (1 << (8 * size)) - 1
+
+    def _log_stall_tier(self, key: Tuple[int, int], what: str, pc: int,
+                        addr: int, val: int, tier: int, suffix: str) -> None:
+        """Announce a busy-wait tier once per (pc, addr, tier).
+
+        This runs in the MMIO read hook. Logging every read buried the trace
+        under millions of identical lines on a long spin, and slowed the run
+        enough to skew the delay the firmware was timing. The tier change is
+        the part worth seeing; the MMIO trace still has every read.
+        """
+        tier_key = (key, tier)
+        if tier_key in self._logged_stall_tiers:
+            return
+        self._logged_stall_tiers.add(tier_key)
+        hlog.info(
+            "AutoPeripheral: %s at pc=0x%08x addr=0x%08x -> 0x%x (tier %d)%s",
+            what, pc, addr, val, tier, suffix)
 
     def hw_read(self, offset: int, size: int, pc: int = 0xBAADBAAD, **kwargs: Any) -> int:
         addr = self.address + offset
@@ -334,6 +387,37 @@ class AutoPeripheral(RecordingPeripheral):
             self._repeat[key] = 0
             self._last_key = key
 
+        # Windowed spin detection (see __init__): a key that dominates the
+        # recent window is a busy-wait even when interleaved with other reads.
+        # Escalates through the same all-ones -> zero -> counter tiers, one
+        # step per read.
+        self._win_total += 1
+        self._win[key] = self._win.get(key, 0) + 1
+        # Check dominance before the window rolls over — testing after the
+        # reset drops the read that reached the trigger, and the key falls
+        # back to the consecutive path for another whole window.
+        dominant = self._win[key] >= self._stall_win_trigger
+        if self._win_total >= self._stall_window:
+            self._win = {}
+            self._win_total = 0
+        if dominant:
+            lvl = self._win_escal.get(key, 0)
+            self._win_escal[key] = lvl + 1
+            if lvl == 0:
+                wval = self._mask(size)
+            elif lvl == 1:
+                wval = 0
+            else:
+                cur = self._counter.get(key, 0) + (lvl - 1) * 0x10000
+                self._counter[key] = cur
+                wval = cur & self._mask(size)
+            # `lvl` climbs every read (that's what grows the counter step), so
+            # clamp it to a tier before logging — otherwise the throttle key
+            # is unique per read and throttles nothing.
+            self._log_stall_tier(key, "WINDOWED busy-wait", pc, addr, wval,
+                                 min(lvl, 2), " (interleaved poll)")
+            return wval
+
         n = self._repeat[key]
         if n >= self.stall_threshold:
             t = self.stall_threshold
@@ -349,15 +433,16 @@ class AutoPeripheral(RecordingPeripheral):
             #      with the spin so any finite threshold is crossed quickly.
             if n < t * 2:
                 val = self._mask(size)
+                tier = 0
             elif n < t * 3:
                 val = 0
+                tier = 1
             else:
                 cur = self._counter.get(key, 0) + (n - t * 3 + 1) * 0x10000
                 self._counter[key] = cur
                 val = cur & self._mask(size)
-            hlog.info(
-                "AutoPeripheral: busy-wait at pc=0x%08x addr=0x%08x -> 0x%x",
-                pc, addr, val)
+                tier = 2
+            self._log_stall_tier(key, "busy-wait", pc, addr, val, tier, "")
             return val
         if self._mmio_log and key not in self._logged_reads:
             self._logged_reads.add(key)
