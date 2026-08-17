@@ -423,6 +423,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._next_bp_id = 1
         self._stopped = True
         self._bp_hit_addr: Optional[int] = None
+        self._det_chunk_pending: int = 0   # see cont(): banked tick credit
         # One-shot: when set, _code_hook lets execution pass this breakpoint
         # address ONCE without stopping. Used to step over a breakpoint after
         # an observe-only (non-intercept) bp_handler so the real function runs.
@@ -2446,7 +2447,20 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # Pace the deterministic tick on INSTRUCTIONS, not chunks: the
             # chunk length is now adaptive, so a chunk-based pacer makes the
             # tick rate swing by orders of magnitude with the interrupt state.
-            self._det_insns = getattr(self, "_det_insns", 0) + _chunk
+            #
+            # BANK the credit here; it is paid out below only once the run has
+            # actually completed the chunk. Paying it here -- unconditionally,
+            # before emu_start -- would count a pass cut short at its very first
+            # instruction as a full chunk of guest execution. On a device with
+            # dense function-boundary intercepts that is nearly every pass: each
+            # intercept stops the run and banks a whole chunk of imaginary
+            # instructions, so the tick fires once per _det_period *intercepts*
+            # rather than once per _det_period *chunks*, inflated by the entire
+            # chunk length. With a large chunk the tick storms hard enough that
+            # the guest re-enters its tick handler faster than it can leave, and
+            # the rehost livelocks with no diagnostic: execution continues, the
+            # ISR runs, and no forward progress is ever made.
+            self._det_chunk_pending = _chunk
             try:
                 self._uc.emu_start(start, until, timeout=0, count=_chunk)
             except unicorn.UcError as _uc_err:
@@ -2648,6 +2662,18 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # chunk; with the pacer behind that `continue` the system tick
             # STARVES COMPLETELY -- the RTOS runs but every vTaskDelay blocks
             # forever, with no diagnostic. Observed on m68k/FreeRTOS.
+            # Pay out the banked chunk only if this pass ran it. `not
+            # self._stopped` is exactly "emu_start returned on count/until
+            # rather than on an emu_stop from a breakpoint hook", i.e. the guest
+            # really did retire the chunk. This is the rule the wall-clock
+            # backstop in __init__ already documents -- "the pacer only advances
+            # on a chunk that finishes without hitting a breakpoint" -- and both
+            # firing sites below already require `not self._stopped`, so only
+            # the accrual changes.
+            if irq_chunk and not self._stopped:
+                self._det_insns = (getattr(self, "_det_insns", 0)
+                                   + getattr(self, "_det_chunk_pending", 0))
+            self._det_chunk_pending = 0
             if (irq_chunk and not self._stopped and self._det_irq is not None
                     and getattr(self, "_det_insns", 0)
                     >= self._det_period * irq_chunk):
