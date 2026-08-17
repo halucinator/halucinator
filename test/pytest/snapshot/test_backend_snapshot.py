@@ -201,12 +201,11 @@ class TestUnicornNative:
         assert after_regs == before_regs, "registers not identical after restore"
 
     def test_portable_snapshot_preserves_banked_sp_when_unprivileged(self):
-        """Regression (KNOWN-ISSUE-cortexm-portable-snapshot-msp): an
-        MPU-hardened Cortex-M runs its tasks unprivileged (CONTROL.nPRIV=1),
-        where MRS of the banked MSP/PSP reads back 0. A portable snapshot must
-        capture — and restore — the TRUE stack pointers, or the guest faults at
-        its next exception, pushing a frame at address 0 hundreds of ms from the
-        cause."""
+        """An MPU Cortex-M runs its tasks unprivileged (CONTROL.nPRIV=1), and
+        MRS of the banked MSP/PSP reads 0 there. Snapshot has to capture the
+        real values, and put them back. Otherwise the guest survives the
+        restore and dies at its next exception, pushing a frame at 0.
+        """
         from unicorn import arm_const as A
         b = _make_unicorn()
         msp, psp = RAM_BASE + 0x3000, RAM_BASE + 0x2000
@@ -214,12 +213,12 @@ class TestUnicornNative:
         b._uc.reg_write(A.UC_ARM_REG_PSP, psp)
         b._uc.reg_write(A.UC_ARM_REG_CONTROL, 0x3)   # unprivileged, PSP-selected
 
-        # Capture must record the true SPs, not the unprivileged-read zeros.
+        # Not the zeros an unprivileged read would give.
         captured = b._capture_portable_regs()["m_sysregs"]
         assert captured["msp"] == msp, "portable capture zeroed MSP (unprivileged)"
         assert captured["psp"] == psp, "portable capture zeroed PSP (unprivileged)"
 
-        # A full portable round-trip restores them after they are clobbered.
+        # Round-trip: clobber the SPs, restore, check they came back.
         snap = b.save_state(portable=True)
 
         def _priv(fn):

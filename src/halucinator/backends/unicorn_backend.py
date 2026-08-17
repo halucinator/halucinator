@@ -1699,25 +1699,27 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     pass
 
     def _with_m_profile_privilege(self, fn):
-        """Run ``fn()`` with the M-profile core temporarily in handler mode.
+        """Run fn() with the core briefly in handler mode.
 
-        unicorn/QEMU return **0** for the banked MSP/PSP (and silently ignore
-        writes to them) whenever the core is *unprivileged* — which is exactly
-        how every MPU-hardened RTOS runs its tasks (``CONTROL.nPRIV=1``; the
-        FreeRTOS ``ARM_CM4_MPU`` port sets ``CONTROL=3`` in
-        ``prvRestoreContextOfFirstTask``). Handler mode (``IPSR != 0``) is
-        privileged, so entering it lets the true banked stack pointers be read
-        and written; ``IPSR`` is then restored exactly and nothing else in
-        xPSR is touched. No-op if already in handler mode, or if this unicorn
-        build has no ``IPSR`` constant. Mirrors the exception-entry path, which
-        uses the same trick to reach the banked SPs."""
+        Reading MSP/PSP unprivileged gives 0, and writing them does nothing --
+        QEMU's MRS/MSR helpers require privilege for the banked SPs. An MPU
+        RTOS runs its tasks unprivileged (FreeRTOS ARM_CM4_MPU sets CONTROL=3
+        in prvRestoreContextOfFirstTask), so the snapshot path has to get out
+        of that state before it can see the real stack pointers.
+
+        IPSR != 0 means handler mode, which is privileged. Set it, do the work,
+        put it back. Nothing else in xPSR is touched. Already in handler mode,
+        or no IPSR constant in this unicorn build: nothing to do.
+
+        Exception entry uses the same trick.
+        """
         ipsr_rid = getattr(arm_const, "UC_ARM_REG_IPSR", None)
         if ipsr_rid is None:
             return fn()
         saved = self._uc.reg_read(ipsr_rid)
         entered = saved == 0
         if entered:
-            # Any non-zero exception number selects handler mode (privileged).
+            # Any non-zero exception number gets us handler mode.
             self._uc.reg_write(ipsr_rid, 2)
         try:
             return fn()
@@ -1748,12 +1750,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 except Exception:  # noqa: BLE001
                     continue
 
-            # MSP/PSP just read back as 0 if the guest is unprivileged (an MPU
-            # RTOS task, CONTROL.nPRIV=1) — MRS of the banked SPs needs
-            # privilege. Re-read them under handler-mode privilege so the TRUE
-            # stack pointers are captured; otherwise the restore writes
-            # MSP=PSP=0 and the machine faults at the next exception, pushing
-            # its frame at address 0 hundreds of ms from the cause.
+            # The loop above read MSP/PSP without privilege, so on an MPU
+            # guest (CONTROL.nPRIV=1) both came back 0. Re-read them properly.
+            # Skipping this costs you MSP=PSP=0 in the snapshot, and the
+            # restore writes those back happily -- it blows up later, at the
+            # next exception, pushing a frame at address 0.
             def _reread_banked_sps():
                 for s in ("MSP", "PSP"):
                     rid = getattr(arm_const, f"UC_ARM_REG_{s}", None)
@@ -1794,13 +1795,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._restore_vfp(state["vfp"])
         if "banked" in state:
             self._restore_banked_regs(state["banked"])
-        # Write the M-profile system registers under handler-mode privilege:
-        # an MSR to the banked MSP/PSP is IGNORED while the core is
-        # unprivileged, so a snapshot restored after CONTROL.nPRIV is set back
-        # would drop the stack pointers on the floor (the capture-side twin of
-        # the zeroing bug). Handler mode makes the writes stick regardless of
-        # the CONTROL value being restored; IPSR is restored afterward, and the
-        # final cpsr write below sets the architectural mode.
+        # Same privilege problem on the way back in: an MSR to MSP/PSP is
+        # dropped if we are unprivileged when we get here, which depends on
+        # whatever CONTROL the snapshot happens to restore. Do the writes in
+        # handler mode so they stick either way. The cpsr write further down
+        # sets the real mode.
         def _write_m_sysregs():
             for suffix_l, value in state.get("m_sysregs", {}).items():
                 rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
