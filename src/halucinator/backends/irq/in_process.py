@@ -37,10 +37,15 @@ class InProcessIrqMixin:
     _prefer_shadow_irq: bool = False
 
     # -- Cortex-M EXC_RETURN -----------------------------------------------
-    # A PC whose top nibble matches EXC_RETURN_MAGIC is an ISR doing `bx lr`.
+    # A PC in the EXC_RETURN range is an ISR doing `bx lr`. On a part with an
+    # FPU the value also carries bit 4 = "no floating-point context stacked",
+    # so an FP-context return is 0xFFFFFFE1/E9/ED -- masking to the top nibble
+    # (0xFFFFFFFx) silently fails to recognise those, and the ISR's `bx lr`
+    # is then executed as a branch to an unmapped address. Match bits 31:5
+    # instead, which is what the architecture defines.
     _EXC_RETURN_THREAD_MSP = 0xFFFFFFF9
-    _EXC_RETURN_MASK = 0xFFFFFFF0
-    _EXC_RETURN_MAGIC = 0xFFFFFFF0
+    _EXC_RETURN_MASK = 0xFFFFFFE0
+    _EXC_RETURN_MAGIC = 0xFFFFFFE0
 
     def _decode_exc_return_frame(self, pc: int):
         """If *pc* is a Cortex-M EXC_RETURN magic value, read and unpack the
