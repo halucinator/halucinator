@@ -47,6 +47,10 @@ try:
     except ImportError:
         x86_const = None  # type: ignore[assignment]
     try:
+        import unicorn.tricore_const as tricore_const
+    except ImportError:
+        tricore_const = None  # type: ignore[assignment]
+    try:
         import unicorn.sparc_const as sparc_const
     except ImportError:
         sparc_const = None  # type: ignore[assignment]
@@ -59,6 +63,7 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    tricore_const = None  # type: ignore[assignment]
     sparc_const = None  # type: ignore[assignment]
 
 
@@ -80,6 +85,14 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # Infineon TriCore (AURIX TC2xx/TC3xx). Little-endian, 32-bit.
+    #
+    # NOTE: Unicorn exposes NO `UC_MODE_TRICORE*` constant -- the only mode
+    # value `uc_open(UC_ARCH_TRICORE, ...)` accepts is 0
+    # (UC_MODE_LITTLE_ENDIAN); every other value fails UC_ERR_ARG. The CPU
+    # model is selected by `uc_ctl_set_cpu_model` (TC1796/TC1797/TC27X), not by
+    # the mode.
+    "tricore":        ("tricore", "tricore", False, False, 4),
     # SPARC V8, 32-bit, big-endian -- the ISA of the Gaisler LEON2/3/4/5 SoCs
     # used across ESA/NASA spaceflight avionics. LEON is V8, NOT V9: SPARC64/V9
     # is the unsupported one in unicorn. Note UC_MODE_SPARC32 must be OR'd with
@@ -117,6 +130,50 @@ def _get_arm_reg_map() -> Dict[str, int]:
         "spsr": arm_const.UC_ARM_REG_SPSR,
     }
     _REG_MAPS_CACHE["arm"] = m
+    return m
+
+
+def _get_tricore_reg_map() -> Dict[str, int]:
+    """Infineon TriCore: 16 data (d0-d15) + 16 address (a0-a15) registers.
+
+    ``a10`` is the stack pointer and ``a11`` the return address (written by
+    ``call``); TriCore has no separate ``lr``/``sp`` register, so ``sp``/``ra``
+    are exposed as aliases onto a10/a11 and ``lr`` onto a11 as well, so generic
+    core code that asks for ``sp``/``lr`` works unchanged.
+    """
+    if "tricore" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["tricore"]
+    if tricore_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for i in range(16):
+        for bank in ("d", "a"):
+            v = getattr(tricore_const, f"UC_TRICORE_REG_{bank.upper()}{i}", None)
+            if v is not None:
+                m[f"{bank}{i}"] = v
+    # PC + the context/state CSFRs an intercept or a trap model needs.
+    for name, reg in (
+        ("pc",   "UC_TRICORE_REG_PC"),
+        ("psw",  "UC_TRICORE_REG_PSW"),
+        ("pcxi", "UC_TRICORE_REG_PCXI"),
+        ("fcx",  "UC_TRICORE_REG_FCX"),
+        ("lcx",  "UC_TRICORE_REG_LCX"),
+        ("biv",  "UC_TRICORE_REG_BIV"),
+        ("btv",  "UC_TRICORE_REG_BTV"),
+        ("isp",  "UC_TRICORE_REG_ISP"),
+        ("icr",  "UC_TRICORE_REG_ICR"),
+        ("syscon", "UC_TRICORE_REG_SYSCON"),
+    ):
+        v = getattr(tricore_const, reg, None)
+        if v is not None:
+            m[name] = v
+    # Aliases so arch-generic core code (sp/lr lookups) resolves.
+    if "a10" in m:
+        m["sp"] = m["a10"]
+    if "a11" in m:
+        m["ra"] = m["a11"]
+        m["lr"] = m["a11"]
+    _REG_MAPS_CACHE["tricore"] = m
     return m
 
 
@@ -300,6 +357,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_arm64_reg_map()
     if uc_arch == "mips":
         return _get_mips_reg_map()
+    if uc_arch == "tricore":
+        return _get_tricore_reg_map()
     if uc_arch == "ppc":
         word = info[4]
         return _get_ppc_reg_map(word)
@@ -430,6 +489,28 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # In-process IRQ state: the cross-thread pending-IRQ queue and the
         # HAL_DET_TICK deterministic-tick config (see InProcessIrqMixin).
         self._init_in_process_irq()
+        # Modelled GICv2 CPU interface. _gicc_iar_pending holds the id the
+        # deliverer just acked; a GICC_IAR read returns it once, then the
+        # spurious id 0x3FF. Only set up when the plan carries a gicc_base.
+        self._gicc_iar_pending: Optional[int] = None
+        self._gicc_active_irq: Optional[int] = None
+        self._gicc_iface_base: Optional[int] = None
+        # IRQs the firmware enabled via GICD_ISENABLER. Gates the tick, since
+        # a real GIC won't deliver a line that isn't enabled yet. No dist base
+        # (arm_vic / cortex-m / x86) means no gating.
+        self._gic_enabled_irqs: set = set()
+        self._gic_dist_base: Optional[int] = None
+        # Wall-clock backstop for the tick pacer. The pacer only advances on a
+        # chunk that finishes without hitting a breakpoint, so a config with
+        # busy breakpoints can starve it and the tick never fires. Real timers
+        # don't care what the CPU is doing, so also queue after
+        # HAL_DET_TICK_WALL_MS. The chunk path still wins on a clean run.
+        self._det_last_wall: Optional[float] = None
+        try:
+            self._det_wall_s = max(0.0, float(
+                _os.environ.get("HAL_DET_TICK_WALL_MS", "10")) / 1000.0)
+        except Exception:  # noqa: BLE001
+            self._det_wall_s = 0.010
         # x86: when _intr_hook resolves a far control transfer (#GP from a
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
@@ -505,6 +586,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "tricore":
+            uc_arch = unicorn.UC_ARCH_TRICORE
+            # Unicorn accepts ONLY mode 0 for TriCore (see _ARCH_MAP note);
+            # UC_MODE_LITTLE_ENDIAN is 0 and states the intent.
+            uc_mode = unicorn.UC_MODE_LITTLE_ENDIAN
         elif arch_str == "sparc":
             uc_arch = unicorn.UC_ARCH_SPARC
             # BIG_ENDIAN is REQUIRED, not a refinement: unicorn 2.1.4 rejects a
@@ -2290,6 +2376,21 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         else:
             irq_chunk = 0
         while True:
+            # Wall-clock backstop for the tick pacer (see __init__). Top of the
+            # loop is a clean instruction boundary, so queuing here is as safe
+            # as the chunk-completion path. GIC configs only, and only once the
+            # firmware has enabled the tick line.
+            if (self._det_irq is not None and self._gic_dist_base is not None
+                    and self._det_wall_s > 0.0
+                    and self._det_irq in self._gic_enabled_irqs):
+                import time as _dt_time
+                _now_wall = _dt_time.monotonic()
+                if self._det_last_wall is None:
+                    self._det_last_wall = _now_wall
+                elif (_now_wall - self._det_last_wall >= self._det_wall_s
+                        and self._det_irq not in self._pending_irqs):
+                    self._det_last_wall = _now_wall
+                    self._pending_irqs.append(self._det_irq)
             # Let anything that needs a periodic tick have one, BEFORE the
             # queue is drained so a model can raise an interrupt here and see
             # it delivered on this same pass. See add_chunk_hook.
@@ -2531,7 +2632,17 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if self._det_irq is not None:
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
-                        self._pending_irqs.append(self._det_irq)
+                        # Chunks are completing, so keep the wall-clock
+                        # backstop quiet.
+                        if self._gic_dist_base is not None:
+                            import time as _dt_time2
+                            self._det_last_wall = _dt_time2.monotonic()
+                        # A real GIC won't deliver a line the firmware hasn't
+                        # enabled yet, and a tick during exception bring-up
+                        # runs the ISR before the scheduler exists.
+                        if (self._gic_dist_base is None
+                                or self._det_irq in self._gic_enabled_irqs):
+                            self._pending_irqs.append(self._det_irq)
                 continue
             # A Cortex-M exception return (_maybe_handle_exc_return) redirected PC
             # and emu_stop'd purely to restart at the restored PC — that internal
@@ -2931,6 +3042,90 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             log.info("cortex-m: vector table base -> 0x%08x", vtor)
         self._vtor = vtor
 
+    def set_delivery_plan(self, plan: Any) -> None:
+        """Attach the DeliveryPlan and, when it carries a GICv2 CPU-interface
+        base, model the two registers the ack/EOI handshake needs:
+
+          * GICC_IAR  (base+0x0C) read  -> the id the deliverer just acked,
+            once, then the spurious id 0x3FF.
+          * GICC_EOIR (base+0x10) write -> clears the active id.
+
+        Without this the handler reads whatever the AutoPeripheral catch-all
+        over that address returns, dispatches the wrong ISR (or none) and the
+        tick never reaches the scheduler. These hooks register after the
+        per-region MMIO hooks, so they win on read.
+
+        Only configs with a gicc_base get here — cortex-m, x86 and arm_vic
+        never carry one. arm64 is included, same CPU interface.
+        """
+        super().set_delivery_plan(plan)
+        gicc_base = getattr(plan, "gicc_base", None) if plan is not None else None
+        if (gicc_base is None or self._uc is None
+                or self.arch_name not in ("arm", "arm64")):
+            return
+        if self._gicc_iface_base == gicc_base:
+            return  # already installed for this base
+        self._gicc_iface_base = gicc_base
+        _IAR = gicc_base + 0x0C
+        _EOIR = gicc_base + 0x10
+        _GICV2_SPURIOUS = 0x3FF
+
+        def _iar_read(uc, access, addr, size, value, user_data):
+            pend = self._gicc_iar_pending
+            if pend is not None:
+                self._gicc_iar_pending = None
+                self._gicc_active_irq = pend
+                val = pend & 0xFFFFFFFF
+            else:
+                val = _GICV2_SPURIOUS
+            try:
+                uc.mem_write(addr, val.to_bytes(size, "little"))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _eoir_write(uc, access, addr, size, value, user_data):
+            self._gicc_active_irq = None
+
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_READ, _iar_read,
+                          begin=_IAR, end=_IAR + 3)
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _eoir_write,
+                          begin=_EOIR, end=_EOIR + 3)
+        log.info("UnicornBackend: modelled GICv2 CPU interface at 0x%08x "
+                 "(IAR=0x%08x, EOIR=0x%08x)", gicc_base, _IAR, _EOIR)
+
+        # Track GICD_ISENABLER / ICENABLER writes so the tick only fires once
+        # the firmware has enabled that line (see the gate in cont()).
+        # ISENABLER<n> is at gicd_base+0x100+n*4, ICENABLER<n> at +0x180+n*4,
+        # 32 IRQs per word. No gicd_base (arm_vic) means no gating.
+        ctrl = getattr(self, "_irq_controller", None)
+        gicd_base = getattr(ctrl, "gicd_base", None) if ctrl is not None else None
+        if gicd_base is not None:
+            self._gic_dist_base = gicd_base
+            _ISEN0 = gicd_base + 0x100
+            _ICEN0 = gicd_base + 0x180
+
+            def _isenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ISEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.add(base + b)
+
+            def _icenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ICEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.discard(base + b)
+
+            # Cover ISENABLER0..3 / ICENABLER0..3 (IRQs 0..127 — SGIs, PPIs and
+            # the first SPIs, which is all a small SoC uses).
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _isenabler_write,
+                              begin=_ISEN0, end=_ISEN0 + 0x10 - 1)
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icenabler_write,
+                              begin=_ICEN0, end=_ICEN0 + 0x10 - 1)
     def _effective_vtor(self) -> int:
         """The vector base the firmware is actually using, if discoverable.
 
