@@ -102,6 +102,43 @@ class TestAutoPeripheral:
         assert 0xFFFFFFFF in seen
         assert 0 in seen
 
+    def test_windowed_breaker_breaks_interleaved_poll(self):
+        # A register polled in a loop that ALSO reads a second register every
+        # iteration (A,B,A,B,...) never builds a strictly-consecutive run, so
+        # the consecutive detector alone never fires (its run resets on every
+        # B). The windowed detector must still break the spin on A within a
+        # bounded number of reads. This is the gps-tracker UOTGHS/USB regression
+        # (target register polled interleaved with another).
+        p = AutoPeripheral("a", 0x40000000, 0x1000,
+                           stall_threshold=8, stall_window=40, stall_win_div=4)
+        # trigger = max(8, 40 // 4) = 10 reads of A within the window.
+        a_vals = []
+        for _ in range(20):
+            a_vals.append(p.hw_read(0x0, 4, pc=0x8000))   # register A
+            p.hw_read(0x4, 4, pc=0x8004)                  # interleaved reg B
+        # The strict-consecutive counter never reached the threshold — the
+        # interleaving keeps resetting it — proving the break came from the
+        # windowed path, not the consecutive one.
+        assert p._repeat[(0x8000, 0x40000000)] < p.stall_threshold
+        # A broke: a wait-for-SET spin sees all-ones within the bounded loop...
+        assert 0xFFFFFFFF in a_vals
+        # ...and promptly (once its dominance threshold of 10 reads is crossed).
+        assert a_vals.index(0xFFFFFFFF) <= 12
+
+    def test_interleaved_poll_not_broken_when_not_dominant(self):
+        # Conservative-behaviour guard: a register read only occasionally (not
+        # spun on) must NOT be broken by the windowed detector, even over many
+        # reads. Here A is read once per 8 reads of B — well under the 1/4
+        # dominance bar — so every A read must still return 0.
+        p = AutoPeripheral("a", 0x40000000, 0x1000,
+                           stall_threshold=8, stall_window=40, stall_win_div=4)
+        a_vals = []
+        for _ in range(30):
+            a_vals.append(p.hw_read(0x0, 4, pc=0x8000))       # register A (rare)
+            for _ in range(7):
+                p.hw_read(0x4, 4, pc=0x8004)                  # register B (busy)
+        assert set(a_vals) == {0}
+
     def test_write_clears_stall_state(self):
         p = AutoPeripheral("a", 0x40000000, 0x1000, stall_threshold=4)
         for _ in range(6):
@@ -155,3 +192,92 @@ class TestBareNameResolution:
                                     size=0x1000, properties=None)
         periph = main._instantiate_peripheral("RecordingPeripheral", mem, None)
         assert periph.__class__.__name__ == "RecordingPeripheral"
+
+
+# ===================== stall-detector logging + windowing =====================
+
+class _CountingHandler:
+    """Counts records the auto_model logger emits, without touching config."""
+
+    def __init__(self):
+        self.records = []
+
+    def handle(self, record):
+        self.records.append(record)
+
+    # logging.Logger.handle() calls these on a handler object.
+    level = 0
+
+    def acquire(self): pass
+
+    def release(self): pass
+
+    def createLock(self): pass
+
+
+@pytest.fixture
+def hal_records(monkeypatch):
+    from halucinator.peripheral_models import auto_model as am
+    h = _CountingHandler()
+    monkeypatch.setattr(am, "hlog", _Recorder(h))
+    return h
+
+
+class _Recorder:
+    """Minimal stand-in for the HAL logger that just records info() calls."""
+
+    def __init__(self, sink):
+        self._sink = sink
+
+    def info(self, fmt, *args):
+        self._sink.records.append(fmt % args if args else fmt)
+
+    def __getattr__(self, _name):
+        return lambda *a, **k: None
+
+
+class TestStallLogging:
+    """Stall lines come out of the MMIO read hook, so one per read turned a
+    long spin into millions of identical lines."""
+
+    def test_consecutive_spin_logs_once_per_tier_not_per_read(self, hal_records):
+        p = AutoPeripheral("mmio", 0x40000000, 0x100, stall_threshold=4)
+        for _ in range(4000):
+            p.hw_read(0x10, 4, pc=0x8000)
+        assert len(hal_records.records) <= 3, (
+            f"{len(hal_records.records)} log lines for one spinning register; "
+            "expected at most one per escalation tier")
+        assert hal_records.records, "the spin was never announced at all"
+
+    def test_windowed_spin_logs_once_per_tier_not_per_read(self, hal_records):
+        # Interleave two keys so the strict-consecutive run never builds:
+        # this is exactly the case the windowed detector exists for.
+        p = AutoPeripheral("mmio", 0x40000000, 0x100, stall_threshold=1000,
+                           stall_window=64, stall_win_div=4)
+        for _ in range(4000):
+            p.hw_read(0x10, 4, pc=0x8000)
+            p.hw_read(0x20, 4, pc=0x9000)
+        assert len(hal_records.records) <= 6, (
+            f"{len(hal_records.records)} log lines for two spinning registers")
+
+    def test_the_read_that_reaches_the_trigger_is_not_discarded(self):
+        """The window used to be cleared before the dominance test, so the read
+        that rolled it over lost the escalation it had just earned — one read
+        per window. (Counts restarting after a rollover is the tumbling window
+        working as intended, and is not what this checks.)
+
+        Sized for hand-checking: trigger = max(4, 8 // 4) = 4, one key, so
+        reads 4..8 of each 8-read window dominate and the fifth is the
+        rollover read.
+        """
+        p = AutoPeripheral("mmio", 0x40000000, 0x100, stall_threshold=4,
+                           stall_window=8, stall_win_div=4)
+        key = (0x8000, 0x40000010)
+        for _ in range(8):
+            p.hw_read(0x10, 4, pc=0x8000)
+        assert p._win_escal.get(key, 0) == 5, (
+            "expected reads 4,5,6,7,8 of the window to escalate; got "
+            f"{p._win_escal.get(key, 0)} -- 4 means the rollover read was "
+            "denied because the window was cleared before the check")
+        # And the window really did roll over, so this was the boundary case.
+        assert p._win_total == 0
