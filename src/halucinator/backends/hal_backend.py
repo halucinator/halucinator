@@ -529,6 +529,14 @@ class MIPSHalMixin(_ABIBase):
     """
     MIPS32 O32 ABI: args in a0–a3 then stack, return addr in ra,
     return value in v0.
+
+    O32 reserves a 16-byte "argument slot" area at the TOP of the caller's
+    frame -- $sp+0 through $sp+12 -- as home space for a0-a3, even though
+    those four are passed in registers and the callee usually never spills
+    them. The fifth argument is therefore at $sp+16, not at $sp+0. Both
+    ``get_arg`` and ``set_args`` below index from that base; an intercept
+    reading at $sp would get the a0 home slot (typically stale or zero)
+    instead of the argument it asked for.
     """
     WORD_SIZE = 4
     REGISTERS = (
@@ -543,8 +551,11 @@ class MIPSHalMixin(_ABIBase):
             raise ValueError(f"Argument index must be non-negative, got {idx}")
         if idx < 4:
             return self.read_register(f"a{idx}")
+        # $sp + idx*4, NOT $sp + (idx-4)*4: argument 5 (idx 4) sits above the
+        # 16-byte a0-a3 home space, at $sp+16. This is the same address
+        # set_args writes, so a set/get round-trip agrees.
         sp = self.read_register("sp")
-        return self.read_memory(sp + (idx - 4) * 4, 4, 1)
+        return self.read_memory(sp + idx * 4, 4, 1)
 
     def set_args(self, args: List[int]) -> None:
         for i, v in enumerate(args[:4]):
@@ -731,48 +742,45 @@ class X86HalMixin(_ABIBase):
         self.cont()
 
 
-class M68KHalMixin(_ABIBase):
+class RISCVHalMixin(_ABIBase):
     """
-    Motorola 68000 / ColdFire ABI (System V m68k): all arguments are passed on
-    the STACK, the return address is the longword at [sp] after a ``jsr``, and
-    the return value comes back in ``d0``.
-
-    Stack at function entry (jsr has already pushed the return address):
-        [sp] = return addr, [sp+4] = arg0, [sp+8] = arg1, ...
+    RV32 ILP32 ABI: args in a0–a7 (x10–x17) then stack, return addr in ra
+    (x1), return value in a0 (x10). x0 is the hardwired-zero register.
     """
     WORD_SIZE = 4
     REGISTERS = (
-        tuple(f"d{i}" for i in range(8))
-        + tuple(f"a{i}" for i in range(8))
-        + ("pc", "sr")
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+        "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+        "t3", "t4", "t5", "t6", "pc",
     )
 
     def get_arg(self, idx: int) -> int:
         if idx < 0:
             raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 8:
+            return self.read_register(f"a{idx}")
         sp = self.read_register("sp")
-        return self.read_memory(sp + (idx + 1) * 4, 4, 1)
+        return self.read_memory(sp + (idx - 8) * 4, 4, 1)
 
     def set_args(self, args: List[int]) -> None:
-        # Write the args above the return address without moving sp; the
-        # caller owns stack cleanup, as on x86 cdecl.
-        sp = self.read_register("sp")
-        for i, v in enumerate(args):
-            self.write_memory(sp + (i + 1) * 4, 4, v)
+        for i, v in enumerate(args[:8]):
+            self.write_register(f"a{i}", v)
+        if len(args) > 8:
+            sp = self.read_register("sp")
+            for i, v in enumerate(args[8:]):
+                self.write_memory(sp + i * 4, 4, v)
 
     def get_ret_addr(self) -> int:
-        return self.read_memory(self.read_register("sp"), 4, 1)
+        return self.read_register("ra")
 
     def set_ret_addr(self, ret_addr: int) -> None:
-        self.write_memory(self.read_register("sp"), 4, ret_addr)
+        self.write_register("ra", ret_addr)
 
     def execute_return(self, ret_value: int) -> None:
-        # Emulate `rts`: pop the return address and jump to it.
-        sp = self.read_register("sp")
-        ret_addr = self.read_memory(sp, 4, 1)
-        regs = {"sp": sp + 4, "pc": ret_addr}
+        regs = {"pc": self.read_register("ra")}
         if ret_value is not None:
-            regs["d0"] = ret_value & 0xFFFFFFFF
+            regs["a0"] = ret_value & 0xFFFFFFFF
         self.write_registers(regs)
         self.cont()
 
@@ -857,20 +865,74 @@ class SPARCHalMixin(_ABIBase):
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
+
+class M68KHalMixin(_ABIBase):
+    """
+    Motorola 68000 / ColdFire ABI (System V m68k): all arguments are passed on
+    the STACK, the return address is the longword at [sp] after a ``jsr``, and
+    the return value comes back in ``d0``.
+
+    Stack at function entry (jsr has already pushed the return address):
+        [sp] = return addr, [sp+4] = arg0, [sp+8] = arg1, ...
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        tuple(f"d{i}" for i in range(8))
+        + tuple(f"a{i}" for i in range(8))
+        + ("pc", "sr")
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        sp = self.read_register("sp")
+        return self.read_memory(sp + (idx + 1) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        # Write the args above the return address without moving sp; the
+        # caller owns stack cleanup, as on x86 cdecl.
+        sp = self.read_register("sp")
+        for i, v in enumerate(args):
+            self.write_memory(sp + (i + 1) * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_memory(self.read_register("sp"), 4, 1)
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_memory(self.read_register("sp"), 4, ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        # Emulate `rts`: pop the return address and jump to it.
+        sp = self.read_register("sp")
+        ret_addr = self.read_memory(sp, 4, 1)
+        regs = {"sp": sp + 4, "pc": ret_addr}
+        if ret_value is not None:
+            regs["d0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
 ABI_MIXINS: Dict[str, type] = {
     "cortex-m3": ARM32HalMixin,
     "arm":       ARM32HalMixin,
     "arm64":     ARM64HalMixin,
     "mips":      MIPSHalMixin,
+    # Little-endian MIPS32 shares the o32 calling convention with big-endian
+    # MIPS -- endianness is a data-layout property, not an ABI one -- so the
+    # same mixin serves both. Without an entry here _bind_abi falls back to
+    # ARM32HalMixin *silently* (the fallback IS the default, so the rebinding
+    # branch is skipped), and the first intercept to read an argument dies with
+    # "Unknown register: 'r0'" because r0 is not in the MIPS register map.
+    "mipsel":    MIPSHalMixin,
     "powerpc":   PowerPCHalMixin,
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
     "x86":       X86HalMixin,
-    "m68k":      M68KHalMixin,
+    "riscv32":   RISCVHalMixin,
     "tricore":   TriCoreHalMixin,
     # Without this entry _bind_abi falls back to ARM32HalMixin *silently* --
     # the fallback IS the default, so the rebinding branch never runs -- and
     # the first intercept to read an argument dies with "Unknown register:
     # 'r0'", because r0 is not in the SPARC register map.
     "sparc":     SPARCHalMixin,
+    "m68k":      M68KHalMixin,
 }

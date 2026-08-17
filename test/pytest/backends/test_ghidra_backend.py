@@ -69,18 +69,28 @@ def test_register_aliases_cover_all_multi_arch():
 
 @pytest.mark.skipif(not _HAVE_PYGHIDRA, reason="pyghidra not installed")
 def test_exc_return_magic_matches_arm_v7m():
-    """ARM-v7M spec: EXC_RETURN values always have top nibble 0xF, and
-    0xFFFFFFF9 is specifically thread-mode + MSP. inject_irq relies on
-    these exact values so the emulator never needs to talk to a real
-    NVIC model."""
+    """ARM-v7M spec: EXC_RETURN is bits 31:5 all-ones, and 0xFFFFFFF9 is
+    specifically thread-mode + MSP. inject_irq relies on these exact values
+    so the emulator never needs to talk to a real NVIC model.
+
+    The mask is bits 31:5 (0xFFFFFFE0), not the top nibble: on an FPU part
+    bit 4 carries "no floating-point context stacked", so an FP-context
+    return is 0xFFFFFFE1/E9/ED. Matching only 0xFFFFFFFx would fail to
+    recognise those and the ISR's `bx lr` would branch to an unmapped
+    address."""
     from halucinator.backends.ghidra_backend import GhidraBackend
     assert GhidraBackend._EXC_RETURN_THREAD_MSP == 0xFFFFFFF9
-    assert GhidraBackend._EXC_RETURN_MASK == 0xFFFFFFF0
-    assert GhidraBackend._EXC_RETURN_MAGIC == 0xFFFFFFF0
-    # Sanity-check the mask-match logic
+    assert GhidraBackend._EXC_RETURN_MASK == 0xFFFFFFE0
+    assert GhidraBackend._EXC_RETURN_MAGIC == 0xFFFFFFE0
+    # Sanity-check the mask-match logic — non-FP frames...
     assert (0xFFFFFFF9 & GhidraBackend._EXC_RETURN_MASK) == \
            GhidraBackend._EXC_RETURN_MAGIC
     assert (0xFFFFFFFD & GhidraBackend._EXC_RETURN_MASK) == \
+           GhidraBackend._EXC_RETURN_MAGIC
+    # ...and FP frames, which the top-nibble mask used to miss.
+    assert (0xFFFFFFE9 & GhidraBackend._EXC_RETURN_MASK) == \
+           GhidraBackend._EXC_RETURN_MAGIC
+    assert (0xFFFFFFED & GhidraBackend._EXC_RETURN_MASK) == \
            GhidraBackend._EXC_RETURN_MAGIC
     # A normal code address must NOT match
     assert (0x08001234 & GhidraBackend._EXC_RETURN_MASK) != \
