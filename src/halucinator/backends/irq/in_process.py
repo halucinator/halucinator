@@ -37,10 +37,32 @@ class InProcessIrqMixin:
     _prefer_shadow_irq: bool = False
 
     # -- Cortex-M EXC_RETURN -----------------------------------------------
-    # A PC whose top nibble matches EXC_RETURN_MAGIC is an ISR doing `bx lr`.
+    # A PC in the EXC_RETURN range is an ISR doing `bx lr`.
     _EXC_RETURN_THREAD_MSP = 0xFFFFFFF9
-    _EXC_RETURN_MASK = 0xFFFFFFF0
-    _EXC_RETURN_MAGIC = 0xFFFFFFF0
+    # Match bits[31:7], which is the field the architecture actually defines.
+    # Matching the top nibble (0xFFFFFFF0) misses two whole classes of legal
+    # EXC_RETURN, and both failures are silent -- the value is not recognised as
+    # an exception return, so the ISR's `bx lr` is executed as an ordinary
+    # branch to an address near 0xFFFFFFFF and the core faults there forever,
+    # while the host-side seam keeps reporting a healthy run because it binds
+    # regardless of what the guest is doing:
+    #
+    #   * FP context. On a part with an FPU, bit 4 = "no floating-point context
+    #     stacked", so an FP-context return is 0xFFFFFFE1 / E9 / ED.
+    #   * ARMv8-M. Bit 6 = S (secure) and bit 5 = DCRS sit *below* the v7-M flag
+    #     bits, so a default non-secure thread return is 0xFFFFFFBC.
+    #
+    # Measured on an nRF9160 (Cortex-M33) rehost: 1.8 GB of
+    # `CPU exception 3 at pc=0xffffffbc` in four minutes, versus a clean run
+    # once the window is widened.
+    #
+    # 0xFFFFFF80 is a strict superset of the old window -- the new test sweeps
+    # every value the top-nibble mask matched and asserts it still matches -- so
+    # no currently-working v7-M target can be affected. The range
+    # 0xFFFFFF80..0xFFFFFFFF is architecturally reserved for exactly this
+    # purpose, so nothing else can legitimately land in it.
+    _EXC_RETURN_MASK = 0xFFFFFF80
+    _EXC_RETURN_MAGIC = 0xFFFFFF80
 
     def _decode_exc_return_frame(self, pc: int):
         """If *pc* is a Cortex-M EXC_RETURN magic value, read and unpack the
