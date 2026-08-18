@@ -46,6 +46,18 @@ try:
         import unicorn.x86_const as x86_const
     except ImportError:
         x86_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.riscv_const as riscv_const
+    except ImportError:
+        riscv_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.tricore_const as tricore_const
+    except ImportError:
+        tricore_const = None  # type: ignore[assignment]
+    try:
+        import unicorn.sparc_const as sparc_const
+    except ImportError:
+        sparc_const = None  # type: ignore[assignment]
     _HAVE_UNICORN = True
 except ImportError:
     _HAVE_UNICORN = False
@@ -55,6 +67,9 @@ except ImportError:
     mips_const = None  # type: ignore[assignment]
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
+    riscv_const = None  # type: ignore[assignment]
+    tricore_const = None  # type: ignore[assignment]
+    sparc_const = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -71,10 +86,32 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     "arm":            ("arm",    "arm",   False, False, 4),
     "arm64":          ("arm64",  "arm",   False, False, 8),
     "mips":           ("mips",   "mips32_be", False, True, 4),
+    # Little-endian MIPS32 ("mipsel"): the endianness used by Microchip PIC32
+    # (M4K / microAptiv) and most embedded MIPS SoCs that are not routers.
+    "mipsel":         ("mips",   "mips32_le", False, False, 4),
     "powerpc":        ("ppc",    "ppc32_be", False, True, 4),
     "powerpc:MPC8XX": ("ppc",    "ppc32_be", False, True, 4),
     "ppc64":          ("ppc",    "ppc64_be", False, True, 8),
     "x86":            ("x86",    "x86_32",   False, False, 4),
+    # RV32IMAC (RISC-V, 32-bit, little-endian). unicorn decodes the base
+    # I/M/A/C extensions + Zicsr with no CPU-model pin; bare-metal images link
+    # at DRAM base 0x8000_0000. No thumb, little-endian, 4-byte words.
+    "riscv32":        ("riscv",  "riscv32_le", False, False, 4),
+    # Infineon TriCore (AURIX TC2xx/TC3xx). Little-endian, 32-bit.
+    #
+    # NOTE: Unicorn exposes NO `UC_MODE_TRICORE*` constant -- the only mode
+    # value `uc_open(UC_ARCH_TRICORE, ...)` accepts is 0
+    # (UC_MODE_LITTLE_ENDIAN); every other value fails UC_ERR_ARG. The CPU
+    # model is selected by `uc_ctl_set_cpu_model` (TC1796/TC1797/TC27X), not by
+    # the mode.
+    "tricore":        ("tricore", "tricore", False, False, 4),
+    # SPARC V8, 32-bit, big-endian -- the ISA of the Gaisler LEON2/3/4/5 SoCs
+    # used across ESA/NASA spaceflight avionics. LEON is V8, NOT V9: SPARC64/V9
+    # is the unsupported one in unicorn. Note UC_MODE_SPARC32 must be OR'd with
+    # UC_MODE_BIG_ENDIAN -- unicorn rejects SPARC32 on its own with
+    # UC_ERR_MODE (there is no little-endian SPARC32 CPU in its QEMU core), so
+    # the endianness flag is not optional here the way it is for MIPS.
+    "sparc":          ("sparc",  "sparc32_be", False, True, 4),
 }
 
 _PERM_MAP = {
@@ -108,6 +145,50 @@ def _get_arm_reg_map() -> Dict[str, int]:
     return m
 
 
+def _get_tricore_reg_map() -> Dict[str, int]:
+    """Infineon TriCore: 16 data (d0-d15) + 16 address (a0-a15) registers.
+
+    ``a10`` is the stack pointer and ``a11`` the return address (written by
+    ``call``); TriCore has no separate ``lr``/``sp`` register, so ``sp``/``ra``
+    are exposed as aliases onto a10/a11 and ``lr`` onto a11 as well, so generic
+    core code that asks for ``sp``/``lr`` works unchanged.
+    """
+    if "tricore" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["tricore"]
+    if tricore_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for i in range(16):
+        for bank in ("d", "a"):
+            v = getattr(tricore_const, f"UC_TRICORE_REG_{bank.upper()}{i}", None)
+            if v is not None:
+                m[f"{bank}{i}"] = v
+    # PC + the context/state CSFRs an intercept or a trap model needs.
+    for name, reg in (
+        ("pc",   "UC_TRICORE_REG_PC"),
+        ("psw",  "UC_TRICORE_REG_PSW"),
+        ("pcxi", "UC_TRICORE_REG_PCXI"),
+        ("fcx",  "UC_TRICORE_REG_FCX"),
+        ("lcx",  "UC_TRICORE_REG_LCX"),
+        ("biv",  "UC_TRICORE_REG_BIV"),
+        ("btv",  "UC_TRICORE_REG_BTV"),
+        ("isp",  "UC_TRICORE_REG_ISP"),
+        ("icr",  "UC_TRICORE_REG_ICR"),
+        ("syscon", "UC_TRICORE_REG_SYSCON"),
+    ):
+        v = getattr(tricore_const, reg, None)
+        if v is not None:
+            m[name] = v
+    # Aliases so arch-generic core code (sp/lr lookups) resolves.
+    if "a10" in m:
+        m["sp"] = m["a10"]
+    if "a11" in m:
+        m["ra"] = m["a11"]
+        m["lr"] = m["a11"]
+    _REG_MAPS_CACHE["tricore"] = m
+    return m
+
+
 def _get_arm64_reg_map() -> Dict[str, int]:
     if "arm64" in _REG_MAPS_CACHE:
         return _REG_MAPS_CACHE["arm64"]
@@ -118,12 +199,38 @@ def _get_arm64_reg_map() -> Dict[str, int]:
         "sp": arm64_const.UC_ARM64_REG_SP,
         "pc": arm64_const.UC_ARM64_REG_PC,
     }
-    # x29 = fp, x30 = lr on AArch64
+    # x29 = fp, x30 = lr on AArch64. The EL1 exception registers below are what
+    # Arm64ExceptionDeliverer's FRAME path already reads/writes by name
+    # (`vbar_el1` to find the vector table, `elr_el1` to set the return address
+    # the handler's terminating `eret` consumes). Without them both lookups
+    # raised ValueError, which the deliverer catches and swallows -- so the
+    # FRAME path silently fell back to the configured vector_base and NEVER set
+    # ELR_EL1, and the ISR's `eret` returned to a stale address. Every name is
+    # added defensively (getattr) so an older Unicorn without a given constant
+    # degrades to "absent" rather than breaking import.
     for name, reg in (
         ("x29", "UC_ARM64_REG_X29"),
         ("x30", "UC_ARM64_REG_X30"),
         ("fp",  "UC_ARM64_REG_FP"),
         ("lr",  "UC_ARM64_REG_LR"),
+        # EL1 exception state (vector base, exception link, syndrome).
+        ("vbar_el1", "UC_ARM64_REG_VBAR_EL1"),
+        ("elr_el1",  "UC_ARM64_REG_ELR_EL1"),
+        ("esr_el1",  "UC_ARM64_REG_ESR_EL1"),
+        # Processor state (PSTATE carries DAIF/nRW; SPSR_EL1 has no dedicated
+        # Unicorn id, so callers that need it use the CP_REG path).
+        ("pstate", "UC_ARM64_REG_PSTATE"),
+        ("nzcv",   "UC_ARM64_REG_NZCV"),
+        # Other ELs, for images that boot through EL2/EL3 before dropping.
+        ("vbar_el2", "UC_ARM64_REG_VBAR_EL2"),
+        ("elr_el2",  "UC_ARM64_REG_ELR_EL2"),
+        ("vbar_el3", "UC_ARM64_REG_VBAR_EL3"),
+        ("elr_el3",  "UC_ARM64_REG_ELR_EL3"),
+        # MMU/control, useful to peripheral models and diagnostics.
+        ("sctlr_el1", "UC_ARM64_REG_SCTLR_EL1"),
+        ("ttbr0_el1", "UC_ARM64_REG_TTBR0_EL1"),
+        ("ttbr1_el1", "UC_ARM64_REG_TTBR1_EL1"),
+        ("cpacr_el1", "UC_ARM64_REG_CPACR_EL1"),
     ):
         v = getattr(arm64_const, reg, None)
         if v is not None:
@@ -189,6 +296,46 @@ def _get_ppc_reg_map(word: int = 4) -> Dict[str, int]:
     return m
 
 
+def _get_sparc_reg_map() -> Dict[str, int]:
+    """SPARC V8 register map (LEON2/3/4/5).
+
+    SPARC names its integer registers by *window role* rather than by number:
+    %g0-%g7 are the globals (shared by every window), while %o/%l/%i are the
+    out/local/in registers of the CURRENT window -- a `save` rotates the window
+    so the caller's %o becomes the callee's %i. unicorn exposes the current
+    window's view, which is what a breakpoint handler wants.
+
+    The ABI aliases matter: %sp IS %o6 and %fp IS %i6 (verified against
+    unicorn's own constants, which give both names the same id), and the return
+    address of a `call` lands in %o7, not in a dedicated link register.
+    """
+    if "sparc" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["sparc"]
+    if sparc_const is None:
+        return {}
+    m: Dict[str, int] = {}
+    for prefix in ("g", "o", "l", "i"):
+        for idx in range(8):
+            const = getattr(sparc_const,
+                            f"UC_SPARC_REG_{prefix.upper()}{idx}", None)
+            if const is not None:
+                m[f"{prefix}{idx}"] = const
+    # ABI aliases. %sp/%fp are genuinely the same registers as %o6/%i6, so
+    # these are aliases rather than copies.
+    if "o6" in m:
+        m["sp"] = m["o6"]
+    if "i6" in m:
+        m["fp"] = m["i6"]
+    if "o7" in m:
+        m["ra"] = m["o7"]        # `call` writes its return address here
+    for name in ("pc", "y"):
+        const = getattr(sparc_const, f"UC_SPARC_REG_{name.upper()}", None)
+        if const is not None:
+            m[name] = const
+    _REG_MAPS_CACHE["sparc"] = m
+    return m
+
+
 def _get_x86_reg_map() -> Dict[str, int]:
     if "x86" in _REG_MAPS_CACHE:
         return _REG_MAPS_CACHE["x86"]
@@ -211,6 +358,36 @@ def _get_x86_reg_map() -> Dict[str, int]:
     return m
 
 
+def _get_riscv_reg_map() -> Dict[str, int]:
+    if "riscv" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["riscv"]
+    if riscv_const is None:
+        return {}
+    # unicorn exposes UC_RISCV_REG_X0..X31 AND the ABI alias names
+    # (ZERO, RA, SP, GP, TP, T0-T6, S0-S11, A0-A7); both resolve to the same
+    # id (e.g. A0 == X10). Expose x-names, ABI aliases, and the neutral
+    # "pc"/"sp" halucinator's generic code (dispatch loop, MMIO pc capture,
+    # regs.pc/regs.sp) relies on.
+    m: Dict[str, int] = {
+        f"x{i}": getattr(riscv_const, f"UC_RISCV_REG_X{i}") for i in range(32)
+    }
+    aliases = {
+        "zero": 0, "ra": 1, "sp": 2, "gp": 3, "tp": 4,
+        "t0": 5, "t1": 6, "t2": 7,
+        "s0": 8, "fp": 8, "s1": 9,
+        "a0": 10, "a1": 11, "a2": 12, "a3": 13,
+        "a4": 14, "a5": 15, "a6": 16, "a7": 17,
+        "s2": 18, "s3": 19, "s4": 20, "s5": 21, "s6": 22, "s7": 23,
+        "s8": 24, "s9": 25, "s10": 26, "s11": 27,
+        "t3": 28, "t4": 29, "t5": 30, "t6": 31,
+    }
+    for name, idx in aliases.items():
+        m[name] = m[f"x{idx}"]
+    m["pc"] = riscv_const.UC_RISCV_REG_PC
+    _REG_MAPS_CACHE["riscv"] = m
+    return m
+
+
 def _reg_map_for_arch(arch: str) -> Dict[str, int]:
     info = _ARCH_MAP.get(arch)
     if info is None:
@@ -222,11 +399,17 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_arm64_reg_map()
     if uc_arch == "mips":
         return _get_mips_reg_map()
+    if uc_arch == "tricore":
+        return _get_tricore_reg_map()
     if uc_arch == "ppc":
         word = info[4]
         return _get_ppc_reg_map(word)
     if uc_arch == "x86":
         return _get_x86_reg_map()
+    if uc_arch == "riscv":
+        return _get_riscv_reg_map()
+    if uc_arch == "sparc":
+        return _get_sparc_reg_map()
     return {}
 
 
@@ -276,6 +459,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # address ONCE without stopping. Used to step over a breakpoint after
         # an observe-only (non-intercept) bp_handler so the real function runs.
         self._skip_bp_once: Optional[int] = None
+        # Set by _maybe_handle_exc_return: a Cortex-M exception return redirected
+        # PC and emu_stop'd to force a restart at the restored PC. cont() must
+        # treat that internal stop as "resume", NOT as a breakpoint/external
+        # stop — otherwise it hands control back to the dispatch loop parked on
+        # the restored PC (see cont() for why that livelocks / prematurely exits).
+        self._exc_return_pending: bool = False
         self._breakpoints: Dict[int, int] = {}   # addr → bp_id
         # Fast-breakpoint mode (opt-in HAL_FAST_BP=1): instead of ONE global
         # per-instruction UC_HOOK_CODE that checks every PC against the
@@ -323,6 +512,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._emulate_pc_write = (
             _os.environ.get("HAL_EMULATE_PC_WRITE") == "1")
         self._pc_write_emulated = 0
+        # Cortex-M `wfe` executed as a no-op (see _insn_invalid_hook).
+        self._wfe_skipped = 0
+        # Supervisor-call diagnostics (see _maybe_handle_cortexm_svc).
+        self._svc_count = 0
+        self._svc_trace_n = int(_os.environ.get("HAL_SVC_TRACE", "0"), 0)
+        _probe = _os.environ.get("HAL_SVC_TRACE_PROBE")
+        self._svc_trace_probe = int(_probe, 0) if _probe else None
         # MMU flat-fallback (opt-in HAL_MMU_FLAT_FALLBACK=1): on an ARM data/
         # prefetch abort whose faulting address IS backed in physical memory
         # (uc.mem_read succeeds — i.e. the MMU translation failed but the page
@@ -337,6 +533,28 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # In-process IRQ state: the cross-thread pending-IRQ queue and the
         # HAL_DET_TICK deterministic-tick config (see InProcessIrqMixin).
         self._init_in_process_irq()
+        # Modelled GICv2 CPU interface. _gicc_iar_pending holds the id the
+        # deliverer just acked; a GICC_IAR read returns it once, then the
+        # spurious id 0x3FF. Only set up when the plan carries a gicc_base.
+        self._gicc_iar_pending: Optional[int] = None
+        self._gicc_active_irq: Optional[int] = None
+        self._gicc_iface_base: Optional[int] = None
+        # IRQs the firmware enabled via GICD_ISENABLER. Gates the tick, since
+        # a real GIC won't deliver a line that isn't enabled yet. No dist base
+        # (arm_vic / cortex-m / x86) means no gating.
+        self._gic_enabled_irqs: set = set()
+        self._gic_dist_base: Optional[int] = None
+        # Wall-clock backstop for the tick pacer. The pacer only advances on a
+        # chunk that finishes without hitting a breakpoint, so a config with
+        # busy breakpoints can starve it and the tick never fires. Real timers
+        # don't care what the CPU is doing, so also queue after
+        # HAL_DET_TICK_WALL_MS. The chunk path still wins on a clean run.
+        self._det_last_wall: Optional[float] = None
+        try:
+            self._det_wall_s = max(0.0, float(
+                _os.environ.get("HAL_DET_TICK_WALL_MS", "10")) / 1000.0)
+        except Exception:  # noqa: BLE001
+            self._det_wall_s = 0.010
         # x86: when _intr_hook resolves a far control transfer (#GP from a
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
@@ -347,6 +565,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # tolerate fuzz-harness hypercalls baked into instrumented binaries
         # (e.g. P2IM's aflCall `svc #0x3f`).
         self.skip_svc: bool = False
+        # M-profile SP banking done by hand, for firmware that has dropped
+        # privilege. See _apply_cortex_m_fallback / _maybe_handle_exc_return.
+        self._m_manual_bank: bool = False
+        self._m_spsel: bool = False
+        self._m_saved_msp = None
 
         # Generic non-MMIO loop breaker (see _code_hook). Opt-in.
         self.auto_recover_loops: bool = False
@@ -396,8 +619,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             uc_mode = unicorn.UC_MODE_ARM
         elif arch_str == "mips":
             uc_arch = unicorn.UC_ARCH_MIPS
-            # MIPS32 big-endian is the default halucinator test firmware mode.
-            uc_mode = unicorn.UC_MODE_MIPS32 | unicorn.UC_MODE_BIG_ENDIAN
+            # MIPS32 big-endian is the default halucinator test firmware mode;
+            # "mipsel" selects little-endian (PIC32 and similar embedded MIPS).
+            uc_mode = unicorn.UC_MODE_MIPS32
+            if not mode_str.endswith("_le"):
+                uc_mode |= unicorn.UC_MODE_BIG_ENDIAN
         elif arch_str == "ppc":
             uc_arch = unicorn.UC_ARCH_PPC
             if mode_str.startswith("ppc64"):
@@ -407,6 +633,27 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         elif arch_str == "x86":
             uc_arch = unicorn.UC_ARCH_X86
             uc_mode = unicorn.UC_MODE_32
+        elif arch_str == "riscv":
+            uc_arch = unicorn.UC_ARCH_RISCV
+            # RV64 would be UC_MODE_RISCV64; only RV32 is wired today. RISC-V is
+            # always little-endian in these images, so no BIG_ENDIAN bit.
+            uc_mode = (
+                unicorn.UC_MODE_RISCV64
+                if mode_str.startswith("riscv64")
+                else unicorn.UC_MODE_RISCV32
+            )
+        elif arch_str == "tricore":
+            uc_arch = unicorn.UC_ARCH_TRICORE
+            # Unicorn accepts ONLY mode 0 for TriCore (see _ARCH_MAP note);
+            # UC_MODE_LITTLE_ENDIAN is 0 and states the intent.
+            uc_mode = unicorn.UC_MODE_LITTLE_ENDIAN
+        elif arch_str == "sparc":
+            uc_arch = unicorn.UC_ARCH_SPARC
+            # BIG_ENDIAN is REQUIRED, not a refinement: unicorn 2.1.4 rejects a
+            # bare UC_MODE_SPARC32 with UC_ERR_MODE (it has no little-endian
+            # SPARC32 CPU), so unlike MIPS this flag cannot be conditional on
+            # the mode string.
+            uc_mode = unicorn.UC_MODE_SPARC32 | unicorn.UC_MODE_BIG_ENDIAN
         else:
             raise ValueError(f"Unsupported arch for UnicornBackend: {arch_str!r}")
 
@@ -504,11 +751,47 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # PendSV — the RTOS context switch. Nothing else models the NVIC, so
             # watch that write and queue PendSV (exception 14, as irq -2).
             self._pendsv_pending = False
+            # PC parked on the `str ICSR,PENDSVSET` store by emu_stop (see below).
+            self._pendsv_store_parked = False
+            # True while cont() single-steps to retire the parked store, so the
+            # store's own re-write does not re-park (which would abort the step
+            # and pin PC on the store forever).
+            self._pendsv_stepping = False
 
             def _icsr_write(uc, access, addr, size, value, ud):  # noqa: ANN001
-                if value & (1 << 28):
+                if getattr(self, "_pendsv_stepping", False):
+                    return                            # retiring the parked store
+                if value & (1 << 28):                 # PENDSVSET
+                    already = self._pendsv_pending
                     self._pendsv_pending = True
-                if value & (1 << 27):            # PENDSVCLR
+                    # A PendSV requested from THREAD mode (no exception in
+                    # flight) has nothing to tail-chain its delivery off — the
+                    # exc_return path only pends it when LEAVING a handler. This
+                    # is how an RTOS starts its first switch (Zephyr's arch_swap
+                    # sets PENDSVSET, unmasks, `isb`, and expects to be preempted
+                    # immediately). Real hardware takes the PendSV at the next
+                    # instruction boundary; mirror that by breaking out of
+                    # emu_start so cont() synthesises the entry between chunks
+                    # (PC/SP mutation is only safe there). emu_stop leaves PC
+                    # parked on this store, so flag it for cont() to retire first
+                    # (else the resumed thread re-writes PENDSVSET and ping-pongs
+                    # forever). Break only the first time — the already-pending
+                    # guard lets a deferred re-entry's store complete. From
+                    # HANDLER mode we do NOT break: the existing exc_return
+                    # tail-chain delivers it once the CPU drops back to thread.
+                    if not already:
+                        try:
+                            ipsr = (uc.reg_read(unicorn.arm_const.UC_ARM_REG_IPSR)
+                                    & 0x1FF)
+                        except Exception:  # noqa: BLE001
+                            ipsr = 0
+                        if ipsr == 0:                 # thread mode
+                            self._pendsv_store_parked = True
+                            try:
+                                uc.emu_stop()
+                            except Exception:  # noqa: BLE001
+                                pass
+                if value & (1 << 27):                 # PENDSVCLR
                     self._pendsv_pending = False
             self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icsr_write,
                               begin=0xE000ED04, end=0xE000ED07)
@@ -547,6 +830,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         )
         # Log CPU exceptions (unhandled traps, illegal insns, FP faults)
         self._uc.hook_add(unicorn.UC_HOOK_INTR, self._intr_hook)
+
+        # Cortex-M `wfe` is rejected by unicorn's M-profile decoder. UC_HOOK_INTR
+        # does NOT fire for an undefined instruction, so the recovery has to hang
+        # off the dedicated invalid-instruction hook. See _insn_invalid_hook.
+        if self.arch_name == "cortex-m3":
+            self._uc.hook_add(unicorn.UC_HOOK_INSN_INVALID,
+                              self._insn_invalid_hook)
 
         # x86 uses *port* I/O (the IN/OUT instructions) for the PC chipset
         # — the 8259 PIC, 16550 UART, 8254 PIT, etc. — in addition to
@@ -629,6 +919,38 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                                   "(delta %d)", addr, prev, sp, sp - prev)
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _sp_watch)
 
+        # Diagnostic: HAL_INSN_TRACE=<lo>-<hi> logs PC, SP, LR and the CPSR
+        # IT-state for every instruction executed inside that address window.
+        # HAL_LAST_PC only records basic-block STARTS, which is not enough when
+        # the question is "did this one instruction execute?" — a stack-pointer
+        # adjustment skipped inside a block is invisible at block granularity.
+        _tr = _os.environ.get("HAL_INSN_TRACE")
+        if _tr and arch_str == "arm":
+            _lo, _, _hi = _tr.partition("-")
+            _lo, _hi = int(_lo, 0), int(_hi, 0)
+            _tr_state = {"n": 0}
+            _tr_max = int(_os.environ.get("HAL_INSN_TRACE_MAX", "400"))
+
+            def _insn_trace(uc, addr, size, ud):  # noqa: ANN001
+                if _tr_state["n"] >= _tr_max:
+                    return
+                _tr_state["n"] += 1
+                try:
+                    sp = uc.reg_read(unicorn.arm_const.UC_ARM_REG_SP)
+                    lr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_LR)
+                    cpsr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_CPSR)
+                except Exception:  # noqa: BLE001
+                    return
+                it = ((cpsr >> 25) & 3) | (((cpsr >> 10) & 0x3F) << 2)
+                try:
+                    raw = bytes(uc.mem_read(addr, 8)).hex()
+                except Exception:  # noqa: BLE001
+                    raw = "??"
+                log.error("INSN: pc=0x%08x sz=%d sp=0x%08x lr=0x%08x it=%02x "
+                          "bytes=%s", addr, size, sp, lr, it, raw)
+            self._uc.hook_add(unicorn.UC_HOOK_CODE, _insn_trace,
+                              begin=_lo, end=_hi)
+
         # Diagnostic: HAL_PC_SAMPLE=1 records a PC execution histogram so a
         # non-MMIO hang ("stuck where?") can be located. Dumped by
         # dump_pc_sample(). Off by default (no overhead).
@@ -638,12 +960,21 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._pc_hist = _c.Counter()
             self._pc_n = 0
             _every = int(_os.environ.get("HAL_PC_SAMPLE_EVERY", "3000000"))
+            _reset = _os.environ.get("HAL_PC_SAMPLE_RESET") == "1"
 
             def _pc_sample(uc, addr, size, ud):
                 self._pc_hist[addr & ~1] += 1
                 self._pc_n += 1
                 if _every and self._pc_n % _every == 0:
                     self.dump_pc_sample()
+                    # HAL_PC_SAMPLE_RESET=1 makes each dump a WINDOW rather
+                    # than a running total. A cumulative histogram cannot show
+                    # where the firmware is *now*: an early hot loop keeps the
+                    # top-10 forever, so a later hang is invisible until it
+                    # out-counts it. Off by default -- the running total is
+                    # what you want for "what dominates the whole run".
+                    if _reset:
+                        self._pc_hist.clear()
             self._uc.hook_add(unicorn.UC_HOOK_CODE, _pc_sample)
 
         # HAL_DET_TICK deterministic system-clock tick is parsed in
@@ -904,6 +1235,22 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 and pc != -1
                 and self._maybe_handle_exc_return(pc)):
             return  # _maybe_handle_exc_return already called emu_stop
+        # Cortex-M supervisor call (`svc #n`). RTOS kernels use SVC for syscalls
+        # and, in some ports, to start/switch threads (RIOT's cpu_switch_context_exit
+        # issues `svc #1`; FreeRTOS's vPortStartFirstTask uses `svc`). (Note: Zephyr
+        # on this target does NOT use svc to launch its main thread — it context-
+        # switches via PENDSVSET from thread mode; see _maybe_deliver_thread_pendsv.
+        # This trap is for the RTOSes that do use svc.) The generic ARM core Unicorn
+        # boots does not vector M-profile SVC to the NVIC table, so the trap lands
+        # here. Synthesise the
+        # architectural entry to vector[11] (SVCall) via the shared in-process
+        # delivery path so the firmware's OWN handler runs and returns via
+        # EXC_RETURN (_maybe_handle_exc_return). skip_svc firmware (P2IM
+        # instrumentation) opts out and takes the advance-past-SVC path below.
+        if (self.arch_name == "cortex-m3" and not self.skip_svc
+                and pc not in (-1, 0)
+                and self._maybe_handle_cortexm_svc(uc, pc)):
+            return
         # Opt-in recovery: a Thumb SVC (high byte 0xDF) from instrumented
         # firmware (e.g. P2IM aflCall). When the SVC traps, unicorn reports
         # pc at the *next* instruction, so the SVC opcode is at pc or pc-2.
@@ -1140,9 +1487,52 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     "(unicorn binding lacks aux1/arg1); IN/OUT may fault",
                     insn_id)
 
+    def register_port_handler(self, lo: int, hi: int,
+                              reader: Optional[Callable[[int, int], Optional[int]]] = None,
+                              writer: Optional[Callable[[int, int, int], None]] = None,
+                              name: str = "") -> None:
+        """Claim the x86 I/O-port range [lo, hi] for a peripheral model.
+
+        On x86 the chipset lives in *port* space, not memory, so a model
+        registered through the `peripherals:` memory map can never see it —
+        the catch-all IN/OUT hooks below absorb the access instead. This is
+        the port-space equivalent of mapping a peripheral: a model (usually
+        from a bp_handler's `register_handler`, which is handed the backend)
+        claims a range and then serves it.
+
+          reader(port, size) -> int | None   None = "not mine, fall through"
+          writer(port, size, value) -> None
+
+        Handlers are consulted in registration order and take precedence
+        over the built-in absorb, so a real 16550 model can answer RBR/LSR/
+        IIR while unclaimed ports keep the old behaviour."""
+        if not hasattr(self, "_port_handlers"):
+            self._port_handlers: List[Tuple[int, int, Any, Any, str]] = []
+        self._port_handlers.append((int(lo), int(hi), reader, writer, name))
+        hlog.info("UnicornBackend: port handler %s claims 0x%x-0x%x",
+                  name or "<unnamed>", lo, hi)
+
+    def _port_handler_for(self, port: int):
+        """The (reader, writer) pair claiming `port`, or (None, None)."""
+        for lo, hi, reader, writer, _name in getattr(self, "_port_handlers", ()):
+            if lo <= port <= hi:
+                return reader, writer
+        return None, None
+
     def _x86_in_hook(self, uc, port, size, user_data):
         """Handle an `in` from an I/O port. Return value is written back
         into the destination register by unicorn (return it from here)."""
+        reader, _writer = self._port_handler_for(port)
+        if reader is not None:
+            try:
+                val = reader(port, size)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("x86 IN  port=0x%x: handler raised %s", port, exc)
+                val = None
+            if val is not None:
+                log.debug("x86 IN  port=0x%x size=%d -> 0x%x (modelled)",
+                          port, size, val)
+                return int(val)
         val = 0
         for base in self._X86_UART_BASES:
             if port == base + 5:  # Line Status Register
@@ -1155,6 +1545,15 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         """Handle an `out` to an I/O port. Capture printable bytes written
         to a UART transmit-holding register (base+0) as console output;
         otherwise drop the write (no-op, like the MMIO catch-all)."""
+        _reader, writer = self._port_handler_for(port)
+        if writer is not None:
+            try:
+                writer(port, size, value)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("x86 OUT port=0x%x: handler raised %s", port, exc)
+            log.debug("x86 OUT port=0x%x size=%d value=0x%x (modelled)",
+                      port, size, value)
+            return
         for base in self._X86_UART_BASES:
             if port == base:  # Transmit Holding Register
                 low = value & 0xFF
@@ -1367,16 +1766,76 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         base, size, region.name, exc)
 
     def _make_mmio_hook(self, region: MemoryRegion) -> Callable:
+        # Thumb-2 IT-block repair (ARM only). See _repair_itstate.
+        repair_it = self._is_thumb and self.arch_name in (
+            "cortex-m3", "arm", "armv7a")
+        # A modelled read is served by writing the value into the mapped page
+        # and letting the guest load complete, so the bytes must be laid out in
+        # the GUEST's byte order. Hardcoding "little" byte-swaps every read
+        # wider than one byte on a big-endian target: a peripheral model
+        # returning 0xFFFFF3F8 was read by big-endian SPARC firmware as
+        # 0xF8F3FFFF. Byte-sized reads are unaffected, which is why this
+        # survived so long -- a driver that polls a status register one byte at
+        # a time never produces a multi-byte modelled read.
+        order = "big" if self._is_be else "little"
+
         def _hook(uc, access, addr, size, value, user_data):
             offset = addr - region.base_addr
             if access == unicorn.UC_MEM_READ and region.read_hook:
                 result = region.read_hook(offset, size)
                 if result is not None:
-                    data = result.to_bytes(size, "little")
+                    data = result.to_bytes(size, order)
                     uc.mem_write(addr, data)
             elif access == unicorn.UC_MEM_WRITE and region.write_hook:
                 region.write_hook(offset, size, value)
+            if repair_it:
+                self._repair_itstate(uc)
         return _hook
+
+    @staticmethod
+    def _repair_itstate(uc) -> None:
+        """Clear a stale Thumb-2 ITSTATE left behind by a firing memory hook.
+
+        Unicorn 2.1.4 (and every 2.x before it) leaks the IT state when one of
+        our MMIO hooks fires on a load or store that sits INSIDE an `it` block:
+        dispatching the hook restores the CPU state mid-block, which writes the
+        block's ENTRY ITSTATE into the environment, and nothing advances or
+        clears it afterwards. The value is a translation-block flag, so the NEXT
+        block QEMU translates -- typically in the caller, after the peripheral
+        driver returns -- is generated as though its first four instructions
+        were that `it` block, and the ones whose condition now fails are
+        silently skipped.
+
+        This is not a rare corner. Compilers emit `it` blocks throughout
+        Thumb-2, peripheral drivers read status registers inside them, and
+        HALucinator hooks every modelled peripheral read. Worked example
+        (ArduPilot/ChibiOS on an STM32F405): `palReadLineMode` reads GPIO
+        registers inside an `iteet pl`; on return, the caller's
+        `add sp, #36` was skipped, so `pop {r4-r7, pc}` took the wrong stack
+        word and branched into a heap object. Deterministic, and it looks
+        exactly like firmware memory corruption -- there is no fault at the
+        peripheral, and the instruction that "did not happen" is four
+        instructions away in a different function.
+
+        Clearing the IT bits here is correct rather than merely convenient: the
+        currently-executing block already has its conditions compiled in, so the
+        real `it` block still runs exactly as it should; the write only stops
+        the stale value from reaching the next block's translation flags. With
+        this repair the executed instruction trace is identical to the same run
+        with no MMIO hook installed at all (tests/test_unicorn_itstate.py).
+        """
+        try:
+            cpsr = uc.reg_read(unicorn.arm_const.UC_ARM_REG_CPSR)
+        except Exception:  # noqa: BLE001 — non-ARM or no CPSR exposed
+            return
+        # ITSTATE lives in CPSR[26:25] (IT[1:0]) and CPSR[15:10] (IT[7:2]).
+        if not (cpsr & ((3 << 25) | (0x3F << 10))):
+            return                      # not inside an `it` block: nothing to do
+        try:
+            uc.reg_write(unicorn.arm_const.UC_ARM_REG_CPSR,
+                         cpsr & ~((3 << 25) | (0x3F << 10)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _code_hook(self, uc, addr: int, size: int, user_data: Any) -> None:
         """Called for every instruction; checks if addr is a breakpoint."""
@@ -1995,6 +2454,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                          "breaker will NOT run. Unset HAL_FAST_BP to use it.")
         self._stopped = False
         self._bp_hit_addr = None
+        # Fresh run: no exception-return continuation is owed from a prior cont().
+        self._exc_return_pending = False
         until = (1 << (self._word_size * 8)) - 1
         # Loop over emu_start so an emu_stop triggered by inject_irq
         # from another thread doesn't bubble out to the dispatch loop.
@@ -2023,11 +2484,36 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         else:
             irq_chunk = 0
         while True:
+            # Wall-clock backstop for the tick pacer (see __init__). Top of the
+            # loop is a clean instruction boundary, so queuing here is as safe
+            # as the chunk-completion path. GIC configs only, and only once the
+            # firmware has enabled the tick line.
+            if (self._det_irq is not None and self._gic_dist_base is not None
+                    and self._det_wall_s > 0.0
+                    and self._det_irq in self._gic_enabled_irqs):
+                import time as _dt_time
+                _now_wall = _dt_time.monotonic()
+                if self._det_last_wall is None:
+                    self._det_last_wall = _now_wall
+                elif (_now_wall - self._det_last_wall >= self._det_wall_s
+                        and self._det_irq not in self._pending_irqs):
+                    self._det_last_wall = _now_wall
+                    self._pending_irqs.append(self._det_irq)
+            # Let anything that needs a periodic tick have one, BEFORE the
+            # queue is drained so a model can raise an interrupt here and see
+            # it delivered on this same pass. See add_chunk_hook.
+            self._run_chunk_hooks()
             # Drain any IRQs queued from another thread before
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
-            while self._pending_irqs:
-                self._apply_pending_irq(self._pending_irqs.pop(0))
+            self._drain_pending_irqs()
+            # Deliver a PendSV requested from thread mode (the ICSR write hook
+            # emu_stop'd us and parked PC on the store). Done here, at the top of
+            # the loop, so it survives an intervening breakpoint stop: the parked
+            # request stays set across a cont() return/re-entry (a bp handler
+            # runs between) and is delivered when execution next resumes.
+            if getattr(self, "_pendsv_store_parked", False):
+                self._maybe_deliver_thread_pendsv()
             pc = self.read_register("pc")
             # Unicorn Thumb mode needs the LSB set on the start
             # address.
@@ -2037,6 +2523,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             except unicorn.UcError as _uc_err:
                 if self._stopped:
                     return  # stopped by breakpoint hook — normal
+                # An exception return resolved the EXC_RETURN fetch and emu_stop'd;
+                # some unicorn builds still surface the aborted run as a UcError.
+                # Treat it exactly like the clean exc_return path: resume from the
+                # restored PC rather than falling into bad-call/fault recovery.
+                if self._exc_return_pending:
+                    self._exc_return_pending = False
+                    continue
                 # Diagnostic (HAL_LAST_PC): dump the block path leading into the fault.
                 _lb = getattr(self, "_last_blocks", None)
                 if _lb:
@@ -2203,9 +2696,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                         except Exception as _e:
                             log.error("UnicornBackend: rescue failed: %s", _e)
                 # emu_stop without a breakpoint hook firing: either
-                # inject_irq queued an IRQ on another thread, or
-                # something asked us to stop. If the former, loop and
-                # apply the IRQ. Otherwise honour the stop.
+                # inject_irq queued an IRQ on another thread, a thread-mode
+                # PendSV request broke us out, or something asked us to stop.
+                # Deliver / drain the former; otherwise honour the stop.
+                if not self._stopped and getattr(self, "_pendsv_store_parked",
+                                                  False):
+                    continue
                 if not self._pending_irqs:
                     # Print PC + LR so the user can find where boot died.
                     try:
@@ -2226,6 +2722,12 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             if getattr(self, "_x86_resume_eip", None) is not None:
                 self._x86_resume_eip = None
                 continue
+            # Cortex-M PendSV requested from thread mode (the ICSR write hook
+            # emu_stop'd us, parking PC on the store). Loop back to the top,
+            # which delivers it — unless a breakpoint also stopped us, in which
+            # case honour the stop and deliver on the next cont() entry.
+            if not self._stopped and getattr(self, "_pendsv_store_parked", False):
+                continue
             if self._pending_irqs:
                 continue
             # x86 runs in bounded chunks: a clean return means the chunk's
@@ -2238,7 +2740,34 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if self._det_irq is not None:
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
-                        self._pending_irqs.append(self._det_irq)
+                        # Chunks are completing, so keep the wall-clock
+                        # backstop quiet.
+                        if self._gic_dist_base is not None:
+                            import time as _dt_time2
+                            self._det_last_wall = _dt_time2.monotonic()
+                        # A real GIC won't deliver a line the firmware hasn't
+                        # enabled yet, and a tick during exception bring-up
+                        # runs the ISR before the scheduler exists.
+                        if (self._gic_dist_base is None
+                                or self._det_irq in self._gic_enabled_irqs):
+                            self._pending_irqs.append(self._det_irq)
+                continue
+            # A Cortex-M exception return (_maybe_handle_exc_return) redirected PC
+            # and emu_stop'd purely to restart at the restored PC — that internal
+            # stop is neither a breakpoint nor an external stop(). Resume the run
+            # from the restored PC instead of returning to the dispatch loop.
+            # Returning here would (a) let the dispatch loop re-dispatch a
+            # breakpoint the frame returned onto, which never re-enters emu_start
+            # and so never fires the one-shot _skip_bp_once — an observe-only tick
+            # handler (HAL_GetTick inject SysTick + continue_past_breakpoint) then
+            # re-injects forever (livelock); and (b) exit outright when no IRQ
+            # controller is configured (in_process_irq_active() is False), which
+            # is exactly a native SVCall/PendSV-launched RTOS task landing at a
+            # non-breakpoint PC (e.g. flipper's furi_thread_body). A real
+            # breakpoint on the restored PC still stops us cleanly: the code hook
+            # fires on re-entry, sets _stopped, and we fall through to return.
+            if self._exc_return_pending and not self._stopped:
+                self._exc_return_pending = False
                 continue
             return
 
@@ -2396,9 +2925,25 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if self._uc is None:
             return
 
-        # Vector table offset: caller plumbs it in via set_vtor(); fall
-        # back to 0 for backward compatibility.
-        vtor = getattr(self, "_vtor", 0)
+        # Vector table offset. `set_vtor()` plumbs in the *configured* base,
+        # which is where the table is at reset -- but firmware relocates it.
+        # A bootloader hands off to an application with its own table, an RTOS
+        # copies the table to RAM to patch it, and a Nordic SoftDevice inserts
+        # itself between the two: MBR at 0x0, SoftDevice at 0x1000,
+        # application at 0x1c000, with SCB->VTOR moved at each handoff.
+        #
+        # Delivering to the reset-time table in that situation is not a
+        # near-miss, it is a jump into an unrelated binary's handler. On the
+        # nRF52832 BLE device it sent the application's SWI0 (app_timer) into
+        # the MBR's slot 20 -- 0x00000687 instead of 0x0001c819 -- and the
+        # machine wedged with no fault, no console output, and almost no
+        # instructions retired.
+        #
+        # So prefer what the firmware has actually programmed, when it can be
+        # read back. A *modelled* PPB intercepts the write and never puts it in
+        # memory, which is why models are expected to call set_vtor() (see
+        # _vtor_from_guest for the ordering between the two).
+        vtor = self._effective_vtor()
         isr_slot = vtor + (16 + irq_num) * 4
         isr_addr = 0
         try:
@@ -2426,33 +2971,295 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         ipsr = self._uc.reg_read(_A.UC_ARM_REG_IPSR) & 0x1FF
         control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
         in_thread = ipsr == 0
-        use_psp = in_thread and bool(control & 2)          # SPSEL
-        active = _A.UC_ARM_REG_PSP if use_psp else _A.UC_ARM_REG_MSP
+        # Which stack is the interrupted thread on? Normally CONTROL.SPSEL
+        # says. Once we are banking by hand (below) CONTROL is frozen and
+        # lying, so the shadow is the only truthful answer.
+        if self._m_manual_bank:
+            use_psp = in_thread and self._m_spsel
+        else:
+            use_psp = in_thread and bool(control & 2)      # SPSEL
         xpsr = self._uc.reg_read(_A.UC_ARM_REG_XPSR)
         frame = struct.pack("<8I",
                             self.read_register("r0"), self.read_register("r1"),
                             self.read_register("r2"), self.read_register("r3"),
                             self.read_register("r12"), self.read_register("lr"),
                             self.read_register("pc"), xpsr)
-        sp = self._uc.reg_read(active) - 32     # RTOS/thread stacks are 8-aligned
+
+        # ARMv7E-M with an FPU (Cortex-M4F/M7): when the interrupted context
+        # has live floating-point state — CONTROL.FPCA set — the hardware
+        # stacks an EXTENDED frame (the 8 words above, then S0-S15, FPSCR and
+        # one reserved word: 104 bytes total) and clears bit 4 of EXC_RETURN
+        # to say so. Pushing the basic frame regardless is self-consistent
+        # only until the firmware does its own frame arithmetic: an RTOS that
+        # inspects EXC_RETURN, or code the compiler gave FP locals, then
+        # unwinds the wrong number of words. Observed on ArduPilot/ChibiOS
+        # (Cortex-M4F): a constructor returned into a heap pointer,
+        # deterministically, and never with interrupts disabled.
+        fpca = bool(control & 4)
+        if fpca and self._fp_regs_available():
+            fp_words = [self._uc.reg_read(getattr(_A, "UC_ARM_REG_S%d" % i))
+                        for i in range(16)]
+            fpscr = self._uc.reg_read(_A.UC_ARM_REG_FPSCR)
+            frame = frame + struct.pack("<18I", *fp_words, fpscr, 0)
+        # Stack the frame on r13, NOT on the MSP/PSP alias `use_psp` selects.
+        # Exception entry always pushes to whichever stack is currently
+        # active, and that is r13 by definition — so this is exact, not an
+        # approximation.
+        #
+        # It is also the only read that WORKS. MSP and PSP are reached through
+        # QEMU's MRS/MSR special-register helpers, which return 0 (and discard
+        # writes) when the core is UNPRIVILEGED — the architectural behaviour
+        # of `MRS Rn, MSP` from an unprivileged thread. Firmware that drops
+        # privilege (`msr control, #3`, as every MPU-hardened image does) made
+        # every delivery read the active stack as 0, compute sp = -32, fail
+        # the mem_write and silently drop the exception. Nothing faults: the
+        # firmware simply never takes an interrupt again. KeepKey routes all
+        # flash writes through `svc`, so the visible symptom was a wallet that
+        # ran perfectly and could not persist a single byte.
+        #
+        # `use_psp` still selects the EXC_RETURN value below, which is what
+        # tells the firmware's handler (and _maybe_handle_exc_return) which
+        # bank the frame is on.
+        sp = self._uc.reg_read(_A.UC_ARM_REG_SP) - len(frame)  # 8-aligned
         try:
             self._uc.mem_write(sp, frame)
         except Exception:  # noqa: BLE001 — unmapped/invalid SP: skip this tick
             log.debug("inject_irq(%d): SP 0x%x not writable, dropping delivery",
                       irq_num, sp)
             return
-        self._uc.reg_write(active, sp)
+        self._uc.reg_write(_A.UC_ARM_REG_SP, sp)
         exc_ret = (0xFFFFFFF1 if not in_thread
                    else 0xFFFFFFFD if use_psp else 0xFFFFFFF9)
+        if len(frame) > 32:
+            exc_ret &= ~0x10          # bit4 clear: extended (FP) frame stacked
+            # Entering the handler clears FPCA, as the hardware does.
+            try:
+                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control & ~4)
+            except Exception:  # noqa: BLE001
+                pass
         self.write_register("lr", exc_ret)
         self._uc.reg_write(_A.UC_ARM_REG_IPSR, exc_num)    # -> handler mode (MSP)
+        if self._m_manual_bank and in_thread:
+            # SPSEL is frozen, so the IPSR write above did not necessarily move
+            # the banks the way hardware would. We are in handler mode now,
+            # which is the ONLY state where MSP/PSP are writable, so put them
+            # where the firmware's own handler will look:
+            #   - the frame on the stack EXC_RETURN advertises, because
+            #     handlers read it back with `MRS Rn, PSP` / `MRS Rn, MSP`;
+            #   - the handler itself on the main stack.
+            if use_psp:
+                self._uc.reg_write(_A.UC_ARM_REG_PSP, sp)
+                if self._m_saved_msp is not None:
+                    self._uc.reg_write(_A.UC_ARM_REG_MSP, self._m_saved_msp)
+            else:
+                self._uc.reg_write(_A.UC_ARM_REG_MSP, sp)
+                self._m_saved_msp = sp
+        self._icsr_enter(exc_num, nested=not in_thread)
         self.write_register("pc", isr_addr & ~1)  # Thumb bit goes in CPSR.T
         log.info("inject_irq(%d): exc %d @ 0x%x (exc_return %#x)",
                  irq_num, exc_num, isr_addr, exc_ret)
 
+    # SCB->ICSR. Bits we own here: VECTACTIVE[8:0] — the exception number the
+    # CPU is currently executing — and RETTOBASE[11] — "returning from this
+    # exception returns to base level", i.e. no other exception is active.
+    # Everything else in the register (PENDSVSET etc.) belongs to the firmware
+    # and is preserved.
+    _ICSR = 0xE000ED04
+    _ICSR_VECTACTIVE = 0x1FF
+    _ICSR_RETTOBASE = 1 << 11
+
+    def _icsr_update(self, vectactive: int, rettobase: bool) -> None:
+        """Read-modify-write SCB->ICSR's VECTACTIVE/RETTOBASE.
+
+        This backend delivers Cortex-M exceptions itself and leaves the private
+        peripheral bus as plain RW memory, so nothing was maintaining ICSR: it
+        read 0 forever. That is not a cosmetic gap. ChibiOS' ARMv7-M ISR
+        epilogue is::
+
+            ldr  r3, [SCB_ICSR]
+            ands r3, #0x800          @ RETTOBASE
+            beq  no_reschedule
+
+        so with RETTOBASE stuck at 0 the kernel takes the interrupt, runs the
+        tick, readies the woken thread — and then skips the deferred context
+        switch every single time. Observed on ArduPilot/ChibiOS: the vehicle
+        clock advanced, virtual timers expired and the alarm was disarmed, but
+        execution returned to the idle thread on every tick and no ArduPilot
+        thread ever ran. Firmware that asks "am I in an interrupt?" via
+        VECTACTIVE (rather than IPSR) is wrong in the same silent way.
+        """
+        if self._uc is None:
+            return
+        try:
+            cur = int.from_bytes(self._uc.mem_read(self._ICSR, 4), "little")
+            new = cur & ~(self._ICSR_VECTACTIVE | self._ICSR_RETTOBASE)
+            new |= vectactive & self._ICSR_VECTACTIVE
+            if rettobase:
+                new |= self._ICSR_RETTOBASE
+            self._uc.mem_write(self._ICSR, new.to_bytes(4, "little"))
+        except Exception:  # noqa: BLE001 — PPB unmapped: nothing to maintain
+            pass
+
+    def _icsr_enter(self, exc_num: int, nested: bool) -> None:
+        """Entering exception `exc_num`. RETTOBASE is set unless this one
+        preempted another active exception."""
+        self._exc_depth = getattr(self, "_exc_depth", 0) + 1
+        self._icsr_update(exc_num, rettobase=not nested)
+
+    def _icsr_exit(self, new_ipsr: int) -> None:
+        """Leaving an exception for `new_ipsr` (0 = thread mode)."""
+        self._exc_depth = max(0, getattr(self, "_exc_depth", 0) - 1)
+        self._icsr_update(new_ipsr, rettobase=self._exc_depth <= 1)
+
+    def _fp_regs_available(self) -> bool:
+        """True when this unicorn build exposes S0-S15 and FPSCR."""
+        cached = getattr(self, "_fp_regs_ok", None)
+        if cached is not None:
+            return cached
+        from unicorn import arm_const as _A
+        ok = hasattr(_A, "UC_ARM_REG_FPSCR") and hasattr(_A, "UC_ARM_REG_S15")
+        if ok:
+            try:
+                self._uc.reg_read(_A.UC_ARM_REG_FPSCR)
+            except Exception:  # noqa: BLE001
+                ok = False
+        if not ok:
+            hlog.warning("UnicornBackend: this unicorn build has no FP "
+                         "registers; exceptions taken with CONTROL.FPCA set "
+                         "will stack a basic frame, which an FPU firmware may "
+                         "unwind incorrectly")
+        self._fp_regs_ok = ok
+        return ok
+
+    # SCB->VTOR on ARMv7-M. The table must be aligned to at least 128 bytes
+    # (and to a power of two >= 4 * the number of exceptions), so a value that
+    # is not is not a vector table and must not be believed.
+    _VTOR_ADDR = 0xE000ED08
+    _VTOR_ALIGN = 0x80
+
     def set_vtor(self, vtor: int) -> None:
-        """Remember the vector-table base so inject_irq can find ISRs."""
+        """Set the vector-table base so inject_irq can find ISRs.
+
+        Called by main.py with the configured reset-time base, and *also*
+        intended to be called by a peripheral model that owns the PPB when it
+        sees the firmware write SCB->VTOR: a modelled region intercepts the
+        write, so the value never reaches guest memory for
+        :meth:`_effective_vtor` to find.
+        """
+        if vtor != getattr(self, "_vtor", None):
+            log.info("cortex-m: vector table base -> 0x%08x", vtor)
         self._vtor = vtor
+
+    def set_delivery_plan(self, plan: Any) -> None:
+        """Attach the DeliveryPlan and, when it carries a GICv2 CPU-interface
+        base, model the two registers the ack/EOI handshake needs:
+
+          * GICC_IAR  (base+0x0C) read  -> the id the deliverer just acked,
+            once, then the spurious id 0x3FF.
+          * GICC_EOIR (base+0x10) write -> clears the active id.
+
+        Without this the handler reads whatever the AutoPeripheral catch-all
+        over that address returns, dispatches the wrong ISR (or none) and the
+        tick never reaches the scheduler. These hooks register after the
+        per-region MMIO hooks, so they win on read.
+
+        Only configs with a gicc_base get here — cortex-m, x86 and arm_vic
+        never carry one. arm64 is included, same CPU interface.
+        """
+        super().set_delivery_plan(plan)
+        gicc_base = getattr(plan, "gicc_base", None) if plan is not None else None
+        if (gicc_base is None or self._uc is None
+                or self.arch_name not in ("arm", "arm64")):
+            return
+        if self._gicc_iface_base == gicc_base:
+            return  # already installed for this base
+        self._gicc_iface_base = gicc_base
+        _IAR = gicc_base + 0x0C
+        _EOIR = gicc_base + 0x10
+        _GICV2_SPURIOUS = 0x3FF
+
+        def _iar_read(uc, access, addr, size, value, user_data):
+            pend = self._gicc_iar_pending
+            if pend is not None:
+                self._gicc_iar_pending = None
+                self._gicc_active_irq = pend
+                val = pend & 0xFFFFFFFF
+            else:
+                val = _GICV2_SPURIOUS
+            try:
+                uc.mem_write(addr, val.to_bytes(size, "little"))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _eoir_write(uc, access, addr, size, value, user_data):
+            self._gicc_active_irq = None
+
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_READ, _iar_read,
+                          begin=_IAR, end=_IAR + 3)
+        self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _eoir_write,
+                          begin=_EOIR, end=_EOIR + 3)
+        log.info("UnicornBackend: modelled GICv2 CPU interface at 0x%08x "
+                 "(IAR=0x%08x, EOIR=0x%08x)", gicc_base, _IAR, _EOIR)
+
+        # Track GICD_ISENABLER / ICENABLER writes so the tick only fires once
+        # the firmware has enabled that line (see the gate in cont()).
+        # ISENABLER<n> is at gicd_base+0x100+n*4, ICENABLER<n> at +0x180+n*4,
+        # 32 IRQs per word. No gicd_base (arm_vic) means no gating.
+        ctrl = getattr(self, "_irq_controller", None)
+        gicd_base = getattr(ctrl, "gicd_base", None) if ctrl is not None else None
+        if gicd_base is not None:
+            self._gic_dist_base = gicd_base
+            _ISEN0 = gicd_base + 0x100
+            _ICEN0 = gicd_base + 0x180
+
+            def _isenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ISEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.add(base + b)
+
+            def _icenabler_write(uc, access, addr, size, value, user_data):
+                idx = (addr - _ICEN0) // 4
+                base = idx * 32
+                v = value & 0xFFFFFFFF
+                for b in range(32):
+                    if v & (1 << b):
+                        self._gic_enabled_irqs.discard(base + b)
+
+            # Cover ISENABLER0..3 / ICENABLER0..3 (IRQs 0..127 — SGIs, PPIs and
+            # the first SPIs, which is all a small SoC uses).
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _isenabler_write,
+                              begin=_ISEN0, end=_ISEN0 + 0x10 - 1)
+            self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icenabler_write,
+                              begin=_ICEN0, end=_ICEN0 + 0x10 - 1)
+    def _effective_vtor(self) -> int:
+        """The vector base the firmware is actually using, if discoverable.
+
+        Reads SCB->VTOR out of guest memory, which works whenever the PPB is
+        plain backend-mapped memory (the default when no model claims it). If
+        the read fails, returns zero, or is not a legally aligned table base,
+        fall back to whatever ``set_vtor`` was last given -- which is the
+        configured base, or the value a PPB model plumbed in.
+        """
+        configured = getattr(self, "_vtor", 0)
+        if self._uc is None:
+            return configured
+        try:
+            live = int.from_bytes(
+                self._uc.mem_read(self._VTOR_ADDR, 4), "little")
+        except Exception:  # noqa: BLE001 — unicorn raises if unmapped
+            return configured
+        if not live or live % self._VTOR_ALIGN:
+            return configured
+        if live != getattr(self, "_vtor_seen", None):
+            self._vtor_seen = live
+            if live != configured:
+                log.info("cortex-m: firmware relocated the vector table to "
+                         "0x%08x (configured base was 0x%08x); interrupts will "
+                         "be delivered through the new table", live, configured)
+        return live
 
     # ARMv7-A CPSR mode bits.
     _ARM_MODE_USER = 0x10
@@ -2521,6 +3328,284 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         Arm64ExceptionDeliverer().deliver(self, irq_num,
                                           self._resolve_delivery_plan(_legacy))
 
+    # PendSV is exception 14, delivered through _apply_cortex_m_fallback as
+    # irq_num -2 (16 + -2 == 14), the same shared path as external IRQs.
+    _PENDSV_IRQ = -2
+
+    def _cortexm_step_one(self) -> None:
+        """Execute exactly one instruction from the current PC.
+
+        Used to retire the `str ICSR,PENDSVSET` store the write hook parked PC
+        on (emu_stop aborts the faulting instruction, leaving PC on it). The
+        hook's already-pending guard keeps this single step from being
+        re-broken by the same store's write hook."""
+        if self._uc is None:
+            return
+        pc = self.read_register("pc")
+        start = (pc | 1) if self._is_thumb else pc
+        until = (1 << (self._word_size * 8)) - 1
+        try:
+            self._uc.emu_start(start, until, timeout=0, count=1)
+        except unicorn.UcError:
+            pass
+
+    def _maybe_deliver_thread_pendsv(self) -> bool:
+        """Deliver a PendSV that was requested from THREAD mode (the ICSR write
+        hook emu_stop'd us with ``_pendsv_pending`` set). Runs from cont()
+        between emu_start calls, where mutating PC/SP is safe.
+
+        Retires the parked PENDSVSET store first, then — only if the CPU is
+        back in thread mode (a PendSV, the lowest-priority exception, must not
+        nest inside an active handler) — synthesises the PendSV entry through
+        the shared ``_apply_cortex_m_fallback`` path (irq -2 -> exception 14),
+        exactly as a tail-chained PendSV is. If still in a handler, leaves the
+        request pending for the exc_return tail-chain to deliver.
+
+        Returns True when it delivered (or retired the parked store), so cont()
+        re-enters emu_start rather than treating the emu_stop as a final stop.
+        """
+        if getattr(self, "_pendsv_store_parked", False):
+            self._pendsv_store_parked = False
+            # Retire the parked store under the stepping guard so its re-write
+            # of PENDSVSET does not re-park (which would abort the step and pin
+            # PC on the store, re-pending PendSV forever).
+            self._pendsv_stepping = True
+            try:
+                self._cortexm_step_one()
+            finally:
+                self._pendsv_stepping = False
+        try:
+            ipsr = self._uc.reg_read(unicorn.arm_const.UC_ARM_REG_IPSR) & 0x1FF
+        except Exception:  # noqa: BLE001
+            ipsr = 0
+        if ipsr != 0:            # in a handler: leave pending for exc_return
+            return False
+        self._pendsv_pending = False
+        self._apply_cortex_m_fallback(self._PENDSV_IRQ)
+        return True
+
+    # SVCall (exception 11) is delivered through the same in-process path as
+    # every other Cortex-M exception: _apply_pending_irq (InProcessIrqMixin)
+    # -> _apply_cortex_m_fallback, which computes exc_num = 16 + irq_num. So
+    # SVCall is queued as irq_num -5 (16 + -5 == 11), mirroring PendSV's -2.
+    _SVCALL_IRQ = -5
+
+    def _maybe_handle_cortexm_svc(self, uc, pc: int) -> bool:
+        """Synthesise a Cortex-M SVCall (``svc`` instruction) exception entry.
+
+        RTOS kernels start their first thread and yield via ``svc``: Zephyr's
+        ``z_arm_svc`` (``arch_switch_to_main_thread``), FreeRTOS's
+        ``vPortSVCHandler``, RIOT's ``isr_svc``. The generic ARM core Unicorn
+        boots does not architecturally vector M-profile SVC to the NVIC vector
+        table, so the trap surfaces here in the INTR hook with PC at the
+        instruction *after* the ``svc`` — the 16-bit Thumb opcode is ``0xDFxx``,
+        i.e. two bytes back at ``pc-2``.
+
+        We verify the opcode and QUEUE a synthetic exception entry to SVCall
+        (vector slot 11) through the shared in-process delivery path — the SAME
+        ``_apply_cortex_m_fallback`` frame-push/vectoring used for external IRQs
+        and PendSV (via ``InProcessIrqMixin._apply_pending_irq``). Queueing
+        rather than mutating PC/SP inline matters: the frame push is only safe
+        between ``emu_start`` calls, so we append the pending IRQ and stop, and
+        ``cont()`` drains it at the top of its loop (exactly as PendSV is).
+
+        The return address stacked is the current PC (the instruction after the
+        ``svc``); the firmware's own handler runs and returns via EXC_RETURN
+        (unwound by ``_maybe_handle_exc_return``). Faithful: no firmware skip,
+        the kernel's context switch executes for real.
+
+        Returns True (and ``emu_stop``s) when an SVC entry was queued, else
+        False.
+        """
+        if self.arch_name != "cortex-m3":
+            return False
+        # Confirm a 16-bit Thumb SVC (0xDF nn) sits just before PC. Unicorn
+        # reports PC at the next instruction, so the opcode is at pc-2.
+        try:
+            op = bytes(uc.mem_read(pc - 2, 2))
+        except Exception:  # noqa: BLE001 — Unicorn raises UcError on bad read
+            return False
+        if len(op) != 2 or op[1] != 0xDF:
+            return False
+        # Diagnostic: which supervisor call, and how often. An RTOS or a vendor
+        # stack issues a handful of distinct SVC numbers; a firmware stuck in a
+        # supervisor-call storm issues ONE, millions of times, and that number
+        # names the API it is stuck in. HAL_SVC_TRACE=<n> reports the first n
+        # and then every millionth.
+        self._svc_count = getattr(self, "_svc_count", 0) + 1
+        if self._svc_trace_n and (self._svc_count <= self._svc_trace_n
+                                  or self._svc_count % 1000000 == 0):
+            extra = ""
+            if self._svc_trace_probe is not None:
+                # A vendor stack dispatches supervisor calls through pointers it
+                # keeps in RAM (a Nordic SoftDevice uses two: the active vector
+                # table and the application's). When SVC dispatch misbehaves,
+                # the question is always "what did it read", so allow one word
+                # to be dumped alongside each call.
+                try:
+                    word = int.from_bytes(
+                        uc.mem_read(self._svc_trace_probe, 4), "little")
+                    extra = " [0x%08x]=0x%08x" % (self._svc_trace_probe, word)
+                except Exception:  # noqa: BLE001 — unmapped probe address
+                    extra = " [0x%08x]=<unmapped>" % self._svc_trace_probe
+            log.info("cortex-m: svc #0x%02x from 0x%08x (call %d)%s",
+                     op[0], pc - 2, self._svc_count, extra)
+        # Queue SVCall (exc 11) via the shared mixin delivery path and break out
+        # of emu_start; cont() applies it (pushes the frame, vectors to slot 11)
+        # before re-entering at the handler. Same mechanism inject_irq/PendSV use.
+        self._pending_irqs.append(self._SVCALL_IRQ)
+        uc.emu_stop()
+        return True
+
+    def add_chunk_hook(self, callback) -> None:
+        """Register a callable to run at every instruction-chunk boundary.
+
+        A PERIODIC TICK THAT DOES NOT DEPEND ON THE FIRMWARE TOUCHING ANYTHING.
+        Peripheral models normally advance their notion of time from MMIO
+        activity, because that is the only thing they are called for. That
+        works right up until the firmware idles -- and idling is exactly when
+        the timers matter, because the interrupt that ends the idle is the one
+        a timer is supposed to raise.
+
+        Nordic's S132 shows the shape clearly. Its scheduler arms RTC0 for the
+        next advertising event and then waits in
+
+            wfe ; ldr r0,[r4] ; ldrb r0,[r0,#0x1c] ; bl … ; cmp r0,#0 ; beq
+
+        which reads only RAM. No MMIO, so an MMIO-driven clock stops dead, the
+        RTC never reaches the compare it was armed for, and the device
+        advertises twice and then sleeps for ever. Nothing faults, and the
+        firmware is behaving perfectly correctly.
+
+        A chunk boundary is the natural place for this: it is reached every
+        HAL_IRQ_CHUNK instructions regardless of what the guest is doing, it is
+        where CPU state is already safe to mutate, and it is where queued
+        interrupts are delivered. Hooks run *before* that drain, so a model can
+        raise a line and have it taken on the same pass.
+
+        Exceptions from a hook are logged and swallowed: a model must not be
+        able to kill the run from its own timekeeping.
+        """
+        if not hasattr(self, "_chunk_hooks"):
+            self._chunk_hooks = []
+        if callback not in self._chunk_hooks:
+            self._chunk_hooks.append(callback)
+
+    def _run_chunk_hooks(self) -> None:
+        for callback in getattr(self, "_chunk_hooks", ()):  # noqa: B007
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 — a model's tick must not abort
+                log.exception("chunk hook %r failed", callback)
+
+    def _drain_pending_irqs(self) -> None:
+        """Apply every queued exception -- SYNCHRONOUS ONES FIRST.
+
+        WHY THE ORDER IS NOT ARBITRARY. This queue mixes two different kinds of
+        thing. An external interrupt is *asynchronous*: it may be taken between
+        any two instructions, so stacking whatever PC the CPU happens to be at
+        is always right. A ``svc`` is *synchronous and precise*: by the time it
+        reaches this queue the instruction has already executed, and the frame
+        must stack the address **immediately after it**, because that is the
+        only state consistent with what the CPU actually did.
+
+        Take an interrupt first and that invariant is broken. PC has already
+        moved to the interrupt's handler, so the SVCall frame stacks the
+        handler's entry address instead -- and every ARMv7-M SVC dispatcher in
+        existence recovers the call number by reading ``stacked_PC - 2`` and
+        taking the low byte of the ``svc`` opcode. It therefore reads a byte of
+        whatever code the interrupt vectored to, and dispatches on it.
+
+        Observed on the nRF52832 + S132 device, and it is worth recording
+        because the failure has no fault and no console output:
+
+            svc #0x48 from 0x0002032c        the guest's real call
+            inject_irq(20): exc 36 @ 0x687   drained first -- PC moves to the
+                                             MBR's SWI0 forwarder
+            inject_irq(-5): exc 11 @ 0x909   SVCall stacks PC=0x687
+
+        The SoftDevice's dispatcher then read ``[0x685]`` -- a byte of MBR
+        forwarder code -- as the call number, found it below 0x10, and forwarded
+        it to the *application's* SVCall handler, which in this image is the
+        default ``b .``. The machine sat there executing one instruction 82
+        million times.
+
+        The interrupt is still delivered, immediately afterwards, stacking the
+        SVCall handler's entry address. That is a legal and ordinary nesting: a
+        higher-priority interrupt pre-empting a supervisor call is exactly what
+        the priority scheme is for, and the SVCall handler runs when it returns.
+        """
+        queue = self._pending_irqs
+        while queue:
+            if self._SVCALL_IRQ in queue:
+                queue.remove(self._SVCALL_IRQ)
+                self._apply_pending_irq(self._SVCALL_IRQ)
+                continue
+            self._apply_pending_irq(queue.pop(0))
+
+    _WFE_THUMB = 0xBF20                     # `wfe` -- the one M-profile hint
+                                            # unicorn's decoder rejects
+
+    def _insn_invalid_hook(self, uc, user_data) -> bool:
+        """Execute a Cortex-M ``wfe`` as the no-op it is permitted to be.
+
+        Unicorn's M-profile decoder accepts ``wfi`` and ``sev`` but NOT
+        ``wfe``: 0xBF20 raises UC_ERR_INSN_INVALID on every M-profile CPU model
+        it offers (M3, M4, M7, M33 all verified). That kills any firmware
+        idling on the wait-for-event idiom -- CMSIS ``__WFE()``, most RTOS idle
+        loops, and Nordic's CryptoCell driver, which spins
+        ``wfe; dmb; ldr; tst; beq`` waiting for its completion interrupt.
+
+        Skipping it is architecturally correct rather than a shortcut: WFE is a
+        hint, and the architecture explicitly permits it to complete
+        immediately (it returns as soon as the event register is set, and the
+        register may already be set on entry). Nothing is lost in a rehost,
+        where the event the firmware waits for is delivered by an injected
+        interrupt anyway.
+
+        WHEN THIS BITES, IT POINTS AT THE WRONG INSTRUCTION. Unicorn reports the
+        fault with PC already advanced past the ``wfe``, so the disassembly at
+        the reported address is an innocent bystander -- a ``dmb``, an ``ldr``
+        -- and the obvious next step (work out why unicorn cannot decode a
+        barrier) is a dead end. The opcode under test is therefore at ``pc-2``.
+
+        Returning True tells unicorn the instruction was handled and execution
+        continues; returning False lets a genuinely undefined instruction
+        surface as the error it is.
+        """
+        if self.arch_name != "cortex-m3":
+            return False
+        from unicorn import arm_const as _A
+        try:
+            pc = uc.reg_read(_A.UC_ARM_REG_PC)
+            if pc < 2:
+                return False
+            opcode = int.from_bytes(uc.mem_read(pc - 2, 2), "little")
+        except Exception:  # noqa: BLE001 — unicorn raises if unmapped
+            return False
+        if opcode != self._WFE_THUMB:
+            return False
+        self._wfe_skipped += 1
+        if self._wfe_skipped == 1:
+            log.info("cortex-m: `wfe` at 0x%08x executed as a no-op (unicorn's "
+                     "M-profile decoder rejects 0xBF20; the architecture "
+                     "permits WFE to complete immediately)", pc - 2)
+        # A firmware that idles on WFE reaches this a handful of times per
+        # main-loop pass. One that reaches it MILLIONS of times is not idling,
+        # it is waiting for an event that this rehost is never going to deliver
+        # -- and because skipping WFE is silent and correct, that failure has no
+        # other symptom: no fault, no console output, and a guest that appears
+        # to be running normally while executing almost nothing. Say so.
+        elif self._wfe_skipped % 1000000 == 0:
+            log.warning("cortex-m: `wfe` skipped %d times (currently at "
+                        "0x%08x). This firmware is spinning on an event that "
+                        "is not arriving -- check that the interrupt it is "
+                        "waiting for is actually being delivered.",
+                        self._wfe_skipped, pc - 2)
+        # PC has already advanced past the wfe; keep the Thumb bit.
+        uc.reg_write(_A.UC_ARM_REG_PC, pc | 1)
+        return True
+
     def _maybe_handle_exc_return(self, addr: int) -> bool:
         """Called from the invalid-fetch hook. If the fetch address is an
         EXC_RETURN magic value, pop the exception frame from the stack the
@@ -2537,6 +3622,11 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         return_thread = bool(addr & 0x8)       # bit3: return mode
         active = _A.UC_ARM_REG_PSP if return_psp else _A.UC_ARM_REG_MSP
         sp = self._uc.reg_read(active)
+        # EXC_RETURN bit 4 clear means the hardware stacked the EXTENDED
+        # (floating-point) frame: 8 words, then S0-S15, FPSCR and a reserved
+        # word. Unwinding 8 words from an extended frame leaves SP 72 bytes
+        # low and every later return goes to garbage.
+        extended = not (addr & 0x10)
         try:
             frame = struct.unpack("<8I", bytes(self._uc.mem_read(sp, 32)))
         except Exception:                      # noqa: BLE001
@@ -2547,13 +3637,121 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self.write_register("r3", frame[3])
         self.write_register("r12", frame[4])
         self.write_register("lr", frame[5])
-        self._uc.reg_write(active, sp + 32)
-        self.write_register("cpsr", frame[7])  # restores flags + IPSR (0=thread)
+        if extended and self._fp_regs_available():
+            try:
+                fp = struct.unpack("<18I", bytes(self._uc.mem_read(sp + 32, 72)))
+                for i in range(16):
+                    self._uc.reg_write(getattr(_A, "UC_ARM_REG_S%d" % i), fp[i])
+                self._uc.reg_write(_A.UC_ARM_REG_FPSCR, fp[16])
+            except Exception:  # noqa: BLE001
+                pass
+        # ARMv7-M B1.5.8 (ExceptionReturn): the exception return SETS
+        # CONTROL.FPCA from the frame type it just unwound —
+        # `CONTROL.FPCA = NOT EXC_RETURN[4]` — in BOTH directions. Only the
+        # "set on an extended return" half used to be implemented, and the
+        # missing half is a silent, compounding bug on any M4F/M7 RTOS:
+        #
+        #   * FPCA is set by executing ANY FP instruction, including inside a
+        #     handler. FreeRTOS's ARM_CM4F PendSV runs `vstmdb`/`vldmia` on
+        #     s16-s31, so FPCA is set every context switch.
+        #   * With no clear-on-basic-return, FPCA then stays set in a thread
+        #     that owns no FP state at all, and the NEXT exception entry stacks
+        #     the 104-byte EXTENDED frame instead of the 32-byte basic one.
+        #   * A small stack cannot absorb that. Measured on
+        #     device-duet2-wifi-eth (RepRapFirmware 3.6.3, SAM4E8E): FreeRTOS's
+        #     IDLE task has a 200-byte stack; 104 (hardware frame) + 100
+        #     (PendSV's r4-r11/lr + s16-s31) = 204, so the RTOS's own overflow
+        #     check fired and the firmware reset itself —
+        #     "SoftwareReset reason=0x0100 (StackOverflow) task='IDLE'".
+        #     Nothing faults in the emulator; the firmware simply panics, and
+        #     the cause is 100+ exceptions upstream of the symptom.
+        control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        control = (control | 4) if extended else (control & ~4)
+        try:
+            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+        except Exception:  # noqa: BLE001
+            pass
+        thread_sp = sp + (104 if extended else 32)
+        # WHY THIS IS NOT JUST `reg_write(active, thread_sp)`.
+        #
+        # An exception return has to put CONTROL.SPSEL back to the stack the
+        # EXC_RETURN selects. But QEMU implements the architectural rule that
+        # `MSR CONTROL` is IGNORED while CONTROL.nPRIV is set -- and unicorn's
+        # register API goes through the same helper. So the moment firmware
+        # drops privilege, the backend can NEVER correct SPSEL again: the write
+        # below succeeds silently and changes nothing, and every later exception
+        # entry then reads SPSEL=0, advertises EXC_RETURN as "main stack", and
+        # hands the firmware's handler a frame pointer into the wrong stack.
+        #
+        # That is not a hypothetical. On device-trezor-modelt (a privileged
+        # kernel plus an unprivileged applet, switched by PendSV) the applet
+        # returned via EXC_RETURN 0xFFFFFFED (thread, PSP) and CONTROL stayed
+        # 0x5 -- SPSEL clear. The next `svc` was advertised as 0xFFFFFFE9, so
+        # SVC_Handler's `TST LR,#4 / MRSEQ R0,MSP` read the frame off the
+        # KERNEL stack, decoded a garbage syscall number, and wrote its result
+        # back over the kernel's frames. Nothing faulted for another two
+        # exceptions.
+        #
+        # MSP and PSP are writable only in HANDLER mode (thread+unprivileged
+        # reads them as 0 and drops writes), so all of this has to happen here,
+        # before the IPSR write below returns us to thread mode.
+        control_now = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+        if (return_thread and (control_now & 1)
+                and bool(control_now & 2) != return_psp):
+            self._m_manual_bank = True
+        if self._m_manual_bank and return_thread:
+            self._m_spsel = return_psp
+            # The handler's own stack, saved before we overwrite it, so the
+            # next entry from a PSP thread can hand it back.
+            self._m_saved_msp = self._uc.reg_read(_A.UC_ARM_REG_MSP)
+            # SPSEL is frozen, so we cannot predict which bank the IPSR write
+            # leaves active -- write the thread's stack into both.
+            self._uc.reg_write(_A.UC_ARM_REG_MSP, thread_sp)
+            self._uc.reg_write(_A.UC_ARM_REG_PSP, thread_sp)
+        else:
+            # Returning to HANDLER mode (a nested exception unwinding to the
+            # handler it pre-empted) must NOT touch the banks: the outer
+            # handler keeps its own MSP, and the PSP still belongs to the
+            # interrupted thread. Writing both here destroys the thread's
+            # stack pointer, and the damage only surfaces at the NEXT return
+            # to thread mode -- as a garbage EXC_RETURN out of the firmware's
+            # own SVC handler.
+            self._uc.reg_write(active, thread_sp)
+        self.write_register("cpsr", frame[7])  # restores the APSR flags
+        # ...but NOT the exception number. Unicorn's CPSR write does not touch
+        # `env->v7m.exception` on an M-profile core, so IPSR has to be written
+        # explicitly -- for BOTH kinds of return, not just the thread one.
+        #
+        # Getting only the thread case right is a silent, long-lived error. A
+        # nested exception unwinding into the handler it preempted
+        # (EXC_RETURN 0xFFFFFFF1/0xFFFFFFE1) left IPSR reading the INNER
+        # exception for the whole remaining life of the OUTER handler. Firmware
+        # that asks the core "which exception am I in?" -- rusEFI/FOME's
+        # assertInterruptPriority() does exactly this, then indexes
+        # NVIC->IP[n] -- reads a priority byte nobody ever wrote and latches a
+        # firmware error. And any rehost whose pump refuses to inject while
+        # IPSR != 0 (the architecturally correct rule) goes permanently deaf
+        # after the first nested return: the guest really is back in the outer
+        # handler, but the pump can never tell that it left the inner one.
+        #
+        # Hardware restores the whole xPSR from the stacked frame, exception
+        # number included.
         if return_thread:
             self._uc.reg_write(_A.UC_ARM_REG_IPSR, 0)
-            control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
-            control = (control | 2) if return_psp else (control & ~2)
-            self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+            if not self._m_manual_bank:
+                control = self._uc.reg_read(_A.UC_ARM_REG_CONTROL)
+                control = (control | 2) if return_psp else (control & ~2)
+                self._uc.reg_write(_A.UC_ARM_REG_CONTROL, control)
+        elif frame[7] & 0x1FF:
+            # Returning to handler mode: put the preempted exception number
+            # back. Guarded on the stacked value being non-zero, because RTOS
+            # ports synthesise exception frames (ChibiOS' _port_irq_epilogue
+            # builds one carrying only the T bit) and writing 0 there would
+            # drop a running handler into thread mode -- the opposite mistake.
+            self._uc.reg_write(_A.UC_ARM_REG_IPSR, frame[7] & 0x1FF)
+        # ICSR follows the mode change: VECTACTIVE is the exception we are
+        # returning TO (0 in thread mode).
+        self._icsr_exit(0 if return_thread else (frame[7] & 0x1FF))
         self.write_register("pc", frame[6])
         log.info("exc_return %#x: popped from %s, resuming at 0x%x",
                  addr, "PSP" if return_psp else "MSP", frame[6])
@@ -2562,7 +3760,13 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._pendsv_pending = False
             self._pending_irqs.append(-2)      # -2 -> exception 14 (PendSV)
         # Unicorn needs to restart from the restored PC; stop the current
-        # emu_start so our dispatch loop re-issues cont() at the new PC.
+        # emu_start. Flag this as an exception-return stop so cont() resumes
+        # from the restored PC itself, rather than surfacing the internal stop
+        # to the dispatch loop (which would re-dispatch a breakpoint the frame
+        # happened to return onto — defeating _skip_bp_once and livelocking an
+        # observe-only tick handler — or exit outright when no IRQ controller is
+        # configured, e.g. a native SVCall/PendSV-launched RTOS first task).
+        self._exc_return_pending = True
         self._uc.emu_stop()
         return True
 

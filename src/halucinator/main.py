@@ -1132,6 +1132,39 @@ def _emulate_with_unicorn_backend(
                 region.write_hook = (
                     lambda off, sz, val, _p=periph, _b=backend: _p.hw_write(
                         off, sz, val, pc=_b.regs.pc))
+                # Hand the peripheral a handle on the backend. A model that has
+                # to reach guest memory (EasyDMA, a DMA descriptor, a ring
+                # buffer) or ask the emulator to take an interrupt (a ColdFire
+                # INTC's force-interrupt register, an RTOS doorbell) needs one.
+                # Until now the only route was to register a breakpoint whose
+                # handler passed it along -- a breakpoint existing purely to
+                # smuggle a reference, and impossible on a stripped image with
+                # no symbol to hang one off, which is exactly when
+                # register-level modelling is the only seam available.
+                #
+                # BOTH forms are offered so a model can use whichever suits:
+                #   * `hal_backend` attribute -- always set, no ceremony, and
+                #     enough for a model that only needs to read/write memory
+                #     or assert a line;
+                #   * `set_backend(backend)` -- optional hook for a model that
+                #     must REACT to being wired up (cache a region, claim an
+                #     x86 port range, start a thread).
+                # A model that defines neither is unaffected, and one that
+                # already receives the handle from a breakpoint just gets it
+                # earlier. Wiring a model must never abort the run, so both
+                # failures are logged rather than raised.
+                try:
+                    periph.hal_backend = backend
+                except Exception:  # noqa: BLE001
+                    log.debug("peripheral %s: cannot set hal_backend",
+                              emulate_name, exc_info=True)
+                setter = getattr(periph, "set_backend", None)
+                if callable(setter):
+                    try:
+                        setter(backend)
+                    except Exception:  # noqa: BLE001
+                        log.exception("peripheral %s: set_backend failed",
+                                      emulate_name)
                 auto_peripherals.append(periph)
                 if periph.__class__.__name__ == "AutoPeripheral":
                     backend.skip_svc = True

@@ -548,6 +548,14 @@ class MIPSHalMixin(_ABIBase):
     """
     MIPS32 O32 ABI: args in a0–a3 then stack, return addr in ra,
     return value in v0.
+
+    O32 reserves a 16-byte "argument slot" area at the TOP of the caller's
+    frame -- $sp+0 through $sp+12 -- as home space for a0-a3, even though
+    those four are passed in registers and the callee usually never spills
+    them. The fifth argument is therefore at $sp+16, not at $sp+0. Both
+    ``get_arg`` and ``set_args`` below index from that base; an intercept
+    reading at $sp would get the a0 home slot (typically stale or zero)
+    instead of the argument it asked for.
     """
     WORD_SIZE = 4
     REGISTERS = (
@@ -562,8 +570,11 @@ class MIPSHalMixin(_ABIBase):
             raise ValueError(f"Argument index must be non-negative, got {idx}")
         if idx < 4:
             return self.read_register(f"a{idx}")
+        # $sp + idx*4, NOT $sp + (idx-4)*4: argument 5 (idx 4) sits above the
+        # 16-byte a0-a3 home space, at $sp+16. This is the same address
+        # set_args writes, so a set/get round-trip agrees.
         sp = self.read_register("sp")
-        return self.read_memory(sp + (idx - 4) * 4, 4, 1)
+        return self.read_memory(sp + idx * 4, 4, 1)
 
     def set_args(self, args: List[int]) -> None:
         for i, v in enumerate(args[:4]):
@@ -583,6 +594,68 @@ class MIPSHalMixin(_ABIBase):
         regs = {"pc": self.read_register("ra")}
         if ret_value is not None:
             regs["v0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
+class TriCoreHalMixin(_ABIBase):
+    """
+    Infineon TriCore EABI: data args in d4-d7 (address args in a4-a7), then the
+    stack; return address in a11 (RA); return value in d2.
+
+    TriCore splits its register file in two: 16 *data* registers (d0-d15) and 16
+    *address* registers (a0-a15). The ABI assigns them separately -- an integer
+    argument goes in d4..d7 while a pointer goes in a4..a7 -- so ``get_arg``
+    cannot be a single index into one bank. We return the DATA register, which
+    is what an intercept reading a scalar argument wants; a handler needing the
+    pointer argument reads ``a4``..``a7`` directly via ``read_register``.
+
+    Two more TriCore-specific facts matter to callers:
+      * ``a10`` is the stack pointer (SP) and ``a11`` is the return address
+        (RA), written by ``call``; there is no separate ``lr``.
+      * ``a0``/``a1``/``a8``/``a9`` are *system-global* registers, preserved
+        across calls and normally set up once at boot -- do not clobber them.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (tuple(f"d{i}" for i in range(16))
+                 + tuple(f"a{i}" for i in range(16))
+                 + ("pc", "psw", "pcxi", "fcx", "lcx", "sp", "ra"))
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 4:
+            return self.read_register(f"d{4 + idx}")
+        # Overflow arguments start AT the stack pointer. TriCore's EABI has no
+        # O32-style home space: the caller does not reserve slots for the
+        # register-passed arguments, so the fifth argument is the first word of
+        # the outgoing area. (This is where a mixin copied from MIPSHalMixin
+        # goes wrong -- MIPS reserves 16 bytes for a0-a3 and TriCore does not.)
+        sp = self.read_register("a10")
+        return self.read_memory(sp + (idx - 4) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:4]):
+            self.write_register(f"d{4 + i}", v)
+        if len(args) > 4:
+            sp = self.read_register("a10")
+            for i, v in enumerate(args[4:]):
+                # Same address get_arg reads back. This previously wrote at
+                # sp+16.. -- the MIPS O32 home-space offset, inherited by
+                # copy -- so a set/get round-trip disagreed by 16 bytes and an
+                # intercept reading argument 5 got an unrelated word.
+                self.write_memory(sp + i * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_register("a11")
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("a11", ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("a11")}
+        if ret_value is not None:
+            regs["d2"] = ret_value & 0xFFFFFFFF
         self.write_registers(regs)
         self.cont()
 
@@ -688,6 +761,126 @@ class X86HalMixin(_ABIBase):
         self.cont()
 
 
+class RISCVHalMixin(_ABIBase):
+    """
+    RV32 ILP32 ABI: args in a0–a7 (x10–x17) then stack, return addr in ra
+    (x1), return value in a0 (x10). x0 is the hardwired-zero register.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+        "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+        "t3", "t4", "t5", "t6", "pc",
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 8:
+            return self.read_register(f"a{idx}")
+        sp = self.read_register("sp")
+        return self.read_memory(sp + (idx - 8) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:8]):
+            self.write_register(f"a{i}", v)
+        if len(args) > 8:
+            sp = self.read_register("sp")
+            for i, v in enumerate(args[8:]):
+                self.write_memory(sp + i * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_register("ra")
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("ra", ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        regs = {"pc": self.read_register("ra")}
+        if ret_value is not None:
+            regs["a0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
+class SPARCHalMixin(_ABIBase):
+    """
+    SPARC V8 (Gaisler LEON) ABI: the first six arguments arrive in %o0-%o5,
+    further arguments on the stack, the return value goes back in %o0, and the
+    return address derives from %o7.
+
+    Two SPARC-specific facts drive every method here:
+
+      * **%o7 is not a return address, it is the address of the `call`.**
+        SPARC's `call` stores its own PC in %o7 and the callee returns with
+        `jmpl %o7+8` (`retl`, leaf) or `jmpl %i7+8` (`ret`, after a `save`) --
+        the +8 steps over the call AND its delay slot. Treating %o7 as the
+        resume address sends control back to the call instruction, which
+        re-invokes the interposed function forever. So get/set_ret_addr and
+        execute_return all carry the +8/-8 bias.
+
+      * **Stack arguments start at %sp+92, not %sp.** A SPARC frame reserves
+        64 bytes for the register-window spill area, 4 for the aggregate-return
+        pointer and 24 of home space for %o0-%o5 before the seventh argument
+        appears. Reading at %sp would return the callee's saved window.
+
+    Intercepts fire at the callee's first instruction, i.e. BEFORE its `save`,
+    so the caller's window is still current and %o0-%o5/%o7 are the registers
+    to read. After a `save` the same values are addressed as %i0-%i5/%i7.
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        tuple(f"g{i}" for i in range(8))
+        + tuple(f"o{i}" for i in range(8))
+        + tuple(f"l{i}" for i in range(8))
+        + tuple(f"i{i}" for i in range(8))
+        + ("pc", "sp", "fp", "y")
+    )
+
+    # NOTE: the 92-byte stack-argument bias below is written as a literal in
+    # both methods rather than a class constant. ``_bind_abi`` copies only the
+    # six ABI *methods* onto the backend instance -- class attributes of the
+    # mixin never come with them -- so ``self.<constant>`` would raise
+    # AttributeError on the backend at the first call. Every mixin in this file
+    # inlines its constants for the same reason.
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        if idx < 6:
+            return self.read_register(f"o{idx}")
+        # 64-byte window save area + 4-byte aggregate return slot + 24 bytes
+        # of home space for %o0-%o5, then the seventh argument.
+        sp = self.read_register("sp")
+        return self.read_memory(sp + 92 + (idx - 6) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        for i, v in enumerate(args[:6]):
+            self.write_register(f"o{i}", v)
+        if len(args) > 6:
+            sp = self.read_register("sp")
+            for i, v in enumerate(args[6:]):
+                # Same expression get_arg reads back, so a set/get round-trip
+                # agrees -- unlike the mips/tricore mixins, whose writer and
+                # reader disagree by one home-space block.
+                self.write_memory(sp + 92 + i * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return (self.read_register("o7") + 8) & 0xFFFFFFFF
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_register("o7", (ret_addr - 8) & 0xFFFFFFFF)
+
+    def execute_return(self, ret_value: int) -> None:
+        # Emulate `retl`: resume at %o7+8, past the call and its delay slot.
+        regs = {"pc": (self.read_register("o7") + 8) & 0xFFFFFFFF}
+        if ret_value is not None:
+            regs["o0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
+
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
@@ -696,8 +889,22 @@ ABI_MIXINS: Dict[str, type] = {
     "arm":       ARM32HalMixin,
     "arm64":     ARM64HalMixin,
     "mips":      MIPSHalMixin,
+    # Little-endian MIPS32 shares the o32 calling convention with big-endian
+    # MIPS -- endianness is a data-layout property, not an ABI one -- so the
+    # same mixin serves both. Without an entry here _bind_abi falls back to
+    # ARM32HalMixin *silently* (the fallback IS the default, so the rebinding
+    # branch is skipped), and the first intercept to read an argument dies with
+    # "Unknown register: 'r0'" because r0 is not in the MIPS register map.
+    "mipsel":    MIPSHalMixin,
     "powerpc":   PowerPCHalMixin,
     "powerpc:MPC8XX": PowerPCHalMixin,
     "ppc64":     PowerPC64HalMixin,
     "x86":       X86HalMixin,
+    "riscv32":   RISCVHalMixin,
+    "tricore":   TriCoreHalMixin,
+    # Without this entry _bind_abi falls back to ARM32HalMixin *silently* --
+    # the fallback IS the default, so the rebinding branch never runs -- and
+    # the first intercept to read an argument dies with "Unknown register:
+    # 'r0'", because r0 is not in the SPARC register map.
+    "sparc":     SPARCHalMixin,
 }
