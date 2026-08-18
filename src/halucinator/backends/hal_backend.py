@@ -445,6 +445,11 @@ class ARM32HalMixin(_ABIBase):
     """
     ARM32 / Cortex-M ABI: args in r0–r3 then stack, return addr in lr,
     return value in r0.
+
+    AAPCS reserves no home space for the register-passed arguments, so at the
+    callee's entry the fifth argument is the word AT the stack pointer, the
+    sixth is at sp+4, and so on — ascending. ``get_arg`` and ``set_args`` below
+    both index from that base.
     """
     WORD_SIZE = 4
     REGISTERS = tuple(f"r{i}" for i in range(13)) + ("sp", "lr", "pc", "cpsr")
@@ -461,10 +466,24 @@ class ARM32HalMixin(_ABIBase):
         for i, v in enumerate(args[:4]):
             self.write_register(f"r{i}", v)
         if len(args) > 4:
-            sp = self.read_register("sp")
-            for i, v in enumerate(args[4:]):
-                sp -= 4
-                self.write_memory(sp, 4, v)
+            extra = args[4:]
+            # Allocate the whole outgoing block, then fill it ASCENDING so the
+            # fifth argument lands at the FINAL sp — which is where get_arg
+            # looks for it.
+            #
+            # This used to push one word at a time (`sp -= 4` then write), which
+            # placed the fifth argument at the HIGHEST address and the last at
+            # the lowest. The pair therefore round-tripped reversed: set_args
+            # [a,b,c,d,e,f] then get_arg(4) returned f, not e. Silent, and only
+            # visible on a call with more than four arguments.
+            #
+            # The block is rounded up to 8 bytes because AAPCS requires SP to be
+            # 8-byte aligned at a public interface; the padding sits ABOVE the
+            # arguments so the fifth stays at sp+0.
+            size = ((4 * len(extra)) + 7) & ~7
+            sp = (self.read_register("sp") - size) & 0xFFFFFFFF
+            for i, v in enumerate(extra):
+                self.write_memory(sp + i * 4, 4, v)
             self.write_register("sp", sp)
 
     def get_ret_addr(self) -> int:
