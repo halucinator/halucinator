@@ -445,6 +445,11 @@ class ARM32HalMixin(_ABIBase):
     """
     ARM32 / Cortex-M ABI: args in r0–r3 then stack, return addr in lr,
     return value in r0.
+
+    AAPCS reserves no home space for the register-passed arguments, so at the
+    callee's entry the fifth argument is the word AT the stack pointer, the
+    sixth is at sp+4, and so on — ascending. ``get_arg`` and ``set_args`` below
+    both index from that base.
     """
     WORD_SIZE = 4
     REGISTERS = tuple(f"r{i}" for i in range(13)) + ("sp", "lr", "pc", "cpsr")
@@ -461,10 +466,24 @@ class ARM32HalMixin(_ABIBase):
         for i, v in enumerate(args[:4]):
             self.write_register(f"r{i}", v)
         if len(args) > 4:
-            sp = self.read_register("sp")
-            for i, v in enumerate(args[4:]):
-                sp -= 4
-                self.write_memory(sp, 4, v)
+            extra = args[4:]
+            # Allocate the whole outgoing block, then fill it ASCENDING so the
+            # fifth argument lands at the FINAL sp — which is where get_arg
+            # looks for it.
+            #
+            # This used to push one word at a time (`sp -= 4` then write), which
+            # placed the fifth argument at the HIGHEST address and the last at
+            # the lowest. The pair therefore round-tripped reversed: set_args
+            # [a,b,c,d,e,f] then get_arg(4) returned f, not e. Silent, and only
+            # visible on a call with more than four arguments.
+            #
+            # The block is rounded up to 8 bytes because AAPCS requires SP to be
+            # 8-byte aligned at a public interface; the padding sits ABOVE the
+            # arguments so the fifth stays at sp+0.
+            size = ((4 * len(extra)) + 7) & ~7
+            sp = (self.read_register("sp") - size) & 0xFFFFFFFF
+            for i, v in enumerate(extra):
+                self.write_memory(sp + i * 4, 4, v)
             self.write_register("sp", sp)
 
     def get_ret_addr(self) -> int:
@@ -865,6 +884,52 @@ class SPARCHalMixin(_ABIBase):
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
+
+class M68KHalMixin(_ABIBase):
+    """
+    Motorola 68000 / ColdFire ABI (System V m68k): all arguments are passed on
+    the STACK, the return address is the longword at [sp] after a ``jsr``, and
+    the return value comes back in ``d0``.
+
+    Stack at function entry (jsr has already pushed the return address):
+        [sp] = return addr, [sp+4] = arg0, [sp+8] = arg1, ...
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        tuple(f"d{i}" for i in range(8))
+        + tuple(f"a{i}" for i in range(8))
+        + ("pc", "sr")
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        sp = self.read_register("sp")
+        return self.read_memory(sp + (idx + 1) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        # Write the args above the return address without moving sp; the
+        # caller owns stack cleanup, as on x86 cdecl.
+        sp = self.read_register("sp")
+        for i, v in enumerate(args):
+            self.write_memory(sp + (i + 1) * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_memory(self.read_register("sp"), 4, 1)
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_memory(self.read_register("sp"), 4, ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        # Emulate `rts`: pop the return address and jump to it.
+        sp = self.read_register("sp")
+        ret_addr = self.read_memory(sp, 4, 1)
+        regs = {"sp": sp + 4, "pc": ret_addr}
+        if ret_value is not None:
+            regs["d0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
 ABI_MIXINS: Dict[str, type] = {
     "cortex-m3": ARM32HalMixin,
     "arm":       ARM32HalMixin,
@@ -888,4 +953,5 @@ ABI_MIXINS: Dict[str, type] = {
     # the first intercept to read an argument dies with "Unknown register:
     # 'r0'", because r0 is not in the SPARC register map.
     "sparc":     SPARCHalMixin,
+    "m68k":      M68KHalMixin,
 }

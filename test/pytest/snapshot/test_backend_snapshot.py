@@ -200,6 +200,41 @@ class TestUnicornNative:
         assert after_mem == before_mem, "RAM/flash not byte-identical after restore"
         assert after_regs == before_regs, "registers not identical after restore"
 
+    def test_portable_snapshot_preserves_banked_sp_when_unprivileged(self):
+        """An MPU Cortex-M runs its tasks unprivileged (CONTROL.nPRIV=1), and
+        MRS of the banked MSP/PSP reads 0 there. Snapshot has to capture the
+        real values, and put them back. Otherwise the guest survives the
+        restore and dies at its next exception, pushing a frame at 0.
+        """
+        from unicorn import arm_const as A
+        b = _make_unicorn()
+        msp, psp = RAM_BASE + 0x3000, RAM_BASE + 0x2000
+        b._uc.reg_write(A.UC_ARM_REG_MSP, msp)
+        b._uc.reg_write(A.UC_ARM_REG_PSP, psp)
+        b._uc.reg_write(A.UC_ARM_REG_CONTROL, 0x3)   # unprivileged, PSP-selected
+
+        # Not the zeros an unprivileged read would give.
+        captured = b._capture_portable_regs()["m_sysregs"]
+        assert captured["msp"] == msp, "portable capture zeroed MSP (unprivileged)"
+        assert captured["psp"] == psp, "portable capture zeroed PSP (unprivileged)"
+
+        # Round-trip: clobber the SPs, restore, check they came back.
+        snap = b.save_state(portable=True)
+
+        def _priv(fn):
+            b._uc.reg_write(A.UC_ARM_REG_IPSR, 2)   # handler mode => privileged
+            try:
+                return fn()
+            finally:
+                b._uc.reg_write(A.UC_ARM_REG_IPSR, 0)
+
+        _priv(lambda: (b._uc.reg_write(A.UC_ARM_REG_MSP, 0),
+                       b._uc.reg_write(A.UC_ARM_REG_PSP, 0)))
+        assert b.restore_state(snap) is True
+        got = _priv(lambda: (b._uc.reg_read(A.UC_ARM_REG_MSP),
+                             b._uc.reg_read(A.UC_ARM_REG_PSP)))
+        assert got == (msp, psp), "restore did not rewrite the banked SPs"
+
     def test_deterministic_resume_executes_identically(self):
         """Snapshot at a PC, run a fixed Thumb sequence, capture state; restore
         and run the SAME sequence again — the resulting machine image must be

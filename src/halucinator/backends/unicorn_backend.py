@@ -13,6 +13,7 @@ Supported: ARM Thumb / ARM Cortex-M (primary target for halucinator).
 from __future__ import annotations
 
 import logging
+import os
 import struct
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -51,6 +52,10 @@ try:
     except ImportError:
         riscv_const = None  # type: ignore[assignment]
     try:
+        import unicorn.m68k_const as m68k_const
+    except ImportError:
+        m68k_const = None  # type: ignore[assignment]
+    try:
         import unicorn.tricore_const as tricore_const
     except ImportError:
         tricore_const = None  # type: ignore[assignment]
@@ -68,6 +73,7 @@ except ImportError:
     ppc_const = None  # type: ignore[assignment]
     x86_const = None  # type: ignore[assignment]
     riscv_const = None  # type: ignore[assignment]
+    m68k_const = None  # type: ignore[assignment]
     tricore_const = None  # type: ignore[assignment]
     sparc_const = None  # type: ignore[assignment]
 
@@ -97,6 +103,10 @@ _ARCH_MAP: Dict[str, Tuple[str, str, bool, bool, int]] = {
     # I/M/A/C extensions + Zicsr with no CPU-model pin; bare-metal images link
     # at DRAM base 0x8000_0000. No thumb, little-endian, 4-byte words.
     "riscv32":        ("riscv",  "riscv32_le", False, False, 4),
+    # Motorola 68000 family, BIG-endian. Covers both ColdFire (MCF5206/5208/
+    # V4e -- the embedded line) and the classic 68000/020/040/060, selected at
+    # run time by HAL_M68K_CPU_MODEL; see init(). 4-byte words, no thumb.
+    "m68k":           ("m68k",   "m68k_be",  False, True,  4),
     # Infineon TriCore (AURIX TC2xx/TC3xx). Little-endian, 32-bit.
     #
     # NOTE: Unicorn exposes NO `UC_MODE_TRICORE*` constant -- the only mode
@@ -124,6 +134,35 @@ _PERM_MAP = {
     "xr":  0x5,
     "xrw": 0x7,
 }
+
+# QEMU's m68k translator raises this out to the host instead of completing an
+# `rte` itself (target/m68k/cpu.h: EXCP_RTE). unicorn does not run QEMU's
+# do_interrupt, so the backend must finish the return -- see _m68k_handle_rte.
+_M68K_EXCP_RTE = 0x100
+
+# Instruction budget per run chunk while an m68k interrupt is asserted but
+# masked. Small enough to land inside a short IPL-0 window in a spin loop,
+# large enough not to dominate when nothing is deferred.
+# Instruction budgets used for the run chunk while every asserted m68k
+# interrupt is masked by the current IPL.
+#
+# Firmware that spins waiting for its own ISR only opens a few-instruction
+# window per pass -- FreeRTOS's vPortEnterCritical drops to IPL 0 for about a
+# third of each iteration -- so the chunk has to be short enough to land inside
+# it. But a FIXED short chunk PHASE-LOCKS against a fixed-length spin loop: the
+# boundary lands at the same offset in the loop every time and, if that offset
+# is in the masked window, the interrupt is NEVER delivered no matter how many
+# times it is retried. That is not hypothetical -- it wedged FreeRTOS here with
+# the yield permanently pending and SR.IPL reading 7 at every single retry.
+#
+# Cycling through mutually-prime budgets makes the sample phase drift across
+# the loop, so the unmasked window is always reached within a few retries.
+# Mixed scales on purpose: the small budgets are what actually land inside a
+# spin loop's brief unmasked window, while the large ones keep average
+# throughput up so the guest still makes real progress. All mutually prime, so
+# the sample phase drifts instead of locking.
+_MASKED_RETRY_CHUNKS = (13, 509, 17, 1021, 23, 2039, 29, 4093, 11, 8191)
+_MASKED_RETRY_CHUNK = int(os.environ.get("HAL_M68K_MASKED_CHUNK", "1") or 0)
 
 _REG_MAPS_CACHE: Dict[str, Dict[str, int]] = {}
 
@@ -385,6 +424,33 @@ def _get_riscv_reg_map() -> Dict[str, int]:
         m[name] = m[f"x{idx}"]
     m["pc"] = riscv_const.UC_RISCV_REG_PC
     _REG_MAPS_CACHE["riscv"] = m
+def _get_m68k_reg_map() -> Dict[str, int]:
+    if "m68k" in _REG_MAPS_CACHE:
+        return _REG_MAPS_CACHE["m68k"]
+    if m68k_const is None:
+        return {}
+    m: Dict[str, int] = {
+        **{f"d{i}": getattr(m68k_const, f"UC_M68K_REG_D{i}") for i in range(8)},
+        **{f"a{i}": getattr(m68k_const, f"UC_M68K_REG_A{i}") for i in range(8)},
+        "pc": m68k_const.UC_M68K_REG_PC,
+        "sr": m68k_const.UC_M68K_REG_SR,
+    }
+    # A7 IS the stack pointer on m68k, and A6 is the conventional frame
+    # pointer. halucinator's generic code (dispatch loop, MMIO pc capture,
+    # regs.sp) uses the neutral "sp"/"fp" names.
+    m["sp"] = m["a7"]
+    m["fp"] = m["a6"]
+    # Control registers that matter for exception work: VBR relocates the
+    # vector table, and the banked stack pointers separate user/supervisor.
+    for name, const_name in (("vbr", "UC_M68K_REG_CR_VBR"),
+                             ("usp", "UC_M68K_REG_CR_USP"),
+                             ("msp", "UC_M68K_REG_CR_MSP"),
+                             ("isp", "UC_M68K_REG_CR_ISP"),
+                             ("cacr", "UC_M68K_REG_CR_CACR")):
+        v = getattr(m68k_const, const_name, None)
+        if v is not None:
+            m[name] = v
+    _REG_MAPS_CACHE["m68k"] = m
     return m
 
 
@@ -408,6 +474,8 @@ def _reg_map_for_arch(arch: str) -> Dict[str, int]:
         return _get_x86_reg_map()
     if uc_arch == "riscv":
         return _get_riscv_reg_map()
+    if uc_arch == "m68k":
+        return _get_m68k_reg_map()
     if uc_arch == "sparc":
         return _get_sparc_reg_map()
     return {}
@@ -469,6 +537,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         self._next_bp_id = 1
         self._stopped = True
         self._bp_hit_addr: Optional[int] = None
+        self._det_chunk_pending: int = 0   # see cont(): banked tick credit
         # One-shot: when set, _code_hook lets execution pass this breakpoint
         # address ONCE without stopping. Used to step over a breakpoint after
         # an observe-only (non-intercept) bp_handler so the real function runs.
@@ -573,6 +642,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # missing GDT), it stashes the resume EIP here so cont() re-enters
         # emu_start instead of aborting on the UcError. None when idle.
         self._x86_resume_eip: Optional[int] = None
+        # m68k: deferred condition-code transplant owed by an `rte`.
+        self._m68k_pending_ccr: Optional[tuple] = None
+        self._m68k_ctx_stack: List[Any] = []
 
         # Opt-in: skip an unhandled SVC instruction (advance past it and
         # zero r0) instead of aborting. Used to
@@ -656,6 +728,10 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 if mode_str.startswith("riscv64")
                 else unicorn.UC_MODE_RISCV32
             )
+        elif arch_str == "m68k":
+            uc_arch = unicorn.UC_ARCH_M68K
+            # The 68000 family is big-endian in every variant we target.
+            uc_mode = unicorn.UC_MODE_BIG_ENDIAN
         elif arch_str == "tricore":
             uc_arch = unicorn.UC_ARCH_TRICORE
             # Unicorn accepts ONLY mode 0 for TriCore (see _ARCH_MAP note);
@@ -736,6 +812,56 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             else:
                 log.warning("UnicornBackend: unknown HAL_ARM_CPU_MODEL=%r",
                             model_name)
+
+        # m68k: TWO things must be set here or real firmware dies in its
+        # reset path, and neither is obvious from a failing run.
+        #
+        # (1) CPU MODEL. unicorn's default m68k core behaves like a ColdFire
+        #     V4e, whose ISA genuinely REMOVED word-sized immediate ops
+        #     (addi.w/eori.w) and the whole dbcc family (dbf/dbra). Classic
+        #     68k code using them therefore takes an illegal-instruction trap
+        #     (vector 4) and looks like "unicorn can't decode m68k" -- this is
+        #     the substance of unicorn issue #1502, which is a CPU-MODEL
+        #     SELECTION problem, not a decode gap. Verified across models:
+        #       addi.w / eori.w / dbf   ok on M5206, M68000, M68040
+        #                               vector-4 trap on M5208, CFV4E, default
+        #     Default to MCF5206 (ColdFire V2: the embedded line this fleet
+        #     targets, and the most permissive of the ColdFire models), and let
+        #     a classic-68k image pin its own core:
+        #       HAL_M68K_CPU_MODEL=UC_CPU_M68K_M68040
+        #
+        # (2) SUPERVISOR MODE. Real 68k/ColdFire parts RESET INTO SUPERVISOR
+        #     STATE (SR.S set). unicorn resets SR to 0x0004 -- user mode -- so
+        #     the first privileged instruction in any reset stub (`move to SR`,
+        #     `movec` to VBR/CACR, ...) takes a privilege-violation trap
+        #     (vector 8) before the firmware reaches main(). Seed SR to
+        #     0x2700: S=1, IPL=7 (interrupts masked until the firmware lowers
+        #     the level itself), matching the architectural reset state.
+        #     Same class of fix as the PPC64 MSR.SF seed below.
+        if arch_str == "m68k" and m68k_const is not None:
+            import os as _os
+            _m68k_name = _os.environ.get("HAL_M68K_CPU_MODEL",
+                                         "UC_CPU_M68K_M5206")
+            _m68k_model = (getattr(m68k_const, _m68k_name, None)
+                           if _m68k_name.startswith("UC_CPU_M68K_") else None)
+            if _m68k_model is None:
+                hlog.warning("UnicornBackend: unknown HAL_M68K_CPU_MODEL=%r;"
+                             " using UC_CPU_M68K_M5206", _m68k_name)
+                _m68k_model = m68k_const.UC_CPU_M68K_M5206
+            try:
+                self._uc.ctl_set_cpu_model(_m68k_model)
+                if _m68k_name != "UC_CPU_M68K_M5206":
+                    hlog.info("UnicornBackend: m68k CPU model = %s", _m68k_name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "UnicornBackend: ctl_set_cpu_model(%s) failed (%s) -- "
+                    "classic-68k opcodes may trap as illegal", _m68k_name, exc)
+            # Architectural reset SR: supervisor, all interrupts masked.
+            try:
+                self._uc.reg_write(m68k_const.UC_M68K_REG_SR, 0x2700)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("UnicornBackend: could not seed m68k SR "
+                            "(supervisor) -- privileged init will trap: %s", exc)
 
         # PPC64 needs MSR.SF=1 so the CPU decodes 64-bit instructions.
         # Without it, any ld/std fires UC_ERR_EXCEPTION immediately.
@@ -1224,6 +1350,111 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         for pc, n in hist.most_common(top):
             log.info("  0x%08x  x%d", pc, n)
 
+    def _m68k_apply_pending_ccr(self) -> None:
+        """Apply a deferred condition-code transplant (see _m68k_handle_rte).
+
+        Restores the CPUState snapshot taken at exception entry -- whose only
+        irreplaceable content is the lazy flag state unicorn will not expose --
+        then re-applies the architectural registers the ISR left behind, plus
+        the return PC/SP, so a context-switching handler's deliberate changes
+        survive.
+        """
+        pending = getattr(self, "_m68k_pending_ccr", None)
+        self._m68k_pending_ccr = None
+        if pending is None:
+            return
+        ctx, post = pending
+        pc = self.read_register("pc")
+        sp = self.read_register("sp")
+        try:
+            self._uc.context_restore(ctx)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k: context_restore failed (%s) -- condition codes "
+                      "lost across this exception return", exc)
+            return
+        try:
+            for name, val in post.items():
+                self.write_register(name, val)
+            self.write_register("sp", sp)
+            self.write_register("pc", pc)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k: could not re-apply post-ISR registers (%s)", exc)
+
+    def _m68k_handle_rte(self) -> bool:
+        """Complete an `rte`: pop the ColdFire exception frame and resume.
+
+        Frame layout (pushed by _apply_pending_irq_m68k):
+            SP+0 : FORMAT | FS | VECTOR | FS | SR[15:0]
+            SP+4 : PC
+
+        ORDER IS LOAD-BEARING. A7 is banked on m68k -- it is the supervisor
+        stack pointer only while SR.S is set. We are in supervisor state here
+        (we got in via an exception), so A7 is popped and written back BEFORE
+        SR is restored; restoring SR first could clear S and silently redirect
+        the write to the user stack pointer. Returns True if a frame was
+        consumed.
+        """
+        try:
+            sp = self.read_register("sp")
+            fmt_word = self.read_memory(sp, 4, 1)
+            ret_pc = self.read_memory(sp + 4, 4, 1)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k rte: cannot read the exception frame at "
+                      "sp=0x%08x (%s)", locals().get("sp", -1), exc)
+            return False
+        ret_sr = fmt_word & 0xFFFF
+        vector = (fmt_word >> 18) & 0xFF
+
+        # Capture what the ISR actually leaves behind BEFORE any context
+        # restore. For a well-behaved handler these equal the pre-exception
+        # values (it saved and restored what it used); for a context-switching
+        # handler (an RTOS scheduler) they are deliberately different, and
+        # those differences must survive.
+        _gpr = [f"d{i}" for i in range(8)] + [f"a{i}" for i in range(8)]
+        try:
+            post = {n: self.read_register(n) for n in _gpr}
+        except Exception:  # noqa: BLE001
+            post = {}
+
+        # Transplant the condition codes. See _apply_pending_irq_m68k: the CCR
+        # is invisible to unicorn and is destroyed by the SR write that
+        # entering an exception requires, so the only carrier is the CPUState
+        # snapshot taken at delivery. Restoring it rewinds the ARCHITECTURAL
+        # registers too, so re-apply the ISR's results on top -- what we want
+        # from the snapshot is only the lazy flag state.
+        ctx = None
+        stack = getattr(self, "_m68k_ctx_stack", None)
+        if stack:
+            ctx = stack.pop()
+        # DEFER the restore. context_restore() called from inside a hook while
+        # emu_start is on the stack is undone when unicorn unwinds -- the flags
+        # come back and are then immediately discarded. Stash it and apply it
+        # between chunks, the same place PC/SP mutation is already safe.
+        if ctx is not None and not os.environ.get("HAL_M68K_NO_CCR_FIX"):
+            self._m68k_pending_ccr = (ctx, post)
+
+        try:
+            # supervisor bank still live -> pop, THEN restore SR. Skip the SR
+            # write when it would be a no-op: writing SR clobbers the flags we
+            # just went to the trouble of recovering.
+            self.write_register("sp", (sp + 8) & 0xFFFFFFFF)
+            self.write_register("pc", ret_pc)
+            if ctx is None and (self.read_register("sr") & 0xFFFF) != ret_sr:
+                self.write_register("sr", ret_sr)
+        except Exception as exc:  # noqa: BLE001
+            log.error("m68k rte: could not restore state (%s)", exc)
+            return False
+        hlog.info("m68k rte: vector %d -> resuming pc=0x%08x sr=0x%04x "
+                 "(sp 0x%08x -> 0x%08x)", vector, ret_pc, ret_sr, sp, sp + 8)
+        # Restart the emulator at the restored PC: the current translation
+        # block is mid-`rte`, so we cannot simply fall through.
+        self._exc_return_pending = True
+        try:
+            self._uc.emu_stop()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def _intr_hook(self, uc, intno, user_data):
         try:
             pc = self.read_register("pc")
@@ -1241,6 +1472,17 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if (self.arch_name == "x86" and pc != -1
                 and self._x86_handle_seg_fault(uc, pc)):
             return
+        # m68k: unicorn does NOT implement `rte`. QEMU's m68k translator
+        # raises EXCP_RTE (0x100) out to the host and completes the return in
+        # m68k_cpu_do_interrupt(), which unicorn does not run -- so `rte` here
+        # traps to this hook forever and the ISR never returns. Emulate it: pop
+        # the exception frame the delivery path pushed and resume. Exact
+        # counterpart of the Cortex-M EXC_RETURN unwind below.
+        if (self.arch_name == "m68k" and intno == _M68K_EXCP_RTE
+                and not os.environ.get("HAL_M68K_NO_RTE_FIX")):
+            if self._m68k_handle_rte():
+                return
+
         # On cortex-m3, an ISR returning via `bx lr` jumps to an
         # EXC_RETURN magic value (top nibble 0xF). Unicorn raises an
         # exception here rather than firing the fetch-unmapped hook,
@@ -2172,6 +2414,35 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _with_m_profile_privilege(self, fn):
+        """Run fn() with the core briefly in handler mode.
+
+        Reading MSP/PSP unprivileged gives 0, and writing them does nothing --
+        QEMU's MRS/MSR helpers require privilege for the banked SPs. An MPU
+        RTOS runs its tasks unprivileged (FreeRTOS ARM_CM4_MPU sets CONTROL=3
+        in prvRestoreContextOfFirstTask), so the snapshot path has to get out
+        of that state before it can see the real stack pointers.
+
+        IPSR != 0 means handler mode, which is privileged. Set it, do the work,
+        put it back. Nothing else in xPSR is touched. Already in handler mode,
+        or no IPSR constant in this unicorn build: nothing to do.
+
+        Exception entry uses the same trick.
+        """
+        ipsr_rid = getattr(arm_const, "UC_ARM_REG_IPSR", None)
+        if ipsr_rid is None:
+            return fn()
+        saved = self._uc.reg_read(ipsr_rid)
+        entered = saved == 0
+        if entered:
+            # Any non-zero exception number gets us handler mode.
+            self._uc.reg_write(ipsr_rid, 2)
+        try:
+            return fn()
+        finally:
+            if entered:
+                self._uc.reg_write(ipsr_rid, saved)
+
     def _capture_portable_regs(self) -> Dict[str, Any]:
         """Architectural state as plain python values — safe to pickle and
         restore in a different process (unlike a raw uc context blob)."""
@@ -2194,6 +2465,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     sysregs[suffix.lower()] = uc.reg_read(rid)
                 except Exception:  # noqa: BLE001
                     continue
+
+            # The loop above read MSP/PSP without privilege, so on an MPU
+            # guest (CONTROL.nPRIV=1) both came back 0. Re-read them properly.
+            # Skipping this costs you MSP=PSP=0 in the snapshot, and the
+            # restore writes those back happily -- it blows up later, at the
+            # next exception, pushing a frame at address 0.
+            def _reread_banked_sps():
+                for s in ("MSP", "PSP"):
+                    rid = getattr(arm_const, f"UC_ARM_REG_{s}", None)
+                    if rid is None:
+                        continue
+                    try:
+                        sysregs[s.lower()] = uc.reg_read(rid)
+                    except Exception:  # noqa: BLE001
+                        continue
+            self._with_m_profile_privilege(_reread_banked_sps)
+
             state["m_sysregs"] = sysregs
             state["vfp"] = self._capture_vfp()  # FPU-equipped M-profile
         else:
@@ -2223,15 +2511,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._restore_vfp(state["vfp"])
         if "banked" in state:
             self._restore_banked_regs(state["banked"])
-        for suffix_l, value in state.get("m_sysregs", {}).items():
-            rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
-            if rid is None:
-                continue
-            try:
-                uc.reg_write(rid, value)
-            except Exception:  # noqa: BLE001
-                log.warning("restore_state: m-profile %s not writable; "
-                            "skipped", suffix_l)
+        # Same privilege problem on the way back in: an MSR to MSP/PSP is
+        # dropped if we are unprivileged when we get here, which depends on
+        # whatever CONTROL the snapshot happens to restore. Do the writes in
+        # handler mode so they stick either way. The cpsr write further down
+        # sets the real mode.
+        def _write_m_sysregs():
+            for suffix_l, value in state.get("m_sysregs", {}).items():
+                rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
+                if rid is None:
+                    continue
+                try:
+                    uc.reg_write(rid, value)
+                except Exception:  # noqa: BLE001
+                    log.warning("restore_state: m-profile %s not writable; "
+                                "skipped", suffix_l)
+        if state.get("m_sysregs"):
+            self._with_m_profile_privilege(_write_m_sysregs)
         ordered = sorted(regs,
                          key=lambda n: (0 if n == "cpsr" else
                                         2 if n == "pc" else 1))
@@ -2496,7 +2792,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         _chunk_env = __os.environ.get("HAL_IRQ_CHUNK")
         if _chunk_env:
             irq_chunk = int(_chunk_env, 0)
-        elif self.arch_name in ("x86", "arm"):
+        elif self.arch_name in ("x86", "arm", "m68k"):
+            # m68k joins the bounded-chunk arches for the same reason: it has
+            # no native exception machinery in unicorn, so every interrupt is
+            # synthesised BETWEEN chunks by _apply_pending_irq_m68k. With an
+            # unbounded run (count=0) emu_start never returns on its own, the
+            # pending queue is never drained, and a configured HAL_DET_TICK
+            # simply never fires -- silently, with no diagnostic. Any future
+            # arch that delivers IRQs in-process must be added here too.
             irq_chunk = 2_000_000
         else:
             irq_chunk = 0
@@ -2523,20 +2826,98 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # Drain any IRQs queued from another thread before
             # resuming — the synthetic exception frame setup mutates
             # PC/SP, only safe when emu_start is not running.
-            self._drain_pending_irqs()
-            # Deliver a PendSV requested from thread mode (the ICSR write hook
-            # emu_stop'd us and parked PC on the store). Done here, at the top of
-            # the loop, so it survives an intervening breakpoint stop: the parked
-            # request stays set across a cont() return/re-entry (a bp handler
-            # runs between) and is delivered when execution next resumes.
+            if self.arch_name == "m68k":
+                self._m68k_all_masked = False
+                # Deliver AT MOST ONE m68k interrupt per boundary. Entering an
+                # exception raises SR.IPL to that interrupt's level, so
+                # draining the rest of the batch in the same pass immediately
+                # masks every lower-priority vector in it -- they get deferred,
+                # and on the next boundary the same higher-priority interrupt
+                # wins again. A lower-priority vector then NEVER runs.
+                # Concretely: the FreeRTOS tick (level 6) starved its yield
+                # (level 3) forever, so INTFRCL was never cleared and
+                # vPortEnterCritical spun with the scheduler suspended.
+                # Real hardware takes one exception at a time; the rest stay
+                # asserted and are taken as the IPL comes back down.
+                # Take the first DELIVERABLE vector -- one exception per
+                # boundary, but skip past any that the current IPL masks so a
+                # masked high-priority line cannot block a deliverable lower
+                # one. Anything not taken stays asserted for the next boundary.
+                if self._pending_irqs:
+                    _delivered = False
+                    for _idx in range(len(self._pending_irqs)):
+                        _v = self._pending_irqs[_idx]
+                        if self._apply_pending_irq_m68k(_v):
+                            self._pending_irqs.pop(_idx)
+                            _delivered = True
+                            break
+                    # Nothing could be delivered: everything asserted is masked
+                    # by the current IPL. Shorten the next chunk so the mask is
+                    # re-sampled soon (firmware spinning for its own ISR only
+                    # opens a few-instruction window). Do NOT shorten when a
+                    # delivery succeeded -- that would throttle normal running.
+                    self._m68k_all_masked = not _delivered
+            else:
+                self._drain_pending_irqs()
+            # m68k: apply a deferred condition-code transplant left by an
+            # `rte` (see _m68k_handle_rte). Must happen HERE -- outside
+            # emu_start -- or unicorn discards it on unwind.
+            if getattr(self, "_m68k_pending_ccr", None) is not None:
+                self._m68k_apply_pending_ccr()
+            # Deliver a PendSV requested from thread mode (cortex-m; the ICSR
+            # write hook emu_stop'd us and parked PC on the store). Survives an
+            # intervening breakpoint stop; guarded, so a no-op on non-cortex-m.
             if getattr(self, "_pendsv_store_parked", False):
                 self._maybe_deliver_thread_pendsv()
             pc = self.read_register("pc")
             # Unicorn takes the instruction set from bit 0 of the start
             # address on EVERY emu_start -- see _resume_addr().
             start = self._resume_addr(pc)
+            # ADAPTIVE CHUNK: an interrupt that is asserted but currently MASKED
+            # can only be re-tried at a chunk boundary. Firmware that spins
+            # waiting for that interrupt's handler to run -- FreeRTOS's
+            # vPortEnterCritical waits for the yield ISR to clear INTFRCL, and
+            # only opens a few-instruction window at IPL 0 each pass -- then
+            # burns a WHOLE chunk per attempt. Shorten the chunk while anything
+            # is deferred so the mask is re-sampled often enough to catch the
+            # window; back to the full chunk as soon as nothing is deferred.
+            _chunk = irq_chunk
+            if (_chunk and self.arch_name == "m68k"
+                    and _MASKED_RETRY_CHUNK
+                    and getattr(self, "_m68k_all_masked", False)):
+                # Something is still ASSERTED and undelivered -- either masked
+                # by the current IPL, or queued behind the one interrupt we
+                # take per boundary. Test _pending_irqs, NOT the masked list:
+                # the masked list is drained back into _pending_irqs just
+                # above, so it is always empty here and the adaptive chunk
+                # would never engage.
+                self._m68k_retry_i = getattr(self, "_m68k_retry_i", 0) + 1
+                _chunk = _MASKED_RETRY_CHUNKS[
+                    self._m68k_retry_i % len(_MASKED_RETRY_CHUNKS)]
+            # The deterministic tick paces on COMPLETED CHUNKS, so a shortened
+            # retry chunk must not count -- otherwise shortening the chunk to
+            # catch a masked interrupt also multiplies the tick rate by
+            # (irq_chunk / retry_chunk) and starves the guest of real work.
+            self._last_chunk_full = (_chunk == irq_chunk)
+            # Pace the deterministic tick on INSTRUCTIONS, not chunks: the
+            # chunk length is now adaptive, so a chunk-based pacer makes the
+            # tick rate swing by orders of magnitude with the interrupt state.
+            #
+            # BANK the credit here; it is paid out below only once the run has
+            # actually completed the chunk. Paying it here -- unconditionally,
+            # before emu_start -- would count a pass cut short at its very first
+            # instruction as a full chunk of guest execution. On a device with
+            # dense function-boundary intercepts that is nearly every pass: each
+            # intercept stops the run and banks a whole chunk of imaginary
+            # instructions, so the tick fires once per _det_period *intercepts*
+            # rather than once per _det_period *chunks*, inflated by the entire
+            # chunk length. With a large chunk the tick storms hard enough that
+            # the guest re-enters its tick handler faster than it can leave, and
+            # the rehost livelocks with no diagnostic: execution continues, the
+            # ISR runs, and no forward progress is ever made.
+            self._det_chunk_pending = _chunk
             try:
-                self._uc.emu_start(start, until, timeout=0, count=irq_chunk)
+                self._uc.emu_start(start, until, timeout=0, count=_chunk)
             except unicorn.UcError as _uc_err:
                 if self._stopped:
                     return  # stopped by breakpoint hook — normal
@@ -2745,6 +3126,31 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             # case honour the stop and deliver on the next cont() entry.
             if not self._stopped and getattr(self, "_pendsv_store_parked", False):
                 continue
+            # Deterministic system-clock tick accounting happens BEFORE the
+            # pending-IRQ short-circuit below. A peripheral that rings a
+            # doorbell frequently (a ColdFire INTC force-interrupt driving an
+            # RTOS yield, say) leaves _pending_irqs non-empty on almost every
+            # chunk; with the pacer behind that `continue` the system tick
+            # STARVES COMPLETELY -- the RTOS runs but every vTaskDelay blocks
+            # forever, with no diagnostic. Observed on m68k/FreeRTOS.
+            # Pay out the banked chunk only if this pass ran it. `not
+            # self._stopped` is exactly "emu_start returned on count/until
+            # rather than on an emu_stop from a breakpoint hook", i.e. the guest
+            # really did retire the chunk. This is the rule the wall-clock
+            # backstop in __init__ already documents -- "the pacer only advances
+            # on a chunk that finishes without hitting a breakpoint" -- and both
+            # firing sites below already require `not self._stopped`, so only
+            # the accrual changes.
+            if irq_chunk and not self._stopped:
+                self._det_insns = (getattr(self, "_det_insns", 0)
+                                   + getattr(self, "_det_chunk_pending", 0))
+            self._det_chunk_pending = 0
+            if (irq_chunk and not self._stopped and self._det_irq is not None
+                    and getattr(self, "_det_insns", 0)
+                    >= self._det_period * irq_chunk):
+                self._det_insns = 0
+                if self._det_irq not in self._pending_irqs:
+                    self._pending_irqs.append(self._det_irq)
             if self._pending_irqs:
                 continue
             # x86 runs in bounded chunks: a clean return means the chunk's
@@ -2754,7 +3160,8 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 # Deterministic system-clock tick: every _det_period completed chunks, queue the
                 # clock IRQ (instruction-count-paced, not wall-clock). Drained at the top of the
                 # next iteration like any pending IRQ.
-                if self._det_irq is not None:
+                if (self._det_irq is not None
+                        and getattr(self, "_last_chunk_full", True)):
                     self._det_chunks += 1
                     if self._det_chunks % self._det_period == 0:
                         # Chunks are completing, so keep the wall-clock
@@ -3397,7 +3804,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if self._uc is None:
             return
         pc = self.read_register("pc")
-        start = (pc | 1) if self._is_thumb else pc
+        start = self._resume_addr(pc)
         until = (1 << (self._word_size * 8)) - 1
         try:
             self._uc.emu_start(start, until, timeout=0, count=1)
