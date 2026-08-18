@@ -516,6 +516,20 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             )
         self.config = config
         self.arch_name = arch
+        # Breakpoint keys drop bit 0 because on 32-bit ARM that bit is the
+        # Thumb interworking flag, not part of the address -- a bp requested at
+        # `func|1` and a PC of `func` must be the same key.
+        #
+        # That is only sound where instructions are at least 2-byte aligned,
+        # which holds for every architecture here EXCEPT x86, whose
+        # instructions are byte-aligned and genuinely do live at odd
+        # addresses. Masking there was wrong twice over: a breakpoint on an odd
+        # address was installed on its even neighbour (so it never fired where
+        # asked, and did fire on an unrelated instruction), and the two
+        # instructions at `a` and `a|1` collapsed onto one key, firing the same
+        # handler on both. In HAL_FAST_BP mode the range hook is bounded by the
+        # masked address as well, so the intended PC is never even hooked.
+        self._bp_addr_mask = 0xFFFFFFFF if arch == "x86" else 0xFFFFFFFE
         self._uc: Optional[Any] = None           # unicorn.Uc instance
         self._regions: List[MemoryRegion] = []
         self._bp_hooks: Dict[int, Tuple[int, Any]] = {}  # bp_id → (addr, hook_h)
@@ -2082,8 +2096,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
     def _code_hook(self, uc, addr: int, size: int, user_data: Any) -> None:
         """Called for every instruction; checks if addr is a breakpoint."""
         # Thumb bit lives in the low bit of PC on 32-bit ARM; for other archs
-        # instructions are at least 2-byte aligned so masking bit 0 is a no-op.
-        pc = addr & ~1
+        # instructions are at least 2-byte aligned so masking bit 0 is a no-op
+        # -- except on x86, where odd addresses are real. See _bp_addr_mask.
+        pc = addr & self._bp_addr_mask
         if pc in self._breakpoints:
             # One-shot skip: an observe-only handler just ran at this bp and
             # asked to resume the real function. Let this single instruction
@@ -2610,7 +2625,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         # a nasty source of flaky, order-dependent execution.
         self._skip_bp_once = None
         try:
-            self._bp_hit_addr = self.read_register("pc") & 0xFFFFFFFE
+            # Same key space as _breakpoints / _skip_bp_once -- masking
+            # differently here would make the one-shot skip miss on x86.
+            self._bp_hit_addr = self.read_register("pc") & self._bp_addr_mask
         except Exception:  # noqa: BLE001
             self._bp_hit_addr = None
         return True
@@ -2664,7 +2681,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         """Fast-bp mode: install a range-bounded UC_HOOK_CODE for one breakpoint
         address so Unicorn only enters _code_hook at that PC (blocks elsewhere
         run at full JIT speed). No-op unless the engine is up."""
-        a = addr & 0xFFFFFFFE
+        a = addr & self._bp_addr_mask
         if self._uc is None or a in self._per_bp_hooks:
             return
         self._per_bp_hooks[a] = self._uc.hook_add(
@@ -2675,7 +2692,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         bp_id = self._next_bp_id
         self._next_bp_id += 1
         # Store with Thumb bit cleared for comparison in _code_hook
-        self._breakpoints[addr & 0xFFFFFFFE] = bp_id
+        self._breakpoints[addr & self._bp_addr_mask] = bp_id
         if self._fast_bp_active:
             self._install_bp_hook(addr)
         return bp_id
@@ -2853,9 +2870,9 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             if getattr(self, "_pendsv_store_parked", False):
                 self._maybe_deliver_thread_pendsv()
             pc = self.read_register("pc")
-            # Unicorn Thumb mode needs the LSB set on the start
-            # address.
-            start = (pc | 1) if self._is_thumb else pc
+            # Unicorn takes the instruction set from bit 0 of the start
+            # address on EVERY emu_start -- see _resume_addr().
+            start = self._resume_addr(pc)
             # ADAPTIVE CHUNK: an interrupt that is asserted but currently MASKED
             # can only be re-tried at a chunk boundary. Firmware that spins
             # waiting for that interrupt's handler to run -- FreeRTOS's
@@ -3194,11 +3211,49 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if self._uc is not None:
             self._uc.emu_stop()
 
+    def _resume_addr(self, pc: int) -> int:
+        """The address to hand ``emu_start`` so the CPU keeps its instruction set.
+
+        unicorn's ``arm_set_pc()`` derives the Thumb flag from **bit 0 of the
+        start address on every single ``emu_start`` call** -- it does not read
+        the flag back out of CPSR. For an M-profile target that is invisible,
+        because ``_is_thumb`` is always True and we always OR in the 1. For an
+        **A-profile ARM** target (``arch: arm``) it is a silent correctness bug:
+        the moment the guest is executing Thumb (ARMv4T/v5 interworking, i.e.
+        anything built ``-mthumb`` / ``-mthumb-interwork``) and we stop -- at a
+        breakpoint, at an ``irq_chunk`` boundary, in ``step()`` -- resuming from
+        the even PC puts the CPU back into ARM decoding, and the *next*
+        instruction is decoded as garbage. Measured directly on unicorn 2.1.4:
+        two Thumb instructions at 0x1000, single-step the first, resume at
+        0x1002 -> ``UC_ERR_READ_UNMAPPED``; resume at 0x1003 -> correct.
+
+        This is not exotic: the AT91SAM7 (ARM7TDMI) Proxmark3 firmware compiles
+        its application in Thumb and only its USB/FPGA/command drivers in ARM,
+        which is the normal shape for every classic-ARM embedded image. With
+        ``irq_chunk`` defaulting to 2,000,000 for ``arch: arm`` the guest is
+        stopped and resumed constantly, so it derails within seconds.
+
+        Honour the guest's own CPSR.T instead. ARM-mode code is unaffected (the
+        bit is clear, the address is unchanged), so this cannot regress
+        device-bmxnoe-arm / device-iologik-e1200 / device-m340, which are pure
+        ARM-mode images.
+        """
+        if self._is_thumb:
+            return pc | 1
+        if self._is_arm_profile_a():
+            try:
+                cpsr = self._uc.reg_read(arm_const.UC_ARM_REG_CPSR)
+            except Exception:  # noqa: BLE001 - no CPSR on this build; keep old behaviour
+                return pc
+            if cpsr & 0x20:            # CPSR.T -- the guest is in Thumb state
+                return pc | 1
+        return pc
+
     def step(self) -> None:
         if self._uc is None:
             raise RuntimeError("Call UnicornBackend.init() first")
         pc = self.read_register("pc")
-        start = (pc | 1) if self._is_thumb else pc
+        start = self._resume_addr(pc)
         until = (1 << (self._word_size * 8)) - 1
         self._uc.emu_start(start, until, timeout=0, count=1)
 
@@ -3749,7 +3804,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
         if self._uc is None:
             return
         pc = self.read_register("pc")
-        start = (pc | 1) if self._is_thumb else pc
+        start = self._resume_addr(pc)
         until = (1 << (self._word_size * 8)) - 1
         try:
             self._uc.emu_start(start, until, timeout=0, count=1)

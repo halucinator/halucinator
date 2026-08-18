@@ -70,6 +70,8 @@ hlog = hal_log.getHalLogger()
 
 U32 = 0xFFFFFFFF
 NEG1 = 0xFFFFFFFF   # -1 as an ARM int return
+_MSG_PEEK = 0x2
+_MSG_DONTWAIT = 0x40
 
 
 class _HostConn:
@@ -113,6 +115,11 @@ class SocketBridge(BPHandler):
         # See register_handler / _h_accept / _h_recv for what each guards.
         self.accept_block_ms = 0
         self.recv_block_ms = 0
+        # Which argument carries recv()'s flags. POSIX recv is
+        # recv(fd, buf, len, flags), so 3. Set to -1 when the role is bound to a
+        # 3-argument read()-style function, where argument 3 is whatever junk
+        # happens to be in the register and must not be interpreted.
+        self.recv_flags_arg = 3
 
     # ---- registration -------------------------------------------------
     def register_handler(  # pylint: disable=too-many-arguments
@@ -122,6 +129,7 @@ class SocketBridge(BPHandler):
         poll_caller_lo: int = 0x200c91d0, poll_caller_hi: int = 0x200c962f,
         errno_scratch_addr: int = 0x04700000, errno_value: int = 0x46,
         verbose: bool = False, accept_block_ms: int = 0, recv_block_ms: int = 0,
+        recv_flags_arg: int = 3,
     ) -> HandlerFunction:  # pylint: disable=unused-argument
         self.func_names[addr] = func_name
         if not self._server_started:
@@ -138,6 +146,7 @@ class SocketBridge(BPHandler):
             self.verbose = bool(verbose)
             self.accept_block_ms = int(accept_block_ms)
             self.recv_block_ms = int(recv_block_ms)
+            self.recv_flags_arg = int(recv_flags_arg)
             self._server_started = True
             t = threading.Thread(target=self._server_thread, name="SocketBridge-502",
                                  daemon=True)
@@ -330,6 +339,20 @@ class SocketBridge(BPHandler):
             return False, None      # not a bridge socket -> real recv
         buf = qemu.get_arg(1)
         length = qemu.get_arg(2)
+        # recv()'s flags were read by nobody: get_arg(3) had zero occurrences in
+        # this file, so every recv was serviced as if flags were 0. MSG_PEEK is
+        # the one that silently corrupts a session -- it promises to leave the
+        # bytes in the queue, and we consumed them. Firmware that peeks a header
+        # to learn a frame length and then recv()s the frame therefore lost the
+        # header, and every subsequent read was misframed by exactly that many
+        # bytes: a protocol desync with no error anywhere, in the handler or in
+        # the guest. MSG_DONTWAIT is cheap to honour at the same time and stops
+        # recv_block_ms stalling a caller that explicitly asked not to block.
+        flags = 0
+        if self.recv_flags_arg >= 0:
+            flags = qemu.get_arg(self.recv_flags_arg) or 0
+        peek = bool(flags & _MSG_PEEK)
+        dontwait = bool(flags & _MSG_DONTWAIT)
         # Optional block-wait for the request bytes. The firmware reads the socket
         # non-blocking and, when its __errno is not bridged, treats a -1
         # (EWOULDBLOCK) as a fatal "transfer interrupted" and aborts the request.
@@ -337,7 +360,7 @@ class SocketBridge(BPHandler):
         # clean EOF on peer half-close) for up to that long before falling back to
         # -1, so the already-sent request is delivered instead of dropped. Single-
         # threaded emu: keep it short. (0 = original non-blocking behaviour.)
-        if self.recv_block_ms > 0:
+        if self.recv_block_ms > 0 and not dontwait:
             deadline = time.time() + self.recv_block_ms / 1000.0
             while time.time() < deadline:
                 with self._lock:
@@ -349,7 +372,8 @@ class SocketBridge(BPHandler):
             if have > 0:
                 n = min(length, have)
                 chunk = bytes(conn.rx[:n])
-                del conn.rx[:n]
+                if not peek:
+                    del conn.rx[:n]
             elif conn.state == "peer_closed":
                 n = 0
                 chunk = b""
@@ -359,7 +383,8 @@ class SocketBridge(BPHandler):
         if n > 0:
             qemu.write_memory_bytes(buf, chunk)
             if self.verbose:
-                hlog.info("SocketBridge.recv: fd %d -> %d bytes", fd, n)
+                hlog.info("SocketBridge.recv: fd %d -> %d bytes%s", fd, n,
+                          " (peek)" if peek else "")
             return True, n
         if n == 0:
             hlog.info("SocketBridge.recv: fd %d peer closed", fd)

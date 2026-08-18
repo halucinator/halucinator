@@ -39,15 +39,25 @@ class InProcessIrqMixin:
     _prefer_shadow_irq: bool = False
 
     # -- Cortex-M EXC_RETURN -----------------------------------------------
+    # -- Cortex-M EXC_RETURN -----------------------------------------------
     # A PC in the EXC_RETURN range is an ISR doing `bx lr`. On a part with an
     # FPU the value also carries bit 4 = "no floating-point context stacked",
-    # so an FP-context return is 0xFFFFFFE1/E9/ED -- masking to the top nibble
-    # (0xFFFFFFFx) silently fails to recognise those, and the ISR's `bx lr`
-    # is then executed as a branch to an unmapped address. Match bits 31:5
-    # instead, which is what the architecture defines.
+    # so an FP-context return is 0xFFFFFFE1/E9/ED.
     _EXC_RETURN_THREAD_MSP = 0xFFFFFFF9
-    _EXC_RETURN_MASK = 0xFFFFFFE0
-    _EXC_RETURN_MAGIC = 0xFFFFFFE0
+    # Bits[31:7], not bits[31:5]. ARMv8-M puts two more flags below the v7-M
+    # ones -- bit 6 = S (secure), bit 5 = DCRS -- so a plain non-secure thread
+    # return is 0xFFFFFFBC, which a 0xFFFFFFE0 window misses. Nothing complains
+    # when that happens: the value is not taken for an exception return, the
+    # ISR's `bx lr` branches to 0xFFFFFFBC as if it were an address, and the
+    # core faults there for the rest of the run while the host side carries on
+    # reporting a healthy boot. An nRF9160 rehost produced 1.8 GB of
+    # `CPU exception 3 at pc=0xffffffbc` in four minutes this way.
+    #
+    # Widening only ever adds values, and the test sweeps the old window to
+    # prove it. 0xFFFFFF80..0xFFFFFFFF is reserved for EXC_RETURN, so there is
+    # nothing else that could legitimately land in the range we gained.
+    _EXC_RETURN_MASK = 0xFFFFFF80
+    _EXC_RETURN_MAGIC = 0xFFFFFF80
 
     def _decode_exc_return_frame(self, pc: int):
         """If *pc* is a Cortex-M EXC_RETURN magic value, read and unpack the
