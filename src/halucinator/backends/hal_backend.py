@@ -865,6 +865,52 @@ class SPARCHalMixin(_ABIBase):
 # Map halucinator arch strings → the mixin class that provides calling
 # conventions. QEMUBackend/UnicornBackend/others look this up to pick
 # the right ABI at instantiation time.
+
+class M68KHalMixin(_ABIBase):
+    """
+    Motorola 68000 / ColdFire ABI (System V m68k): all arguments are passed on
+    the STACK, the return address is the longword at [sp] after a ``jsr``, and
+    the return value comes back in ``d0``.
+
+    Stack at function entry (jsr has already pushed the return address):
+        [sp] = return addr, [sp+4] = arg0, [sp+8] = arg1, ...
+    """
+    WORD_SIZE = 4
+    REGISTERS = (
+        tuple(f"d{i}" for i in range(8))
+        + tuple(f"a{i}" for i in range(8))
+        + ("pc", "sr")
+    )
+
+    def get_arg(self, idx: int) -> int:
+        if idx < 0:
+            raise ValueError(f"Argument index must be non-negative, got {idx}")
+        sp = self.read_register("sp")
+        return self.read_memory(sp + (idx + 1) * 4, 4, 1)
+
+    def set_args(self, args: List[int]) -> None:
+        # Write the args above the return address without moving sp; the
+        # caller owns stack cleanup, as on x86 cdecl.
+        sp = self.read_register("sp")
+        for i, v in enumerate(args):
+            self.write_memory(sp + (i + 1) * 4, 4, v)
+
+    def get_ret_addr(self) -> int:
+        return self.read_memory(self.read_register("sp"), 4, 1)
+
+    def set_ret_addr(self, ret_addr: int) -> None:
+        self.write_memory(self.read_register("sp"), 4, ret_addr)
+
+    def execute_return(self, ret_value: int) -> None:
+        # Emulate `rts`: pop the return address and jump to it.
+        sp = self.read_register("sp")
+        ret_addr = self.read_memory(sp, 4, 1)
+        regs = {"sp": sp + 4, "pc": ret_addr}
+        if ret_value is not None:
+            regs["d0"] = ret_value & 0xFFFFFFFF
+        self.write_registers(regs)
+        self.cont()
+
 ABI_MIXINS: Dict[str, type] = {
     "cortex-m3": ARM32HalMixin,
     "arm":       ARM32HalMixin,
@@ -888,4 +934,5 @@ ABI_MIXINS: Dict[str, type] = {
     # the first intercept to read an argument dies with "Unknown register:
     # 'r0'", because r0 is not in the SPARC register map.
     "sparc":     SPARCHalMixin,
+    "m68k":      M68KHalMixin,
 }

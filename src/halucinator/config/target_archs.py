@@ -183,6 +183,24 @@ def _get_halucinator_targets() -> Dict[str, Dict[str, Any]]:
                 _QEMU_DEFAULT_LOC, "sparc-softmmu/qemu-system-sparc"
             ),
         },
+        # Motorola 68000 family, big-endian: ColdFire (MCF5206/5208/V4e) and
+        # the classic 68000/020/040/060. In-process unicorn backend only --
+        # avatar2 has no m68k arch and this fleet ships no m68k-softmmu, so
+        # avatar_arch is None and the qemu_target lambda is a tripwire that is
+        # never invoked on the unicorn path (which reads the mode from
+        # unicorn_backend._ARCH_MAP). Registered here purely so HalConfig's
+        # `arch not in HALUCINATOR_TARGETS` validation accepts the config.
+        "m68k": {
+            "avatar_arch": None,
+            "qemu_target": lambda: (_ for _ in ()).throw(
+                NotImplementedError(
+                    "m68k runs on the in-process unicorn backend only "
+                    "(--emulator unicorn); no avatar2/qemu m68k target")),
+            "qemu_env_var": "HALUCINATOR_QEMU_M68K",
+            "qemu_default_path": os.path.join(
+                _QEMU_DEFAULT_LOC, "m68k-softmmu/qemu-system-m68k"
+            ),
+        },
     }
 
 
