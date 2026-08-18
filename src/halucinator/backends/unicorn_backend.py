@@ -2399,6 +2399,35 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _with_m_profile_privilege(self, fn):
+        """Run fn() with the core briefly in handler mode.
+
+        Reading MSP/PSP unprivileged gives 0, and writing them does nothing --
+        QEMU's MRS/MSR helpers require privilege for the banked SPs. An MPU
+        RTOS runs its tasks unprivileged (FreeRTOS ARM_CM4_MPU sets CONTROL=3
+        in prvRestoreContextOfFirstTask), so the snapshot path has to get out
+        of that state before it can see the real stack pointers.
+
+        IPSR != 0 means handler mode, which is privileged. Set it, do the work,
+        put it back. Nothing else in xPSR is touched. Already in handler mode,
+        or no IPSR constant in this unicorn build: nothing to do.
+
+        Exception entry uses the same trick.
+        """
+        ipsr_rid = getattr(arm_const, "UC_ARM_REG_IPSR", None)
+        if ipsr_rid is None:
+            return fn()
+        saved = self._uc.reg_read(ipsr_rid)
+        entered = saved == 0
+        if entered:
+            # Any non-zero exception number gets us handler mode.
+            self._uc.reg_write(ipsr_rid, 2)
+        try:
+            return fn()
+        finally:
+            if entered:
+                self._uc.reg_write(ipsr_rid, saved)
+
     def _capture_portable_regs(self) -> Dict[str, Any]:
         """Architectural state as plain python values — safe to pickle and
         restore in a different process (unlike a raw uc context blob)."""
@@ -2421,6 +2450,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                     sysregs[suffix.lower()] = uc.reg_read(rid)
                 except Exception:  # noqa: BLE001
                     continue
+
+            # The loop above read MSP/PSP without privilege, so on an MPU
+            # guest (CONTROL.nPRIV=1) both came back 0. Re-read them properly.
+            # Skipping this costs you MSP=PSP=0 in the snapshot, and the
+            # restore writes those back happily -- it blows up later, at the
+            # next exception, pushing a frame at address 0.
+            def _reread_banked_sps():
+                for s in ("MSP", "PSP"):
+                    rid = getattr(arm_const, f"UC_ARM_REG_{s}", None)
+                    if rid is None:
+                        continue
+                    try:
+                        sysregs[s.lower()] = uc.reg_read(rid)
+                    except Exception:  # noqa: BLE001
+                        continue
+            self._with_m_profile_privilege(_reread_banked_sps)
+
             state["m_sysregs"] = sysregs
             state["vfp"] = self._capture_vfp()  # FPU-equipped M-profile
         else:
@@ -2450,15 +2496,23 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
             self._restore_vfp(state["vfp"])
         if "banked" in state:
             self._restore_banked_regs(state["banked"])
-        for suffix_l, value in state.get("m_sysregs", {}).items():
-            rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
-            if rid is None:
-                continue
-            try:
-                uc.reg_write(rid, value)
-            except Exception:  # noqa: BLE001
-                log.warning("restore_state: m-profile %s not writable; "
-                            "skipped", suffix_l)
+        # Same privilege problem on the way back in: an MSR to MSP/PSP is
+        # dropped if we are unprivileged when we get here, which depends on
+        # whatever CONTROL the snapshot happens to restore. Do the writes in
+        # handler mode so they stick either way. The cpsr write further down
+        # sets the real mode.
+        def _write_m_sysregs():
+            for suffix_l, value in state.get("m_sysregs", {}).items():
+                rid = getattr(arm_const, f"UC_ARM_REG_{suffix_l.upper()}", None)
+                if rid is None:
+                    continue
+                try:
+                    uc.reg_write(rid, value)
+                except Exception:  # noqa: BLE001
+                    log.warning("restore_state: m-profile %s not writable; "
+                                "skipped", suffix_l)
+        if state.get("m_sysregs"):
+            self._with_m_profile_privilege(_write_m_sysregs)
         ordered = sorted(regs,
                          key=lambda n: (0 if n == "cpsr" else
                                         2 if n == "pc" else 1))
