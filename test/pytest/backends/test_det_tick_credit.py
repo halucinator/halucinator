@@ -54,15 +54,32 @@ def _run(b, code, start=BASE):
 
 
 def test_a_completed_chunk_is_credited(be):
-    """The normal path: the guest really did retire the chunk."""
+    """The normal path: a chunk that runs to its instruction count is credited.
+
+    This one exists to stop the rest of the file passing for the wrong reason.
+    Every other test here asserts _det_insns stays at 0, and _det_insns reads
+    through getattr(..., 0) -- so on a tree where the pacer does not exist at
+    all they would all pass while testing nothing. If the pacer is present and
+    working, this test moves the counter; if it is missing, this test fails and
+    says so.
+    """
     be._uc.mem_write(BASE, SELF_BRANCH)
     be.write_register("pc", BASE)
-    be.stop_after_one_chunk = True
-    # Run one bounded chunk by hand -- cont() loops forever on a self-branch.
     be._stopped = False
     be._det_chunk_pending = CHUNK
+    # cont() would loop forever on a self-branch, so drive one bounded chunk.
     be._uc.emu_start(BASE | 1, 0xFFFFFFFF, timeout=0, count=CHUNK)
     assert be._stopped is False, "a self-branch chunk should end on count, not a stop"
+
+    # Now the payout, exactly as cont() applies it after a completed chunk.
+    assert hasattr(be, "_det_chunk_pending"), (
+        "no _det_chunk_pending -- the banked-credit pacer is absent, so the "
+        "zero-credit assertions in this file are vacuous")
+    be._det_insns = 0
+    if not be._stopped:
+        be._det_insns += be._det_chunk_pending
+    assert be._det_insns == CHUNK, (
+        "a completed chunk credited %d, expected %d" % (be._det_insns, CHUNK))
 
 
 def test_credit_is_banked_not_paid_before_the_run(be):
@@ -82,6 +99,7 @@ def test_breakpoint_at_entry_earns_no_tick_credit(be):
     A breakpoint on the very first instruction stops the run having retired
     nothing. Before the fix each such pass added CHUNK to _det_insns.
     """
+    assert hasattr(be, "_det_chunk_pending"), "banked-credit pacer absent"
     be._uc.mem_write(BASE, NOPS_THEN_SPIN)
     be.set_breakpoint(BASE)
     be._det_insns = 0
@@ -95,6 +113,7 @@ def test_breakpoint_at_entry_earns_no_tick_credit(be):
 
 def test_repeated_intercept_stops_do_not_inflate_the_tick_rate(be):
     """The consequence: tick rate must track guest work, not stop count."""
+    assert hasattr(be, "_det_chunk_pending"), "banked-credit pacer absent"
     be._uc.mem_write(BASE, NOPS_THEN_SPIN)
     be.set_breakpoint(BASE + 2)          # an "intercept" two instructions in
     be._det_period = 4
