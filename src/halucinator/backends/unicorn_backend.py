@@ -424,6 +424,7 @@ def _get_riscv_reg_map() -> Dict[str, int]:
         m[name] = m[f"x{idx}"]
     m["pc"] = riscv_const.UC_RISCV_REG_PC
     _REG_MAPS_CACHE["riscv"] = m
+    return m
 def _get_m68k_reg_map() -> Dict[str, int]:
     if "m68k" in _REG_MAPS_CACHE:
         return _REG_MAPS_CACHE["m68k"]
