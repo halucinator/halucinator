@@ -42,7 +42,14 @@ class TakesDbPath:
 
 
 class TakesKwargsOnly:
-    """Accepts **kwargs — must be treated as accepting db_path."""
+    """Accepts **kwargs — must NOT be treated as accepting db_path.
+
+    A **kwargs constructor is not consent. Most peripherals declare one and
+    forward the rest somewhere else, so treating it as "accepts db_path"
+    injected a db_path into peripherals that never asked for one -- which is
+    how a catch-all peripheral started recording, and a device that boots
+    normally then failed to land. See _instantiate_peripheral.
+    """
 
     def __init__(self, name, address, size, **kwargs):
         self.name, self.address, self.size = name, address, size
@@ -64,17 +71,44 @@ def _mem(properties=None):
                                  size=0x1000, properties=properties)
 
 
-def test_db_path_is_forwarded(tmp_path):
+def test_db_path_is_forwarded(tmp_path, monkeypatch):
+    """Forwarding is opt-in via HAL_MMIO_TRACE=1 -- recording is not free."""
+    monkeypatch.setenv("HAL_MMIO_TRACE", "1")
     db = str(tmp_path / "trace.sqlite")
     inst = M._instantiate_peripheral(f"{_HERE}.TakesDbPath", _mem(), db)
     assert inst is not None
     assert inst.db_path == db, "db_path was accepted but not passed through"
 
 
-def test_kwargs_constructor_also_receives_it(tmp_path):
+def test_db_path_is_not_forwarded_unless_tracing_is_requested(tmp_path,
+                                                              monkeypatch):
+    """The gate, pinned.
+
+    Recording costs real time inside every MMIO access. Forwarding db_path
+    whenever a peripheral merely *accepts* it turns tracing on for every run and
+    cost a device its landing while leaving the boot looking healthy. Tracing is
+    now something a run asks for.
+    """
+    monkeypatch.delenv("HAL_MMIO_TRACE", raising=False)
+    db = str(tmp_path / "trace.sqlite")
+    inst = M._instantiate_peripheral(f"{_HERE}.TakesDbPath", _mem(), db)
+    assert inst is not None
+    assert inst.db_path is None, (
+        "db_path was forwarded without HAL_MMIO_TRACE=1 -- tracing is on for "
+        "every run again")
+
+
+def test_kwargs_constructor_does_not_receive_it(tmp_path, monkeypatch):
+    """**kwargs is not consent -- see TakesKwargsOnly.
+
+    Asserted with tracing explicitly ON, so the test isolates the
+    named-parameter rule rather than passing for want of the env gate.
+    """
+    monkeypatch.setenv("HAL_MMIO_TRACE", "1")
     db = str(tmp_path / "trace.sqlite")
     inst = M._instantiate_peripheral(f"{_HERE}.TakesKwargsOnly", _mem(), db)
-    assert inst.kwargs.get("db_path") == db
+    assert "db_path" not in inst.kwargs, (
+        "a **kwargs-only constructor was handed db_path it never declared")
 
 
 def test_peripheral_without_db_path_is_not_broken(tmp_path):

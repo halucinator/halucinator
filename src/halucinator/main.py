@@ -1053,11 +1053,17 @@ def _instantiate_peripheral(name: str, memory: Any, db_path: str) -> Any:
     # no db_path and would raise TypeError.
     try:
         params = inspect.signature(cls).parameters
-        takes_db = "db_path" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        # ONLY an explicitly named db_path parameter counts. A **kwargs
+        # constructor is not consent: most peripherals declare one and forward
+        # the rest elsewhere, so treating it as "accepts db_path" injects a
+        # db_path into peripherals that never asked for one.
+        takes_db = "db_path" in params
     except (TypeError, ValueError):  # pragma: no cover
         takes_db = False
-    if takes_db and db_path is not None:
+    # Opt in with HAL_MMIO_TRACE=1. Recording costs real time inside every MMIO
+    # access, so forwarding db_path whenever a peripheral merely *accepts* it
+    # turns tracing on for every run of every device.
+    if takes_db and db_path is not None and os.environ.get("HAL_MMIO_TRACE") == "1":
         kwargs["db_path"] = db_path
     # Pull peripheral-specific kwargs from the YAML `properties` block
     # (HalMemConfig.properties is the generic per-peripheral dict slot).
