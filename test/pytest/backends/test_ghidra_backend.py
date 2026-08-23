@@ -73,15 +73,16 @@ def test_exc_return_magic_matches_arm_v7m():
     specifically thread-mode + MSP. inject_irq relies on these exact values
     so the emulator never needs to talk to a real NVIC model.
 
-    The mask is bits 31:5 (0xFFFFFFE0), not the top nibble: on an FPU part
+    The mask is bits 31:7 (0xFFFFFF80), not the top nibble: on an FPU part
     bit 4 carries "no floating-point context stacked", so an FP-context
-    return is 0xFFFFFFE1/E9/ED. Matching only 0xFFFFFFFx would fail to
-    recognise those and the ISR's `bx lr` would branch to an unmapped
-    address."""
+    return is 0xFFFFFFE1/E9/ED, and ARMv8-M adds bit 6 (S) and bit 5 (DCRS)
+    below those, so a non-secure thread return is 0xFFFFFFBC. Matching only
+    0xFFFFFFFx -- or only bits 31:5 -- would fail to recognise those and the
+    ISR's `bx lr` would branch to an unmapped address."""
     from halucinator.backends.ghidra_backend import GhidraBackend
     assert GhidraBackend._EXC_RETURN_THREAD_MSP == 0xFFFFFFF9
-    assert GhidraBackend._EXC_RETURN_MASK == 0xFFFFFFE0
-    assert GhidraBackend._EXC_RETURN_MAGIC == 0xFFFFFFE0
+    assert GhidraBackend._EXC_RETURN_MASK == 0xFFFFFF80
+    assert GhidraBackend._EXC_RETURN_MAGIC == 0xFFFFFF80
     # Sanity-check the mask-match logic — non-FP frames...
     assert (0xFFFFFFF9 & GhidraBackend._EXC_RETURN_MASK) == \
            GhidraBackend._EXC_RETURN_MAGIC
@@ -91,6 +92,9 @@ def test_exc_return_magic_matches_arm_v7m():
     assert (0xFFFFFFE9 & GhidraBackend._EXC_RETURN_MASK) == \
            GhidraBackend._EXC_RETURN_MAGIC
     assert (0xFFFFFFED & GhidraBackend._EXC_RETURN_MASK) == \
+           GhidraBackend._EXC_RETURN_MAGIC
+    # ...and ARMv8-M non-secure returns, which a bits-31:5 window missed.
+    assert (0xFFFFFFBC & GhidraBackend._EXC_RETURN_MASK) == \
            GhidraBackend._EXC_RETURN_MAGIC
     # A normal code address must NOT match
     assert (0x08001234 & GhidraBackend._EXC_RETURN_MASK) != \

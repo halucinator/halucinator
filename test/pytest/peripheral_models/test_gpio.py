@@ -79,7 +79,11 @@ def test_update_gpio_does_not_depend_on_python2_builtins():
         "test harness leaked a raw_input shim into builtins")
     import inspect
     src = inspect.getsource(gpio.update_gpio)
-    assert "raw_input" not in src
+    # Comments are stripped first: the fixed code names the builtin it
+    # replaced, and that prose must not trip the guard.
+    code = "\n".join(line for line in src.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "raw_input" not in code
     assert "send_string" in src, (
         "encode_zmq_msg returns str; plain send() raises TypeError on it")
 

@@ -3697,6 +3697,7 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                               begin=_ISEN0, end=_ISEN0 + 0x10 - 1)
             self._uc.hook_add(unicorn.UC_HOOK_MEM_WRITE, _icenabler_write,
                               begin=_ICEN0, end=_ICEN0 + 0x10 - 1)
+
     def _effective_vtor(self) -> int:
         """The vector base the firmware is actually using, if discoverable.
 
