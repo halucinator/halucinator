@@ -68,7 +68,7 @@ To clean up: `docker rm halucinator`
 
 ## Setup in Virtual Environment
 
-Tested on Ubuntu 22.04 and 24.04.
+Tested on Ubuntu 22.04, 24.04, and 26.04.
 
 ### 1. Clone the repo and submodules
 
@@ -109,7 +109,22 @@ sudo apt-get install -y \
     clang-format ethtool tcpdump
 ```
 
-> **Note:** On Ubuntu 24.04, pip refuses to install packages outside a
+**Ubuntu 26.04 (Resolute):**
+```bash
+sudo apt-get update
+echo "deb-src http://archive.ubuntu.com/ubuntu/ resolute main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+echo "deb-src http://archive.ubuntu.com/ubuntu/ resolute-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+sudo apt-get update
+sudo apt-get build-dep -y qemu
+sudo apt-get install -y \
+    build-essential ca-certificates cmake ninja-build g++ git vim wget \
+    python3 python3-pip python3-venv python3-tk \
+    gdb-multiarch gcc-arm-none-eabi binutils-arm-none-eabi \
+    libaio-dev libglib2.0-dev libpixman-1-dev pkg-config \
+    clang-format ethtool tcpdump
+```
+
+> **Note:** On Ubuntu 24.04+, pip refuses to install packages outside a
 > virtual environment (PEP 668). Always use a venv as shown below.
 > The package `python-tk` was renamed to `python3-tk` starting in 22.04.
 
@@ -523,8 +538,8 @@ Tests are categorized with pytest markers defined in `conftest.py`:
 ### CI/CD
 
 The GitHub Actions workflow (`.github/workflows/virtual-environment-tests.yml`)
-runs on every push and pull request to master. It tests on both Ubuntu 22.04
-and 24.04 in parallel, builds QEMU for all architectures (cached per OS),
+runs on every push and pull request to master. It tests on Ubuntu 22.04,
+24.04, and 26.04 in parallel, builds QEMU for all architectures (cached per OS),
 runs QEMU smoke tests, all e2e firmware tests (STM32, Zephyr, multi-arch),
 and the full pytest suite with coverage reporting.
 

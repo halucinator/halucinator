@@ -1,7 +1,7 @@
 # Prerequisites
 
 This tutorial assumes you have HALucinator installed on Ubuntu 22.04 (also tested
-on 20.04) in a virtual environment named `halucinator`, and that the source is
+on 24.04 and 26.04) in a virtual environment named `halucinator`, and that the source is
 located in your home directory (e.g. ~/).  See the main repo README for setup
 instructions.
 
