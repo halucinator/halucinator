@@ -140,6 +140,11 @@ _PERM_MAP = {
 # do_interrupt, so the backend must finish the return -- see _m68k_handle_rte.
 _M68K_EXCP_RTE = 0x100
 
+# PowerPC MSR bits as LSB masks. The manuals number bits from the MSB: FP is bit 18
+# (32-bit) / bit 50 (64-bit), which is 0x2000 either way; SF is bit 0 (64-bit only).
+_PPC_MSR_FP = 1 << 13
+_PPC_MSR_SF = 1 << 63
+
 # Instruction budget per run chunk while an m68k interrupt is asserted but
 # masked. Small enough to land inside a short IPL-0 window in a spin loop,
 # large enough not to dominate when nothing is deferred.
@@ -864,16 +869,14 @@ class UnicornBackend(InProcessIrqMixin, ARMHalMixin, HalBackend):
                 log.warning("UnicornBackend: could not seed m68k SR "
                             "(supervisor) -- privileged init will trap: %s", exc)
 
-        # PPC64 needs MSR.SF=1 so the CPU decodes 64-bit instructions.
-        # Without it, any ld/std fires UC_ERR_EXCEPTION immediately.
-        # PPC32 has a similar challenge but needs MSR.FP=1
+        # Architecturally MSR[FP]=0 out of reset (firmware/OS enables it), so bare-metal
+        # images trap on their first FP instruction. OR in FP (and SF on PPC64); OR, not
+        # write, to keep Unicorn's reset bits such as PPC32 IP (0x40).
         if arch_str == "ppc":
             msr_reg = self._reg_map.get("msr")
             if msr_reg is not None:
-                if mode_str.startswith("ppc64"):
-                    self._uc.reg_write(msr_reg, 1 << 63)
-                else:
-                    self._uc.reg_write(msr_reg, 0x2000)
+                want = _PPC_MSR_FP | (_PPC_MSR_SF if mode_str.startswith("ppc64") else 0)
+                self._uc.reg_write(msr_reg, self._uc.reg_read(msr_reg) | want)
 
         for region in self._regions:
             self._map_region(region)

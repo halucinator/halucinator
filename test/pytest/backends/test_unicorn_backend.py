@@ -374,3 +374,30 @@ class TestUnicornPowerPC:
 
         msr = b.read_register("msr")
         assert msr & (1 << 63) != 0, f"Expected MSR.SF set, got {hex(msr)}"
+
+    def test_ppc32_msr_seed_preserves_reset_bits(self):
+        """Seeding FP must OR into the reset MSR, not replace it. Unicorn resets PPC32
+        with MSR[IP]=1 (0x40, vectors at 0xFFFn_nnnn); clearing it moves every
+        exception vector without any error.
+        """
+        from halucinator.backends.hal_backend import MemoryRegion
+        reset_msr = unicorn.Uc(unicorn.UC_ARCH_PPC,
+                               unicorn.UC_MODE_PPC32 | unicorn.UC_MODE_BIG_ENDIAN
+                               ).reg_read(unicorn.ppc_const.UC_PPC_REG_MSR)
+        b = UnicornBackend(arch="powerpc")
+        b.add_memory_region(MemoryRegion("ram", 0x10000, 0x1000, "rwx"))
+        b.init()
+
+        msr = b.read_register("msr")
+        assert msr == reset_msr | 0x2000, f"reset {hex(reset_msr)} -> {hex(msr)}"
+
+    def test_ppc64_msr_sets_both_sf_and_fp(self):
+        """PPC64 must come up with SF (64-bit mode) and FP (floating point available)."""
+        from halucinator.backends.hal_backend import MemoryRegion
+        b = UnicornBackend(arch="ppc64")
+        b.add_memory_region(MemoryRegion("ram", 0x10000, 0x1000, "rwx"))
+        b.init()
+
+        msr = b.read_register("msr")
+        assert msr & (1 << 63), f"MSR.SF missing: {hex(msr)}"
+        assert msr & 0x2000, f"MSR.FP missing: {hex(msr)}"
